@@ -52,6 +52,14 @@ def ontology_report_codes(report: OntologyReport) -> tuple[str, ...]:
 
 
 def validate_ontology(ontology: Ontology) -> OntologyReport:
+    """Check reference legality of concepts, definitions, units and relations.
+
+    ``Ontology.calendar`` is deliberately **not inspected**. Trading-day
+    semantics belong to time-window splitting (``external:decompose``), and the
+    freshness check works in natural days, so no core judgment reads it. core
+    only guarantees it is carried through unchanged -- neither validated nor
+    interpreted here.
+    """
     violations: list[OntologyViolation] = []
 
     concepts: Mapping[str, Concept] = ontology.concepts
@@ -136,6 +144,7 @@ def validate_ontology(ontology: Ontology) -> OntologyReport:
         cycle = tuple(str(part) for part in exc.args[1]) if len(exc.args) > 1 else ()
         violations.append(OntologyViolation("parent_cycle", f"concept hierarchy has a cycle: {cycle}", cycle))
 
+    # ontology.calendar is intentionally not visited here: external:decompose.
     return OntologyReport(violations=tuple(violations))
 
 

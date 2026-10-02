@@ -142,3 +142,16 @@ def test_mini_fixtures_are_usable() -> None:
     assert ontology.is_frozen
     item = subtask("T-01", output="out.csv")
     assert item.mode == "read"
+
+
+def test_limits_defaults_name_concrete_rulers() -> None:
+    limits = Limits()
+    assert limits.cost_unit == "calls"
+    assert limits.output_unit == "tokens"
+
+
+def test_limits_rejects_an_empty_ruler_name() -> None:
+    with pytest.raises(ValueError):
+        Limits(cost_unit="")
+    with pytest.raises(ValueError):
+        Limits(output_unit="")

@@ -5,6 +5,22 @@ validation, no I/O, no environment access. All ordering that can leak into a
 decision is explicit (tuples, or sorted iteration over mappings) so that the
 same input always yields the same output regardless of process hash seed.
 
+Field reader rule (spec §5.0)
+-----------------------------
+Every dataclass field carries exactly one reader marker as a trailing comment:
+
+  ``core:<module>``    a decision in that core module reads the field
+  ``external:<module>``a declared boundary consumer reads it; core decides nothing
+  ``passthrough:<why>`` no decision reads it today; the reason is mandatory
+
+Construction-time validation and the content hash are deliberately **not**
+counted as readers: if they were, every field would trivially "have a reader"
+and the rule would be vacuous. Fields whose only use is validation or hashing
+are therefore marked ``passthrough``, and the ones with no reader anywhere are
+listed in the delivery report rather than given a convincing-looking marker.
+
+``tests/test_arch_guard.py::test_every_field_declares_a_reader`` enforces this.
+
 Inference notes (the spec names these concepts but does not pin every field;
 they are marked so a later doc sync can confirm them):
   * ``Limits`` / ``WorkerLimits`` / ``ResourceUse`` / ``Budget`` carry the
@@ -124,12 +140,12 @@ def content_digest(value: Any) -> str:
 
 @dataclass(frozen=True)
 class Concept:
-    id: str
-    label: str
-    kind: str
-    domain: str
-    parent: str | None = None
-    aliases: tuple[str, ...] = ()
+    id: str  # core:ontology —— 概念表键、映射、层级图都读它
+    label: str  # core:ontology —— 别名消歧与 map_field 的标签匹配读它
+    kind: str  # passthrough: 仅构造期枚举校验与冻结哈希；无判定读它
+    domain: str  # passthrough: 仅冻结哈希；无判定读它
+    parent: str | None = None  # core:ontology —— 层级/环检测读它
+    aliases: tuple[str, ...] = ()  # core:ontology —— map_field 与别名冲突检测读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.id, "Concept.id must not be empty")
@@ -139,11 +155,11 @@ class Concept:
 
 @dataclass(frozen=True)
 class Definition:
-    concept_id: str
-    version: str
-    text: str
-    formula: str | None = None
-    edge_cases: tuple[str, ...] = ()
+    concept_id: str  # core:ontology —— definition_orphan 与 pinned_version 读它
+    version: str  # core:ontology —— definition_pin 与口径归一读它
+    text: str  # passthrough: 人读的口径文本，core 不解释（仅冻结哈希）
+    formula: str | None = None  # passthrough: 可选形式化文本；无判定读它
+    edge_cases: tuple[str, ...] = ()  # passthrough: 人读的边界说明；无判定读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.concept_id, "Definition.concept_id must not be empty")
@@ -152,10 +168,10 @@ class Definition:
 
 @dataclass(frozen=True)
 class Unit:
-    concept_id: str
-    symbol: str
-    scale: float
-    base: str
+    concept_id: str  # core:ontology —— resolve_unit 读它
+    symbol: str  # core:ontology —— unit_consistency 与 convert_value 读它
+    scale: float  # core:ontology —— convert_value 的缩放读它
+    base: str  # core:ontology —— convert_value 的同基准校验读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.concept_id, "Unit.concept_id must not be empty")
@@ -168,10 +184,10 @@ class Unit:
 
 @dataclass(frozen=True)
 class Relation:
-    src: str
-    dst: str
-    kind: str
-    cardinality: str
+    src: str  # core:ontology —— 端点存在性校验读它
+    dst: str  # core:ontology —— 端点存在性校验读它
+    kind: str  # passthrough: 仅构造期枚举校验与冻结哈希；ontology 只查端点
+    cardinality: str  # passthrough: 声明性元数据；无判定读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.src, "Relation.src must not be empty")
@@ -184,14 +200,18 @@ class Relation:
 
 @dataclass(frozen=True)
 class Ontology:
-    domain: str
-    version: str
-    concepts: Mapping[str, Concept]
-    definitions: Mapping[str, Definition]
-    units: Mapping[str, Unit]
-    relations: tuple[Relation, ...] = ()
-    code_systems: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    calendar: Mapping[str, Any] = field(default_factory=dict)
+    domain: str  # passthrough: 仅构造期非空校验与冻结哈希；无判定读它
+    version: str  # passthrough: 领域版本，仅冻结哈希；口径版本走 Definition.version
+    concepts: Mapping[str, Concept]  # core:ontology —— 校验/映射/层级读它
+    definitions: Mapping[str, Definition]  # core:ontology —— 口径版本判定读它
+    units: Mapping[str, Unit]  # core:ontology —— 单位一致性读它
+    relations: tuple[Relation, ...] = ()  # core:ontology —— 端点校验读它
+    code_systems: Mapping[str, tuple[str, ...]] = field(  # core:checkers —— code_valid 读它
+        default_factory=dict
+    )
+    calendar: Mapping[str, Any] = field(  # external:decompose —— 时间窗切分用；core 不读、不校验
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         _require_non_empty(self.domain, "Ontology.domain must not be empty")
@@ -212,7 +232,9 @@ class Ontology:
 
         ``frozen=True`` stops attribute rebinding but not mutation of the nested
         dicts, so the "shared semantics frozen before the first worker starts"
-        requirement needs an explicit deep freeze.
+        requirement needs an explicit deep freeze. ``calendar`` is frozen like
+        everything else but never inspected: it is carried through untouched for
+        the boundary module that owns trading-day semantics.
         """
         return Ontology(
             domain=self.domain,
@@ -266,6 +288,8 @@ class Ontology:
                     for r in self.relations
                 ],
                 "code_systems": {k: list(v) for k, v in self.code_systems.items()},
+                # Carried through so a change to trading-day data also breaks the
+                # freeze witness; core never interprets the content.
                 "calendar": dict(self.calendar),
             }
         )
@@ -292,9 +316,11 @@ def _deep_freeze_mapping(value: Mapping[Any, Any]) -> Mapping[Any, Any]:
 
 @dataclass(frozen=True)
 class DeliverableSpec:
-    name: str
-    schema: Mapping[str, str] = field(default_factory=dict)
-    required: bool = True
+    name: str  # core:split —— deliverable_names 供 no_orphan / cut_complete 读
+    schema: Mapping[str, str] = field(  # external:contract —— 产物字段契约，core 不读
+        default_factory=dict
+    )
+    required: bool = True  # passthrough: 声明必交性；无判定读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "DeliverableSpec.name must not be empty")
@@ -302,8 +328,8 @@ class DeliverableSpec:
 
 @dataclass(frozen=True)
 class SourceRef:
-    ref: str
-    locator: str = ""
+    ref: str  # external:sources —— SourcePort.fetch 的入参
+    locator: str = ""  # external:sources —— 取回定位，core 不读
 
     def __post_init__(self) -> None:
         _require_non_empty(self.ref, "SourceRef.ref must not be empty")
@@ -313,11 +339,11 @@ class SourceRef:
 class TaskContract:
     """The task as data. Parsing a task file is a later unit's job."""
 
-    task_id: str
-    goal: str
-    deliverables: tuple[DeliverableSpec, ...] = ()
-    sources: tuple[SourceRef, ...] = ()
-    notes: str = ""
+    task_id: str  # external:cli —— 装配与报告用；core 判定不读
+    goal: str  # external:decompose —— 切分策略读它
+    deliverables: tuple[DeliverableSpec, ...] = ()  # core:split —— deliverable_names 供切分/装配判定读
+    sources: tuple[SourceRef, ...] = ()  # external:sources —— 取网实现读它
+    notes: str = ""  # passthrough: 人读备注；无判定读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.task_id, "TaskContract.task_id must not be empty")
@@ -329,20 +355,20 @@ class TaskContract:
 
 @dataclass(frozen=True)
 class Subtask:
-    id: str
-    goal: str
-    inputs: tuple[str, ...]
-    output: str
-    contract_ref: str
-    axis: str
-    mode: str
-    partition: str | None = None
+    id: str  # core:split —— 各检查按 id 定位与报错
+    goal: str  # external:agentloop —— worker 只看得见自己这块的目标
+    inputs: tuple[str, ...]  # core:split —— 星形/接口/环判定读它
+    output: str  # core:split —— 接口完整性与产出定位读它
+    contract_ref: str  # external:agentloop —— runtime 取契约用；core 不读
+    axis: str  # core:split —— axis_uniform 读它
+    mode: str  # core:split —— write_serial 读它
+    partition: str | None = None  # core:split —— 同级 write 分区互斥判定读它
     # Inference: the schema the consumer expects for each named input, so
     # `iface_match` has something to compare against the producer declaration.
-    expects: tuple[tuple[str, str], ...] = ()
+    expects: tuple[tuple[str, str], ...] = ()  # core:split —— iface_match 读它
     # Inference: which ontology-mapped fields this block produces, so
     # `concept_mapped` is checkable.
-    output_fields: tuple[str, ...] = ()
+    output_fields: tuple[str, ...] = ()  # core:split —— concept_mapped 读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.id, "Subtask.id must not be empty")
@@ -358,8 +384,8 @@ class Subtask:
 class PlanCosts:
     """Estimated merge cost and execution cost, in the same abstract unit."""
 
-    merge: float
-    execute: float
+    merge: float  # core:split —— merge_cheap / merge_cost 读它
+    execute: float  # core:split —— 与 merge 作比的执行代价，判定读它
 
     def __post_init__(self) -> None:
         _require(self.merge >= 0.0, "PlanCosts.merge must be >= 0")
@@ -368,14 +394,16 @@ class PlanCosts:
 
 @dataclass(frozen=True)
 class SplitPlan:
-    task_id: str
-    version: int
-    round: int
-    subtasks: tuple[Subtask, ...]
-    shape: str
-    interfaces: Mapping[str, str] = field(default_factory=dict)
-    recon_evidence: str = ""
-    costs: PlanCosts | None = None
+    task_id: str  # external:cli —— 装配与报告用；core 判定不读
+    version: int  # external:decompose —— 方案版本号，供迭代与续跑对齐
+    round: int  # core:split —— round_budget 读它
+    subtasks: tuple[Subtask, ...]  # core:split —— 全部合法性检查遍历它
+    shape: str  # core:split —— star 检查读它
+    interfaces: Mapping[str, str] = field(  # core:split —— iface_complete / iface_match 读它
+        default_factory=dict
+    )
+    recon_evidence: str = ""  # passthrough: 侦察结论文字；无判定读它（R0 强制靠流程）
+    costs: PlanCosts | None = None  # core:split —— merge_cheap 读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.task_id, "SplitPlan.task_id must not be empty")
@@ -390,17 +418,19 @@ class SplitPlan:
 
 @dataclass(frozen=True)
 class InputSurvey:
-    source_refs: tuple[str, ...] = ()
-    byte_size: int = 0
-    shape: str = ""
-    notes: str = ""
+    source_refs: tuple[str, ...] = ()  # external:adapters —— 本体起草读它
+    byte_size: int = 0  # external:adapters —— 规模估计，起草读它
+    shape: str = ""  # external:adapters —— 输入形态，起草读它
+    notes: str = ""  # external:adapters —— 起草提示，core 不读
 
 
 @dataclass(frozen=True)
 class Recon:
-    evidence: str = ""
-    source_ids: tuple[str, ...] = ()
-    findings: tuple[str, ...] = ()
+    evidence: str = ""  # external:decompose —— 切分策略读侦察结论
+    source_ids: tuple[str, ...] = ()  # external:decompose —— 侦察覆盖的源，切分读它
+    findings: tuple[str, ...] = ()  # passthrough: 侦察发现条目；无判定读它
+
+    # 说明：Recon 整体只作为 DecomposerPort.split 的入参出现，core 不解释它。
 
 
 # --------------------------------------------------------------------------- #
@@ -410,11 +440,11 @@ class Recon:
 
 @dataclass(frozen=True)
 class Constraint:
-    id: str
-    kind: str
-    target: str
-    spec: Mapping[str, Any]
-    rationale: str
+    id: str  # core:kernel —— 判定顺序、失败清单与证据键读它
+    kind: str  # core:checkers —— 分派到哪个 checker 读它
+    target: str  # core:checkers —— 定位被判定对象读它
+    spec: Mapping[str, Any]  # core:checkers —— 各 kind 的参数都在这里，checker 读它
+    rationale: str  # passthrough: 强制非空的人读理由；无判定读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.id, "Constraint.id must not be empty")
@@ -425,15 +455,21 @@ class Constraint:
 
 @dataclass(frozen=True)
 class Limits:
-    """Capacity ceilings and thresholds. No unit is interpreted by ``core``."""
+    """Capacity ceilings and thresholds.
 
-    max_rounds: int = MAX_ROUNDS
-    merge_cost_ratio: float = 0.5
-    tol: float = 1e-9
-    provenance_min_coverage: float = 0.95
-    corroboration_min_sources: int = 2
-    cost_unit: str = "declared"
-    output_unit: str = "declared"
+    ``cost_unit`` / ``output_unit`` are *rulers*, not quantities: they name what
+    the numbers are counted in, and ``consist.py`` refuses to compare numbers
+    declared under different rulers. core checks whether the rulers agree; it
+    never interprets what a ruler means (same discipline as ``ontology.py``).
+    """
+
+    max_rounds: int = MAX_ROUNDS  # core:split —— round_budget 读它
+    merge_cost_ratio: float = 0.5  # core:split —— merge_cheap 的阈值，判定读它
+    tol: float = 1e-9  # core:checkers —— range/relation 的容差默认值
+    provenance_min_coverage: float = 0.95  # core:checkers —— provenance 覆盖下限
+    corroboration_min_sources: int = 2  # core:checkers —— corroboration 来源数下限
+    cost_unit: str = "calls"  # core:consist —— 成本尺子一致性检查读它
+    output_unit: str = "tokens"  # core:consist —— 输出尺子一致性检查读它（不是字节）
 
     def __post_init__(self) -> None:
         _require(self.max_rounds >= 0, "Limits.max_rounds must be >= 0")
@@ -441,6 +477,7 @@ class Limits:
         _require(self.tol >= 0.0, "Limits.tol must be >= 0")
         _require(0.0 <= self.provenance_min_coverage <= 1.0, "provenance_min_coverage must be in [0, 1]")
         _require(self.corroboration_min_sources >= 1, "corroboration_min_sources must be >= 1")
+        _require(self.cost_unit != "" and self.output_unit != "", "ruler names must not be empty")
 
 
 DEFAULT_LIMITS = Limits()
@@ -448,14 +485,16 @@ DEFAULT_LIMITS = Limits()
 
 @dataclass(frozen=True)
 class ConstraintBundle:
-    task_id: str
-    version: int
-    hard: tuple[Constraint, ...] = ()
-    soft: tuple[Constraint, ...] = ()
-    blind: tuple[str, ...] = ()
-    unmapped: tuple[tuple[str, str], ...] = ()
-    limits: Limits = DEFAULT_LIMITS
-    provenance: Mapping[str, str] = field(default_factory=dict)
+    task_id: str  # external:cli —— 装配与报告用；core 判定不读
+    version: int  # external:decompose —— 约束包版本号，供迭代对齐
+    hard: tuple[Constraint, ...] = ()  # core:kernel —— admit 的判定集
+    soft: tuple[Constraint, ...] = ()  # core:kernel —— 只计分不判定的约束
+    blind: tuple[str, ...] = ()  # core:consist —— stale_blind 读它
+    unmapped: tuple[tuple[str, str], ...] = ()  # core:split —— concept_mapped 读它
+    limits: Limits = DEFAULT_LIMITS  # core:checkers —— 阈值与尺子都由它提供
+    provenance: Mapping[str, str] = field(  # passthrough: 约束包来源说明；无判定读它
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         _require_non_empty(self.task_id, "ConstraintBundle.task_id must not be empty")
@@ -477,28 +516,28 @@ class ConstraintBundle:
 class BlindSpot:
     """Divergence caused by constraint silence -> add a constraint."""
 
-    path: str
-    left: Any
-    right: Any
-    magnitude: float | None = None
+    path: str  # core:kernel —— 去重与决策读它
+    left: Any  # core:kernel —— 去重读它
+    right: Any  # core:kernel —— 去重读它
+    magnitude: float | None = None  # passthrough: 差异幅度，供边界外裁决/报告；core 只填不读
 
 
 @dataclass(frozen=True)
 class Conflict:
     """Same definition, different sources, different values -> record both."""
 
-    concept_id: str
-    definition_version: str
-    claims: tuple[tuple[str, Any, Provenance], ...]
+    concept_id: str  # core:kernel —— 去重与分类决策读它
+    definition_version: str  # external:arbiter —— 证据束载荷，core 不读
+    claims: tuple[tuple[str, Any, Provenance], ...]  # external:arbiter —— 双方证据载荷，core 不读
 
 
 @dataclass(frozen=True)
 class DefinitionMismatch:
     """Different definition versions -> a defect, normalize before comparing."""
 
-    concept_id: str
-    versions: tuple[str, ...]
-    parties: tuple[str, ...]
+    concept_id: str  # core:kernel —— 去重与归一路径决策读它
+    versions: tuple[str, ...]  # external:arbiter —— 版本载荷，core 不读
+    parties: tuple[str, ...]  # external:arbiter —— 当事方载荷，core 不读
 
 
 Disagreement = BlindSpot | Conflict | DefinitionMismatch
@@ -515,10 +554,10 @@ DisagreementTypes: tuple[type, ...] = (BlindSpot, Conflict, DefinitionMismatch)
 
 @dataclass(frozen=True)
 class Snapshot:
-    ref: str
-    body_path: Path
-    captured_at: str
-    source_kind: str = ""
+    ref: str  # core:checkers —— freshness/provenance 按 ref 查表
+    body_path: Path  # external:sources —— 固化载体的位置，core 不打开
+    captured_at: str  # core:checkers —— freshness 的时间戳比较读它
+    source_kind: str = ""  # passthrough: 来源标签；core 无判定读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.ref, "Snapshot.ref must not be empty")
@@ -526,9 +565,9 @@ class Snapshot:
 
 @dataclass(frozen=True)
 class Provenance:
-    value_ref: str
-    snapshot_ref: str
-    locator: str = ""
+    value_ref: str  # core:checkers —— 逐点覆盖统计读它
+    snapshot_ref: str  # core:checkers —— 可达性判定读它
+    locator: str = ""  # external:report —— 人读定位串，core 不判定
 
     def __post_init__(self) -> None:
         _require_non_empty(self.value_ref, "Provenance.value_ref must not be empty")
@@ -537,9 +576,9 @@ class Provenance:
 
 @dataclass(frozen=True)
 class Column:
-    name: str
-    dtype: str
-    nullable: bool = True
+    name: str  # core:checkers —— schema/range/relation 按名取列
+    dtype: str  # core:checkers —— schema 类型比对读它
+    nullable: bool = True  # core:checkers —— schema 可空性比对读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "Column.name must not be empty")
@@ -554,11 +593,11 @@ class Artifact:
     no path is ever opened here.
     """
 
-    name: str
-    columns: tuple[Column, ...] = ()
-    rows: tuple[Mapping[str, Any], ...] = ()
-    text: str | None = None
-    path: str | None = None
+    name: str  # core:checkers —— 产出定位与坐标报错读它
+    columns: tuple[Column, ...] = ()  # core:checkers —— schema/range/relation 读它
+    rows: tuple[Mapping[str, Any], ...] = ()  # core:checkers —— 逐值判定遍历它
+    text: str | None = None  # core:checkers —— provenance 的文本行点位读它
+    path: str | None = None  # passthrough: 原始载体路径，供报告/边界外读；core 不读
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "Artifact.name must not be empty")
@@ -578,10 +617,10 @@ class Artifact:
 class Claim:
     """One source's asserted value for a field, with its provenance."""
 
-    field: str
-    value: Any
-    source_id: str
-    provenance: Provenance
+    field: str  # core:checkers —— corroboration 与 classify 按字段归并读它
+    value: Any  # core:checkers —— 值一致性判定读它
+    source_id: str  # core:checkers —— 独立来源计数读它
+    provenance: Provenance  # core:checkers —— 随证据一起产出 Conflict 读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.field, "Claim.field must not be empty")
@@ -595,25 +634,27 @@ class Claim:
 
 @dataclass(frozen=True)
 class ResourceUse:
-    calls: int = 0
-    wall_s: float = 0.0
-    output: int = 0
+    calls: int = 0  # external:metrics —— 用量记录读它；core 判定不读
+    wall_s: float = 0.0  # external:metrics —— 用量记录读它；core 判定不读
+    output: int = 0  # external:metrics —— 用量记录读它；core 判定不读
 
 
 @dataclass(frozen=True)
 class ModelResponse:
     """One model call's result, as data. Returned by the ``LLMClient`` port."""
 
-    text: str = ""
-    tool_calls: tuple[Mapping[str, Any], ...] = ()
-    usage: Mapping[str, int] = field(default_factory=dict)
+    text: str = ""  # external:agentloop —— worker 循环读它
+    tool_calls: tuple[Mapping[str, Any], ...] = ()  # external:agentloop —— 工具派发读它
+    usage: Mapping[str, int] = field(  # external:metrics —— 计量读它；core 不读
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
 class Budget:
-    max_calls: int
-    max_wall_s: int
-    max_output: int
+    max_calls: int  # core:consist —— unreachable 与 requires_calls 比
+    max_wall_s: int  # core:consist —— unreachable 与 requires_wall_s 比
+    max_output: int  # core:consist —— unreachable 与 requires_output 比
 
     def __post_init__(self) -> None:
         _require(self.max_calls >= 0, "Budget.max_calls must be >= 0")
@@ -623,18 +664,22 @@ class Budget:
 
 @dataclass(frozen=True)
 class Candidate:
-    subtask_id: str
-    source_id: str
-    hint: str = ""
-    files: Mapping[str, Path] = field(default_factory=dict)
-    provenance: tuple[Provenance, ...] = ()
-    cost: ResourceUse = ResourceUse()
+    subtask_id: str  # core:kernel —— classify 定位覆盖约束读它
+    source_id: str  # core:kernel —— 冲突判定区分来源读它
+    hint: str = ""  # core:kernel —— 内容指纹读它
+    files: Mapping[str, Path] = field(  # core:kernel —— 内容指纹读它；由边界外填入
+        default_factory=dict
+    )
+    provenance: tuple[Provenance, ...] = ()  # core:checkers —— 溯源判定读它
+    cost: ResourceUse = ResourceUse()  # external:metrics —— 用量记录读它；core 判定不读
     # In-memory content of `files`, injected by the loader outside core/.
-    artifacts: tuple[Artifact, ...] = ()
-    claims: tuple[Claim, ...] = ()
+    artifacts: tuple[Artifact, ...] = ()  # core:checkers —— 全部内容判定都读它
+    claims: tuple[Claim, ...] = ()  # core:checkers —— corroboration/classify 读它
     # Inference: which definition version this candidate used per concept, so
     # `classify` can tell a definition mismatch from a real conflict.
-    definition_versions: Mapping[str, str] = field(default_factory=dict)
+    definition_versions: Mapping[str, str] = field(  # core:kernel —— 先查口径读它
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         _require_non_empty(self.subtask_id, "Candidate.subtask_id must not be empty")
@@ -653,17 +698,21 @@ class Candidate:
 
 @dataclass(frozen=True)
 class Verdict:
-    ok: bool
-    failed: tuple[str, ...] = ()
-    evidence: Mapping[str, str] = field(default_factory=dict)
-    soft_scores: Mapping[str, float] = field(default_factory=dict)
+    ok: bool  # core:kernel —— converge 的通过分支读它
+    failed: tuple[str, ...] = ()  # external:agentloop —— 局部重试按失败约束定位
+    evidence: Mapping[str, str] = field(  # external:report —— 判定证据展示，core 不再读
+        default_factory=dict
+    )
+    soft_scores: Mapping[str, float] = field(  # external:report —— 软分展示，core 不再读
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
 class Classification:
-    blind_spots: tuple[BlindSpot, ...] = ()
-    conflicts: tuple[Conflict, ...] = ()
-    definition_mismatches: tuple[DefinitionMismatch, ...] = ()
+    blind_spots: tuple[BlindSpot, ...] = ()  # core:kernel —— converge 决策读它
+    conflicts: tuple[Conflict, ...] = ()  # core:kernel —— converge 决策读它
+    definition_mismatches: tuple[DefinitionMismatch, ...] = ()  # core:kernel —— converge 决策读它
 
     @property
     def is_empty(self) -> bool:
@@ -680,23 +729,25 @@ class ConvergeDecision(StrEnum):
 
 @dataclass(frozen=True)
 class Convergence:
-    decision: ConvergeDecision
-    verdicts: tuple[Verdict, ...] = ()
-    classification: Classification = Classification()
-    note: str = ""
+    decision: ConvergeDecision  # external:cli —— 调用方按它分派；core 只产出不分支
+    verdicts: tuple[Verdict, ...] = ()  # external:cli —— 调用方展示/重试用它
+    classification: Classification = Classification()  # external:arbiter —— 分歧载荷交给裁决方
+    note: str = ""  # external:report —— 人读说明，core 不读
 
 
 @dataclass(frozen=True)
 class BundleDelta:
-    added_hard: tuple[Constraint, ...] = ()
-    added_blind: tuple[str, ...] = ()
-    resolved: tuple[str, ...] = ()
-    note: str = ""
+    added_hard: tuple[Constraint, ...] = ()  # external:decompose —— ArbiterPort 返回契约
+    added_blind: tuple[str, ...] = ()  # external:decompose —— 同上
+    resolved: tuple[str, ...] = ()  # external:decompose —— 同上
+    note: str = ""  # external:report —— 人读说明，core 不读
 
 
 @dataclass(frozen=True)
 class AssemblyOutcome:
-    passed: bool
-    failed_blocks: tuple[str, ...] = ()
-    coverage: Mapping[str, str] = field(default_factory=dict)
-    notes: str = ""
+    passed: bool  # external:decompose —— refine 依据它决定是否重切
+    failed_blocks: tuple[str, ...] = ()  # external:decompose —— 局部重切定位用它
+    coverage: Mapping[str, str] = field(  # external:report —— 覆盖声明展示，core 不读
+        default_factory=dict
+    )
+    notes: str = ""  # external:report —— 人读说明，core 不读

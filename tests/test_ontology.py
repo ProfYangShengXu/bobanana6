@@ -148,3 +148,22 @@ def test_pinned_version_reads_the_declared_version() -> None:
     ontology = mini_ontology()
     assert pinned_version("credit.pd", ontology) == "v1"
     assert pinned_version("credit.amount", ontology) is None
+
+
+def test_validation_does_not_inspect_calendar_contents() -> None:
+    """`calendar` is external:decompose -- core neither validates nor reads it."""
+    calendar = {"weeks": {"W1": [1, 2]}, "tz": "Asia/Shanghai", "junk": {"deep": [True, None]}}
+    ontology = Ontology(
+        domain="d",
+        version="1",
+        concepts={"a": Concept(id="a", label="A", kind="measure", domain="d")},
+        definitions={},
+        units={},
+        calendar=calendar,
+    )
+    report = validate_ontology(ontology)
+    assert report.is_valid, report.codes()
+
+    frozen = ontology.freeze()
+    assert dict(frozen.calendar)["tz"] == "Asia/Shanghai"
+    assert frozen.content_hash() == ontology.freeze().content_hash()

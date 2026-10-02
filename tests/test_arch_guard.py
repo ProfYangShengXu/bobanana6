@@ -50,10 +50,11 @@ FORBIDDEN_IMPORTS = (
 
 FORBIDDEN_VOCABULARY = ("prompt", "token", "temperature", "llm", "model_id", "http", "url", "html", "cookie")
 
-#: The spec mandates these three identifiers on the stable side while also
-#: forbidding the substrings they contain. They are the only exemption; any
-#: other occurrence of the vocabulary still fails.
-MANDATED_PORT_IDENTIFIERS = ("llmclient", "max_tokens", "approx_tokens")
+#: Identifiers the spec itself mandates on the stable side even though they
+#: contain forbidden substrings: three port members named in 实现规格 §3, and the
+#: ``"tokens"`` ruler literal mandated by §5.0.1 ① (``output_unit`` must not be
+#: bytes). These are the only exemptions; any other occurrence still fails.
+MANDATED_IDENTIFIERS = ("llmclient", "max_tokens", "approx_tokens", '"tokens"')
 
 RUNTIME_CLASS_NAMES = (
     "Attribution",
@@ -119,7 +120,7 @@ def outbound_edges(module_name: str, source: str, *, is_package: bool = False) -
 
 def vocabulary_hits(source: str) -> list[str]:
     text = source.lower()
-    for token in MANDATED_PORT_IDENTIFIERS:
+    for token in MANDATED_IDENTIFIERS:
         text = text.replace(token, "")
     return [word for word in FORBIDDEN_VOCABULARY if word in text]
 
@@ -203,6 +204,9 @@ def test_guard_detects_vocabulary_leak() -> None:
     assert vocabulary_hits("class LLMClient(Protocol): ...") == []
     assert vocabulary_hits("def complete(self, max_tokens: int): ...") == []
     assert vocabulary_hits("a_tokenizer = 1") == ["token"]
+    # Only the quoted ruler literal from §5.0.1 ① is exempt, not the word.
+    assert vocabulary_hits('output_unit: str = "tokens"') == []
+    assert vocabulary_hits("tokens = 5") == ["token"]
 
 
 def test_core_knows_no_runtime() -> None:
@@ -279,3 +283,102 @@ def test_ontology_draft_is_frozen_before_workers() -> None:
 def test_content_digest_is_order_stable() -> None:
     assert content_digest({"b": 1, "a": 2}) == content_digest({"a": 2, "b": 1})
     assert content_digest({"a": 1}) != content_digest({"a": 2})
+
+
+# --------------------------------------------------------------------------- #
+# Field reader rule (实现规格 §5.0)
+# --------------------------------------------------------------------------- #
+
+READER_MARKERS = ("core:", "external:", "passthrough:")
+
+
+def _is_dataclass_decorator(decorators: list[ast.expr]) -> bool:
+    for decorator in decorators:
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        if isinstance(target, ast.Name) and target.id == "dataclass":
+            return True
+        if isinstance(target, ast.Attribute) and target.attr == "dataclass":
+            return True
+    return False
+
+
+def field_reader_markers(source: str) -> dict[tuple[str, str], str | None]:
+    """Map every dataclass field in ``source`` to its reader marker prefix.
+
+    ``None`` means the field declares no reader. The scan covers the whole
+    declaration (annotations may wrap over several lines), so a marker cannot be
+    hidden in a place the scanner does not look.
+    """
+    lines = source.splitlines()
+    found: dict[tuple[str, str], str | None] = {}
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.ClassDef) or not _is_dataclass_decorator(node.decorator_list):
+            continue
+        for stmt in node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                segment = "\n".join(lines[stmt.lineno - 1 : stmt.end_lineno])
+                marker = next((m for m in READER_MARKERS if m in segment), None)
+                found[(node.name, stmt.target.id)] = marker
+    return found
+
+
+def passthrough_without_reason(source: str) -> tuple[str, ...]:
+    """``passthrough:`` with nothing after the colon is an empty declaration."""
+    offenders: list[str] = []
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.ClassDef) or not _is_dataclass_decorator(node.decorator_list):
+            continue
+        lines = source.splitlines()
+        for stmt in node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                segment = "\n".join(lines[stmt.lineno - 1 : stmt.end_lineno])
+                if "passthrough:" in segment:
+                    reason = segment.split("passthrough:", 1)[1].split("\n")[0].strip()
+                    if reason == "":
+                        offenders.append(f"{node.name}.{stmt.target.id}")
+    return tuple(offenders)
+
+
+def test_every_field_declares_a_reader() -> None:
+    source = (CORE / "model.py").read_text(encoding="utf-8")
+    markers = field_reader_markers(source)
+
+    assert markers, "no dataclass fields found -- the scanner itself is broken"
+    assert len(markers) >= 120, f"scanner only saw {len(markers)} fields; it is not covering the model"
+
+    missing = sorted(f"{cls}.{name}" for (cls, name), marker in markers.items() if marker is None)
+    assert missing == [], f"fields with no declared reader: {missing}"
+
+    ambiguous = sorted(
+        f"{cls}.{name}"
+        for (cls, name) in markers
+        if sum(1 for m in READER_MARKERS if m in _field_segment(source, cls, name)) > 1
+    )
+    assert ambiguous == [], f"fields with more than one reader marker: {ambiguous}"
+
+    empty_reasons = passthrough_without_reason(source)
+    assert empty_reasons == (), f"passthrough fields must state a reason: {empty_reasons}"
+
+
+def _field_segment(source: str, cls: str, field_name: str) -> str:
+    lines = source.splitlines()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.ClassDef) and node.name == cls:
+            for stmt in node.body:
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.target.id == field_name:
+                    return "\n".join(lines[stmt.lineno - 1 : stmt.end_lineno])
+    return ""
+
+
+def test_guard_detects_a_field_without_a_reader() -> None:
+    unmarked = "from dataclasses import dataclass\n\n@dataclass\nclass X:\n    a: int = 0\n"
+    marked = "from dataclasses import dataclass\n\n@dataclass\nclass X:\n    a: int = 0  # core:kernel\n"
+    assert field_reader_markers(unmarked) == {("X", "a"): None}
+    assert field_reader_markers(marked) == {("X", "a"): "core:"}
+
+
+def test_guard_rejects_empty_passthrough_reason() -> None:
+    empty = "from dataclasses import dataclass\n\n@dataclass\nclass X:\n    a: int = 0  # passthrough:\n"
+    filled = "from dataclasses import dataclass\n\n@dataclass\nclass X:\n    a: int = 0  # passthrough: carried for the report\n"
+    assert passthrough_without_reason(empty) == ("X.a",)
+    assert passthrough_without_reason(filled) == ()

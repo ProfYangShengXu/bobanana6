@@ -293,7 +293,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "M33-guard-vocabulary-exemption-too-wide",
         "tests/test_arch_guard.py",
-        "for token in MANDATED_PORT_IDENTIFIERS:",
+        "for token in MANDATED_IDENTIFIERS:",
         "for token in ():",
         "tests/test_arch_guard.py::test_core_is_environment_free",
         "the guard scanner never fires (mutated into its own scanner)",
@@ -305,6 +305,38 @@ MUTATIONS: tuple[Mutation, ...] = (
         "    return []",
         "tests/test_arch_guard.py::test_guard_detects_outbound_edge",
         "the outbound-edge scanner can never report anything",
+    ),
+    Mutation(
+        "M35-field-reader-marker-removed",
+        "model.py",
+        "    round: int  # core:split —— round_budget 读它",
+        "    round: int",
+        "tests/test_arch_guard.py::test_every_field_declares_a_reader",
+        "a field loses its declared reader and the guard stays green",
+    ),
+    Mutation(
+        "M36-passthrough-reason-emptied",
+        "model.py",
+        "    path: str | None = None  # passthrough: 原始载体路径，供报告/边界外读；core 不读",
+        "    path: str | None = None  # passthrough:",
+        "tests/test_arch_guard.py::test_every_field_declares_a_reader",
+        "an empty passthrough marker is accepted",
+    ),
+    Mutation(
+        "M37-mixed-rulers-not-detected",
+        "consist.py",
+        "        if len(rulers) > 1:",
+        "        if False:",
+        "tests/test_consist.py::test_ruler_consistency_rejects_mixed_rulers_in_one_dimension",
+        "mixed rulers in one cost dimension pass",
+    ),
+    Mutation(
+        "M38-ruler-not-compared-to-limits",
+        "consist.py",
+        "        if rulers[0] != reference:",
+        "        if False:",
+        "tests/test_consist.py::test_ruler_consistency_rejects_a_ruler_that_disagrees_with_limits",
+        "a ruler differing from limits is not reported",
     ),
 )
 
