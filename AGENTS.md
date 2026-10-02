@@ -10,19 +10,23 @@
 **bobanana6**：用充裕并发资源，把复杂任务切成 N 块分工砸完；
 判定内核保证**每块合格、语义一致、整体拼得上**。
 
-**当前状态（诚实标注）**：**内核、fork 来的运行时、本体/契约/切分三层都已落地并可自证，
-但端到端还跑不起来** —— 装配点 `cli.py` 还没写，`uv` 在本机也未安装。
+**当前状态（诚实标注）**：**主线 21 步全部落地，`bobanana6 run` 第一次能端到端跑通**
+（`examples/task.yaml` + `--offline`，exit 0；见 `实现规格 §10` 的 1–21 步）。
 
-- ✅ 已实现：`core/`（步骤 1–7）· `agentloop/`（步骤 15–21，含 `LICENSE.hermes` + `README.md`）·
-  `ontology/` `contract/` `decompose/`（步骤 8–10）· `tests/` · `tools/`（反向验证脚本）
-- ❌ 未实现：`services/` · `adapters/` · `sources/` · `cli.py`（唯一装配点）· `__main__.py` —— 步骤 11–14
+- ✅ 已实现：`core/`（1–7）· `ontology/` `contract/` `decompose/`（8–10）· `sources/` `adapters/`
+  `services/` `assemble_impl/` `cli.py`（11–13）· `report/`（14）· `agentloop/`（15–21，含
+  `LICENSE.hermes` + `README.md` 的接线点清单勾选结果）· `tests/` · `tools/`
+- ⚠️ 已知缺口（不是残留，是明确报告的未接线项）：`join_truncated_parts` /
+  `continuation_overlap_length` 无调用方（本项目的 loop 没有流式文本路径）；
+  `PROGRESS_RULER` 无读者（没有跨 turn 的「无进展检测」）；`ArbiterPort` 无实作
+  （分歧只记录、不自动补约束）。三条都写在 `agentloop/README.md` 的清单里。
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 513 passed |
-| `pytest -m arch_guard -q` | ✅ 28 passed（含 §1.2 依赖方向守卫） |
+| `pytest tests/ -q` | ✅ 619 passed |
+| `pytest -m arch_guard -q` | ✅ 35 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
-| `uv run bobanana6 run task.yaml` | ❌ 无 `cli.py`，也没有 console script；本机未装 `uv` |
+| `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |
 
 **所以 §3 的命令是目标形态，不是现状。**
 

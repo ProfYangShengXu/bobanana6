@@ -364,6 +364,7 @@ class WorkerLoop:
         log: EventLog | None = None,
         taint: TaintTracker | None = None,
         compression: CompressionPolicy | None = None,
+        summarize: Callable[[tuple[Mapping[str, Any], ...]], str] | None = None,
         guardrails: ToolCallGuardrailController | None = None,
         classify: Callable[[BaseException], ClassifiedError] = classify_error,
     ) -> None:
@@ -376,6 +377,9 @@ class WorkerLoop:
         self._log = log
         self._taint = taint or TaintTracker(self._config.taint_threshold)
         self._compression = compression
+        # ★ Injected, not constructed here: summarizing is a model call, and the
+        #   loop must not know how to reach a model beyond the ``LoopIO`` it was given.
+        self._summarize = summarize
         self._guardrails = guardrails or ToolCallGuardrailController()
         self._classify = classify
 
@@ -467,7 +471,7 @@ class WorkerLoop:
         self._guardrails.reset_for_turn()
         if self._compression is None or not turn.state.messages:
             return PhaseResult.fallthrough()
-        result = compact(turn.state.messages, self._compression)
+        result = compact(turn.state.messages, self._compression, summarize=self._summarize)
         if not (result.committed and result.dropped):
             return PhaseResult.fallthrough()
         if turn.state.restarts >= self._config.max_restarts:

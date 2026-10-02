@@ -1,0 +1,22 @@
+# 最小示例本体：只声明这个任务真正用到的概念。
+# 写法与 ontology/schemas/ontology.schema.json 一致（结构校验由它负责，
+# 语义自洽由 core/ontology.py 负责）。
+domain: credit-risk
+version: "2026.1"
+
+concepts:
+  obligor:        {label: 债务人主体号, kind: entity}
+  pd:             {label: 违约概率, kind: measure, unit: ratio, aliases: [pd_3y]}
+  amount:         {label: 敞口金额, kind: measure, unit: CNY}
+
+units:
+  pd:     {symbol: ratio, scale: 1.0, base: ratio}
+  amount: {symbol: CNY, scale: 1.0, base: CNY}
+
+definitions:
+  pd:
+    version: "2026.1"
+    text: 未来 12 个月内发生违约的概率，按债务人主体计，不按账户计
+    edge_cases: [重组后重新起算, 逾期 90 天即视同违约]
+
+calendar: {timezone: Asia/Shanghai}

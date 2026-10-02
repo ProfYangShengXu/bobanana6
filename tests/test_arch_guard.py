@@ -623,3 +623,207 @@ def test_mid_layer_dependency_guard_detects_a_violation() -> None:
         for found in resolved_imports("bobanana6.core.kernel", "from bobanana6.ontology import loader")
         if found.startswith(core_guard)
     ] == ["bobanana6.ontology"]
+
+
+# --------------------------------------------------------------------------- #
+# Steps 11-14: sources/ adapters/ services/ assemble_impl/ report/ cli.py
+#
+# Three arrows are checked here:
+#   * core/ still points at nothing volatile (extended to the new packages);
+#   * adapters/ talks to the kernel through the ports, never through the
+#     judgment modules -- that is what keeps 判定 out of the adapter layer;
+#   * only cli.py constructs boundary implementations (AGENTS §1.4).
+# --------------------------------------------------------------------------- #
+
+WIRING_PACKAGES = ("sources", "adapters", "services", "assemble_impl", "report")
+
+JUDGMENT_MODULES = (
+    "bobanana6.core.kernel",
+    "bobanana6.core.checkers",
+    "bobanana6.core.split",
+    "bobanana6.core.assemble",
+    "bobanana6.core.consist",
+    "bobanana6.core.ontology",
+    "bobanana6.core.capabilities",
+    "bobanana6.core.provenance",
+)
+
+STEP_11_14_MODULES = (
+    "sources/__init__.py",
+    "sources/store.py",
+    "sources/fetchers.py",
+    "adapters/__init__.py",
+    "adapters/openai_compat.py",
+    "adapters/offline.py",
+    "adapters/ontology.py",
+    "services/__init__.py",
+    "services/tools.py",
+    "services/registry.py",
+    "services/checks.py",
+    "assemble_impl/__init__.py",
+    "assemble_impl/produce.py",
+    "assemble_impl/runtime.py",
+    "assemble_impl/runner.py",
+    "report/__init__.py",
+    "report/builders.py",
+    "cli.py",
+    "__main__.py",
+)
+
+#: Implementations that only the assembly point may construct. The runtime
+#: internals (``WorkerLoop`` / ``RuntimeGate`` ...) are deliberately absent:
+#: ``assemble_impl/`` *is* the assembly implementation (AGENTS §1.5) and it is
+#: the layer that adapts those ports. What must not leak is the environment
+#: boundary -- model clients, fetchers, ontology sources, the store.
+BOUNDARY_IMPLEMENTATIONS = (
+    "OpenAICompatibleClient",
+    "EchoToolResultClient",
+    "ScriptedClient",
+    "FileOntology",
+    "DraftingOntology",
+    "HttpFetcher",
+    "FileFetcher",
+    "LocatorFetcher",
+    "Decomposer",
+)
+
+
+def wiring_files(package: str) -> list[Path]:
+    root = REPO / "src" / "bobanana6" / package
+    return sorted(path for path in root.rglob("*.py") if path.is_file())
+
+
+def imported_modules(path: Path) -> list[str]:
+    return resolved_imports(
+        module_name_for(path), path.read_text(encoding="utf-8"), is_package=path.name == "__init__.py"
+    )
+
+
+def test_step_11_14_modules_are_present() -> None:
+    root = REPO / "src" / "bobanana6"
+    missing = [name for name in STEP_11_14_MODULES if not (root / name).is_file()]
+    assert missing == [], f"missing step 11-14 modules: {missing}"
+
+
+def test_core_does_not_import_the_volatile_side() -> None:
+    """§1.2, extended to every package added after the kernel."""
+    forbidden = tuple(f"bobanana6.{package}" for package in (*MID_LAYER_PACKAGES, *WIRING_PACKAGES, "cli"))
+    offenders: list[str] = []
+    for path in core_files():
+        for module in imported_modules(path):
+            if module.startswith(forbidden):
+                offenders.append(f"{path.relative_to(REPO)} imports {module}")
+    assert offenders == [], f"core depends on the volatile side: {offenders}"
+
+
+def test_adapters_reach_the_kernel_only_through_ports_and_data() -> None:
+    """★ The adapter layer does protocol translation, never judgment."""
+    offenders: list[str] = []
+    for path in wiring_files("adapters"):
+        for module in imported_modules(path):
+            if module.startswith(JUDGMENT_MODULES):
+                offenders.append(f"{path.relative_to(REPO)} imports {module}")
+    assert offenders == [], f"adapters imported a judgment module: {offenders}"
+
+
+def test_sources_and_adapters_are_leaf_layers() -> None:
+    """Nothing in the environment boundary may depend on the wiring above it."""
+    forbidden = ("bobanana6.services", "bobanana6.assemble_impl", "bobanana6.report", "bobanana6.cli")
+    offenders: list[str] = []
+    for package in ("sources", "adapters"):
+        for path in wiring_files(package):
+            for module in imported_modules(path):
+                if module.startswith(forbidden):
+                    offenders.append(f"{path.relative_to(REPO)} imports {module}")
+    assert offenders == [], f"a leaf layer reached the wiring above it: {offenders}"
+
+
+def constructed_names(source: str) -> tuple[str, ...]:
+    """Every bare name or attribute called as a constructor."""
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            found.append(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            found.append(node.func.attr)
+    return tuple(found)
+
+
+#: Packages whose classes are *only* the assembly point's to construct. Read off
+#: the tree, so a new client or fetcher cannot escape the guard by being absent
+#: from a hand-written list.
+BOUNDARY_PACKAGES = ("sources", "adapters")
+
+
+def boundary_defining_packages() -> dict[str, str]:
+    """Every class the assembly point owns, derived from where it is defined.
+
+    Exceptions are skipped: raising one is not choosing an implementation.
+    """
+    root = REPO / "src" / "bobanana6"
+    defined: dict[str, str] = {}
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        relative = path.relative_to(root)
+        package = relative.parts[0] if len(relative.parts) > 1 else ""
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.startswith("class "):
+                continue
+            name = line.split()[1].split("(")[0].split(":")[0]
+            bases = line[line.find("(") + 1 : line.rfind(")")] if "(" in line else ""
+            if "Error" in bases or "Exception" in bases:
+                continue
+            if package in BOUNDARY_PACKAGES or name in BOUNDARY_IMPLEMENTATIONS:
+                defined[name] = package
+    return defined
+
+
+def boundary_construction_offenders() -> tuple[str, ...]:
+    """Constructions of a boundary implementation **from another package**.
+
+    Composing a sibling inside its own module (the fetcher that dispatches by
+    locator scheme, say) is that module's job. What this rule forbids is one
+    layer reaching over and choosing a concrete implementation for the system --
+    which is precisely AGENTS §1.4.
+    """
+    root = REPO / "src" / "bobanana6"
+    defined = boundary_defining_packages()
+    offenders: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "cli.py" or "__pycache__" in path.parts:
+            continue
+        relative = path.relative_to(root)
+        package = relative.parts[0] if len(relative.parts) > 1 else ""
+        for name in constructed_names(path.read_text(encoding="utf-8")):
+            if name in defined and defined[name] != package:
+                offenders.append(f"{path.relative_to(REPO)} constructs {name}() defined in {defined[name]!r}")
+    return tuple(offenders)
+
+
+def test_only_the_cli_constructs_boundary_implementations() -> None:
+    """★ AGENTS §1.4: ``cli.py::build_app()`` is the only ``new`` site."""
+    assert boundary_construction_offenders() == ()
+
+
+def test_assembly_point_guard_derives_its_names_from_the_tree() -> None:
+    """★ The rule is not a hand-written list: a new client in adapters/ is covered.
+
+    ``SnapshotStore`` is deliberately absent from ``BOUNDARY_IMPLEMENTATIONS``;
+    if it still shows up, the guard is reading the tree rather than the list.
+    """
+    derived = boundary_defining_packages()
+    assert "SnapshotStore" not in BOUNDARY_IMPLEMENTATIONS
+    assert derived["SnapshotStore"] == "sources"
+    assert derived["OpenAICompatibleClient"] == "adapters"
+    assert "SourceError" not in derived  # raising an exception is not assembling
+
+
+def test_assembly_point_guard_detects_a_violation() -> None:
+    assert "OpenAICompatibleClient" in constructed_names("c = OpenAICompatibleClient(s)")
+    assert "HttpFetcher" in constructed_names("fetcher = sources.HttpFetcher(store=store)")
+    assert constructed_names("x = Port()") == ("Port",)
+    # a *reference* is not a construction: passing a class around stays legal
+    assert "OpenAICompatibleClient" not in constructed_names("from a import OpenAICompatibleClient")

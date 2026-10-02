@@ -1,0 +1,32 @@
+# 端到端示例：单源、单交付物（离线模型能自己走完的最小形状）。
+# 多源版本会切出 merge 层，需要真实模型来合并，见 tests/test_runner.py。
+task_id: example-panel
+goal: 把债务人敞口面板整理成一份可复核的 CSV
+version: 1
+
+deliverables:
+  - name: out.csv
+    schema: {obligor: str, pd: float, amount: float}
+
+sources:
+  - {ref: panel-2026q1, locator: examples/panel.csv}
+
+constraints:
+  hard:
+    - id: C-rows
+      kind: presence
+      target: "*"
+      spec: {min_rows: 1}
+      rationale: "面板不允许为空——空表会被下游当成「这些债务人不存在」"
+    - id: C-prov
+      kind: provenance
+      target: out.csv
+      spec: {min_coverage: 0.95}
+      rationale: "每个值都要能指回一份快照，否则无法复核"
+
+blind:
+  - "本示例只覆盖 2026Q1，跨期比较没有数据"
+
+limits: {max_rounds: 3}
+
+notes: 示例任务：结构最小，但走的是完整的判定链路。

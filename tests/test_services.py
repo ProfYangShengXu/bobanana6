@@ -1,0 +1,392 @@
+"""services/: tool surface, call metadata filled by the registry, evidence recording."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+from fakes import (
+    artifact,
+    bundle,
+    candidate,
+    constraint,
+    contract,
+    mini_ontology,
+    plan,
+    subtask,
+)
+
+from bobanana6.agentloop.tools import plan_tool_segments
+from bobanana6.core.checkers.base import CheckContext
+from bobanana6.core.model import SourceRef, Subtask
+from bobanana6.services import (
+    SHELL_COMMAND_CHECK,
+    BlockJudge,
+    BoundChecks,
+    BoundSemantics,
+    BoundSources,
+    BoundTask,
+    RecordedEvidence,
+    RegisteredTool,
+    ToolRegistry,
+    build_toolset,
+    shell_command_check,
+    snapshot_payload,
+)
+from bobanana6.sources import SnapshotStore
+
+PASSES = f'{sys.executable} -c "print(1)"'
+
+
+# --------------------------------------------------------------------------- #
+# semantics.lookup / map / check
+# --------------------------------------------------------------------------- #
+
+
+def test_lookup_reports_the_concept_the_unit_and_the_definition() -> None:
+    semantics = BoundSemantics(ontology=mini_ontology())
+    found = semantics.lookup("credit.pd")
+    assert found["found"] is True
+    assert found["kind"] == "measure"
+    assert found["definition_version"] == "v1"
+    assert found["aliases"] == ["pd_3y", "probability_of_default"]
+    assert semantics.lookup("nope")["found"] is False
+
+
+def test_map_returns_the_concept_or_the_word_unmapped() -> None:
+    semantics = BoundSemantics(ontology=mini_ontology())
+    assert semantics.map("credit.pd") == "credit.pd"
+    assert semantics.map("mystery") == "unmapped"
+
+
+def test_check_accepts_a_declared_usage_and_refuses_a_wrong_unit() -> None:
+    semantics = BoundSemantics(ontology=mini_ontology())
+    assert semantics.check({"concept": "credit.amount", "unit": "CNY"})[0] is True
+    ok, reason = semantics.check({"concept": "credit.amount", "unit": "USD"})
+    assert ok is False and "declared in 'CNY'" in reason
+    assert semantics.check({"concept": "ghost"})[0] is False
+    assert semantics.check("credit.pd")[0] is False
+
+
+def test_check_refuses_a_code_outside_its_code_system() -> None:
+    semantics = BoundSemantics(ontology=mini_ontology())
+    assert semantics.check({"concept": "credit.rating", "code_system": "rating_scale", "code": "AAA"})[0] is True
+    assert semantics.check({"concept": "credit.rating", "code_system": "rating_scale", "code": "ZZZ"})[0] is False
+
+
+# --------------------------------------------------------------------------- #
+# task.*
+# --------------------------------------------------------------------------- #
+
+
+def _subtask(**kw: object) -> Subtask:
+    return subtask("T-01", inputs=("part-1.csv",), output="out.csv", mode="write", **kw)  # type: ignore[arg-type]
+
+
+def test_mysubtask_shows_only_this_block() -> None:
+    view = BoundTask(subtask=_subtask(), contract=contract()).mysubtask()
+    assert view["id"] == "T-01"
+    assert view["inputs"] == ["part-1.csv"]
+    assert view["mode"] == "write"
+
+
+def test_upstream_refuses_an_input_the_block_never_declared() -> None:
+    task = BoundTask(
+        subtask=_subtask(),
+        contract=contract(),
+        upstream_parts={"part-1.csv": {"rows": 1}},
+        allowed_inputs=("part-1.csv",),
+    )
+    assert task.upstream("part-1.csv") == {"rows": 1}
+    with pytest.raises(PermissionError, match="not declared"):
+        task.upstream("part-2.csv")
+
+
+# --------------------------------------------------------------------------- #
+# sources.snapshot binding
+# --------------------------------------------------------------------------- #
+
+
+def _snapshot(tmp_path: Path, *, suffix: str = ".csv", body: bytes = b"a\n1\n") -> tuple[SnapshotStore, object]:
+    store = SnapshotStore(root=tmp_path / "s")
+    snap = store.put(
+        ref="src-1", body=body, source_kind="file", captured_at="2026-01-01T00:00:00", suffix=suffix
+    )
+    return store, snap
+
+
+def test_snapshot_without_a_ref_binds_to_the_only_authorized_source(tmp_path: Path) -> None:
+    _store, snap = _snapshot(tmp_path)
+    tools = BoundSources(authorized=(SourceRef(ref="src-1", locator="x"),), fetched={"src-1": snap})  # type: ignore[arg-type]
+    assert tools.snapshot("").ref == "src-1"
+    assert tools.snapshot("src-1").ref == "src-1"
+
+
+def test_snapshot_refuses_an_unauthorized_ref(tmp_path: Path) -> None:
+    _store, snap = _snapshot(tmp_path)
+    tools = BoundSources(authorized=(SourceRef(ref="src-1"),), fetched={"src-1": snap})  # type: ignore[arg-type]
+    with pytest.raises(PermissionError, match="not authorized"):
+        tools.snapshot("src-9")
+
+
+def test_snapshot_refuses_to_guess_between_two_sources(tmp_path: Path) -> None:
+    _store, snap = _snapshot(tmp_path)
+    tools = BoundSources(
+        authorized=(SourceRef(ref="src-1"), SourceRef(ref="src-2")),
+        fetched={"src-1": snap, "src-2": snap},
+    )  # type: ignore[arg-type]
+    with pytest.raises(PermissionError, match="authorized sources"):
+        tools.snapshot("")
+
+
+def test_snapshot_reports_an_authorized_but_unfetched_source(tmp_path: Path) -> None:
+    tools = BoundSources(authorized=(SourceRef(ref="src-1"),), fetched={})
+    with pytest.raises(LookupError, match="not fetched"):
+        tools.snapshot("src-1")
+
+
+def test_snapshot_payload_parses_csv_and_json(tmp_path: Path) -> None:
+    _store, snap = _snapshot(tmp_path)
+    payload = json.loads(snapshot_payload("src-1", snap, b"a,b\n1,2\n3,4\n"))  # type: ignore[arg-type]
+    assert [c["name"] for c in payload["columns"]] == ["a", "b"]
+    assert payload["rows"] == [{"a": "1", "b": "2"}, {"a": "3", "b": "4"}]
+    assert payload["ref"] == "src-1"
+
+    _store2, json_snap = _snapshot(tmp_path, suffix=".json", body=b'[{"x": 1}]')
+    json_payload = json.loads(snapshot_payload("src-1", json_snap, b'[{"x": 1}]'))  # type: ignore[arg-type]
+    assert json_payload["rows"] == [{"x": 1}]
+
+
+# --------------------------------------------------------------------------- #
+# build_toolset binding rules
+# --------------------------------------------------------------------------- #
+
+
+def test_build_toolset_grants_snapshot_only_on_the_source_axis(tmp_path: Path) -> None:
+    _store, snap = _snapshot(tmp_path)
+    checks = BoundChecks(block="T-01")
+    on_source = build_toolset(
+        plan=plan(),
+        subtask=subtask("T-01", axis="source"),
+        contract=contract(),
+        ontology=mini_ontology(),
+        authorized=(SourceRef(ref="src-1"),),
+        fetched={"src-1": snap},  # type: ignore[dict-item]
+        upstream={},
+        checks=checks,
+    )
+    off_source = build_toolset(
+        plan=plan(),
+        subtask=subtask("T-02", axis="field"),
+        contract=contract(),
+        ontology=mini_ontology(),
+        authorized=(SourceRef(ref="src-1"),),
+        fetched={"src-1": snap},  # type: ignore[dict-item]
+        upstream={},
+        checks=checks,
+    )
+    assert on_source.sources is not None
+    assert "sources.snapshot" in {spec.name for spec in on_source.specs()}
+    assert off_source.sources is None
+    assert "sources.snapshot" not in {spec.name for spec in off_source.specs()}
+
+
+def test_build_toolset_binds_inputs_to_the_subtask() -> None:
+    toolset = build_toolset(
+        plan=plan(),
+        subtask=_subtask(),
+        contract=contract(),
+        ontology=mini_ontology(),
+        authorized=(),
+        fetched={},
+        upstream={},
+        checks=BoundChecks(block="T-01"),
+    )
+    assert toolset.allowed_inputs == ("part-1.csv",)
+    assert toolset.allows_upstream("part-1.csv")
+    assert not toolset.allows_upstream("part-2.csv")
+
+
+def test_assemble_dryrun_reports_only_this_blocks_violations() -> None:
+    from bobanana6.core.split import SplitReport, SplitViolation
+
+    report = SplitReport(
+        violations=(
+            SplitViolation(check="iface_match", detail="mismatch", subtask_ids=("T-01",)),
+            SplitViolation(check="merge_cheap", detail="expensive", subtask_ids=("T-09",)),
+        )
+    )
+    checks = BoundChecks(block="T-01", split_report=report)
+    result = checks.assemble_dryrun()
+    assert result["ok"] is False
+    assert result["codes"] == ["iface_match"]
+    assert BoundChecks(block="T-01").assemble_dryrun()["ok"] is None
+
+
+# --------------------------------------------------------------------------- #
+# registry: effect/targets are filled here, not by the caller
+# --------------------------------------------------------------------------- #
+
+
+def _registry() -> ToolRegistry:
+    return ToolRegistry(
+        tools=(
+            RegisteredTool(
+                name="store.write",
+                parameters=("path",),
+                handler=lambda args: f"wrote {args['path']}",
+                effect="write",
+                target_args=("path",),
+            ),
+            RegisteredTool(
+                name="store.read",
+                parameters=("path",),
+                handler=lambda args: json.dumps({"path": args["path"]}),
+                effect="read",
+                target_args=("path",),
+            ),
+        )
+    )
+
+
+def _raw(call_id: str, name: str, arguments: str) -> dict[str, object]:
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
+def test_registry_fills_effect_and_targets_from_the_tool_declaration() -> None:
+    calls = _registry().calls([_raw("c1", "store.write", '{"path": "out.csv"}')])
+    assert calls[0].effect == "write"
+    assert calls[0].targets == ("out.csv",)
+
+
+def test_write_calls_become_a_barrier_because_the_registry_says_so() -> None:
+    """★ The model cannot downgrade a write to a read by claiming it is one."""
+    calls = _registry().calls(
+        [
+            _raw("c1", "store.read", '{"path": "a"}'),
+            _raw("c2", "store.read", '{"path": "b"}'),
+            _raw("c3", "store.write", '{"path": "c"}'),
+            _raw("c4", "store.read", '{"path": "d"}'),
+        ]
+    )
+    segments = plan_tool_segments(calls)
+    assert [kind for kind, _ in segments] == ["parallel", "sequential", "sequential"]
+    assert [call.call_id for call in segments[2][1]] == ["c4"]
+
+
+def test_malformed_call_still_gets_a_result() -> None:
+    registry = _registry()
+    calls = registry.calls([{"id": "c1", "function": {"name": "store.read", "arguments": "{not json"}}])
+    assert calls[0].arguments == {}
+    results = registry.execute(calls)
+    assert len(results) == 1 and results[0].ok is False  # ★ never a dangling tool call
+
+
+def test_unknown_tool_gets_a_named_failure() -> None:
+    registry = _registry()
+    results = registry.execute(registry.calls([_raw("c1", "nope", "{}")]))
+    assert results[0].ok is False and results[0].error_type == "unknown_tool"
+
+
+def test_a_raising_handler_is_a_visible_failure() -> None:
+    def explode(args: object) -> str:
+        raise RuntimeError("tool is broken")
+
+    registry = ToolRegistry(tools=(RegisteredTool(name="bad", parameters=(), handler=explode),))
+    results = registry.execute(registry.calls([_raw("c1", "bad", "{}")]))
+    assert results[0].ok is False
+    assert results[0].error_type == "RuntimeError"
+    assert "tool is broken" in results[0].content
+
+
+def test_duplicate_tool_names_are_refused() -> None:
+    with pytest.raises(ValueError, match="duplicate tool names"):
+        ToolRegistry(
+            tools=(
+                RegisteredTool(name="x", parameters=(), handler=lambda args: ""),
+                RegisteredTool(name="x", parameters=(), handler=lambda args: ""),
+            )
+        )
+
+
+# --------------------------------------------------------------------------- #
+# evidence: the gate's independent input
+# --------------------------------------------------------------------------- #
+
+
+def test_shell_command_check_records_evidence_and_passes() -> None:
+    evidence = RecordedEvidence()
+    check = shell_command_check(evidence, lambda: 100.0)
+    passed, facts = check(constraint(kind="custom", spec={"check": SHELL_COMMAND_CHECK, "command": PASSES}), candidate(), CheckContext())
+    assert passed is True
+    assert evidence.last() is not None
+    assert evidence.last().exit_code == 0  # type: ignore[union-attr]
+    assert evidence.last().created_at == 100.0  # type: ignore[union-attr]
+    assert "exited 0" in facts[0]
+
+
+def test_shell_command_check_fails_on_a_non_zero_exit() -> None:
+    evidence = RecordedEvidence()
+    check = shell_command_check(evidence, lambda: 1.0)
+    command = f'{sys.executable} -c "import sys; sys.exit(3)"'
+    passed, facts = check(constraint(kind="custom", spec={"check": SHELL_COMMAND_CHECK, "command": command}), candidate(), CheckContext())
+    assert passed is False
+    assert "exited 3" in facts[0]
+
+
+def test_shell_command_check_refuses_an_unattributable_exit() -> None:
+    """★ A backgrounded command donates nothing: its exit status is not evidence."""
+    evidence = RecordedEvidence()
+    check = shell_command_check(evidence, lambda: 1.0)
+    command = f'{sys.executable} -c "print(1)" &'
+    passed, facts = check(constraint(kind="custom", spec={"check": SHELL_COMMAND_CHECK, "command": command}), candidate(), CheckContext())
+    assert passed is False
+    assert any("not attributable" in fact for fact in facts)
+
+
+def test_shell_command_check_needs_a_command() -> None:
+    check = shell_command_check(RecordedEvidence(), lambda: 1.0)
+    passed, facts = check(constraint(kind="custom", spec={}), candidate(), CheckContext())
+    assert passed is False and "spec.command" in facts[0]
+
+
+def _judge(bundle_) -> BlockJudge:
+    block = subtask("T-01", output="out.csv", mode="write")
+    return BlockJudge(bundle=bundle_, subtask=block, context=CheckContext(ontology=mini_ontology()))
+
+
+def test_verify_falls_back_to_the_kernel_when_no_command_ran() -> None:
+    passing = bundle(hard=(constraint("C-1", "presence", "T-01", {"min_rows": 1}),))
+    verdict = _judge(passing).verify(candidate(artifacts=(artifact(rows=({"a": 1},)),)))
+    assert verdict.status == "passed" and verdict.scope == "full"
+
+
+def test_verify_reports_failure_when_a_constraint_fails() -> None:
+    failing = bundle(hard=(constraint("C-1", "presence", "T-01", {"min_rows": 5}),))
+    verdict = _judge(failing).verify(candidate(artifacts=(artifact(rows=({"a": 1},)),)))
+    assert verdict.status == "failed"
+
+
+def test_verify_uses_the_recorded_command_evidence() -> None:
+    evidence = RecordedEvidence()
+    check = shell_command_check(evidence, lambda: 10.0)
+    failing = bundle(
+        hard=(
+            constraint("C-1", "presence", "T-01", {"min_rows": 1}),
+            constraint("C-2", "custom", "T-01", {"check": SHELL_COMMAND_CHECK, "command": PASSES}),
+        )
+    )
+    judge = BlockJudge(
+        bundle=failing,
+        subtask=subtask("T-01", output="out.csv", mode="write"),
+        context=CheckContext(ontology=mini_ontology(), custom_checks={SHELL_COMMAND_CHECK: check}),
+        evidence=evidence,
+    )
+    verdict = judge.verify(candidate(artifacts=(artifact(rows=({"a": 1},)),)))
+    assert verdict.status == "passed"
+    assert judge.evidence.last().created_at == 10.0  # type: ignore[union-attr]
+
+    judge.last_edit_at = 20.0  # ★ checked, then changed
+    assert judge.verify(candidate(artifacts=(artifact(rows=({"a": 1},)),))).status == "stale"

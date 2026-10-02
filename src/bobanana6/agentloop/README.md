@@ -74,25 +74,57 @@
   由 `tests/test_arch_guard.py` 的 `test_agentloop_*` 守着。
 - 判定语义永远在 `core/kernel.py`；本目录不复制任何判定。
 
-## ★ 接线点清单（步骤 13 必须接上的）
+## ★ 接线点清单（步骤 13 的勾选结果）
 
 > 来源：步骤 21 交付报告里的「哪些出口没走到」，把其中 **A 类（等装配点）** 显式落盘。
 > 为什么写进仓库：`架构设计 §6.9` ——「声明了但没人读」**永远不报错**，只把归因引向错误方向。
 > 散在聊天报告里，步骤 13 一定会漏；写在这里才能逐条勾掉。
-> 格式：`[ ] <缺什么> —— 接线点：<文件/函数> —— 不接的后果：<一句话>`
+> 格式：`[x] <缺什么> —— 接线点：<文件/函数>` / `[ ] <缺什么> —— 不接的理由：<一句话>`
 
-- [ ] `WorkerLoop` 不是 `AgentRuntimePort` 的实现 —— 接线点：`cli.py::build_app`（一个适配层，把 `subtask/bundle/ontology/tools/budget` 映射到 `WorkerLoop.run(task_id, worker_id, messages, route_key)`）—— 不接的后果：装配点无法把一个分块真正交给 runtime，`agentloop/` 只在测试里跑。
-- [ ] gate 的证据不由 loop 产生 —— 接线点：`cli.py::build_app` 注入一个真正跑命令并调用 `gate.record_evidence` 的 verifier（`LoopIO.verify`）—— 不接的后果：硬闸拿不到系统独立证据，只能相信注入方，`§7.3` 的落地打折。
-- [ ] `gate` 的 `declined` 出口没有真实生产者 —— 接线点：`services/` 的 gate 实作，worker 明确「拿不到这个信息」时构造 `GateVerdict(status="declined")` —— 不接的后果：第三出口只有测试构造，生产上永远只有 pass/fail 二选一。
-- [ ] `compress` 的 LLM 摘要回调从未被 loop 传入 —— 接线点：`cli.py::build_app` 用一次模型调用实现 `Callable[[dropped], str]` 并注入 `WorkerLoop(compression=...)` —— 不接的后果：压缩只丢弃不摘要；可恢复性仍在，但上下文质量下降。
-- [ ] `ToolCall.effect/targets` 是调用方自报、没有核对机制 —— 接线点：`services/` 的工具注册表（工具声明自己的 effect 与 target），`tools.ToolCall` 由它填充 —— 不接的后果：写操作可能被当成读操作并行，`plan_tool_segments` 的「写是屏障」失效。
-- [ ] `join_truncated_parts` / `continuation_overlap_length` 无调用方 —— 接线点：`agentloop` 的流式文本组装（当前未实现；`loop` 只处理整段 `TurnProposal.text`）—— 不接的后果：被截断的续写片段会重复拼接。
-- [ ] `PROGRESS_RULER` 无读者 —— 接线点：`WorkerLoop` 的「无进展检测」（当前未实现）—— 不接的后果：无法用正确尺子判「有没有进展」，可能空转到预算耗尽（`AGENTS §7⑤`）。
-- [ ] `attribution.BLAME_ACTIONS` 无读者 —— 接线点：决策层（把归因结论转成动作的那一层）—— 不接的后果：四出口→动作的映射没被消费，归因只产出结论不产出动作。
-- [ ] `RuntimeGate` 的 `acquire`/`single_flight`/`route` 已由 `loop._call_model` 调用（步骤 21 收口修），但**只有 loop 这一条路径**；若将来有第二条打模型的路径，也要走它 —— 接线点：任何新增的模型调用点 —— 不接的后果：绕过限流 = 限流等于没建。
-- [x] `done_actions` 已接：`loop._persist` 传本 turn 已完成动作的稳定 id（`tool:<call_id>`），`state.resume` 的「不重放已完成动作」因此在 loop 侧成立。
+- [x] `WorkerLoop` 不是 `AgentRuntimePort` 的实现 —— 接线点：`assemble_impl/runtime.py::BlockRuntime`。
+  它把 `(subtask, bundle, ontology, tools, budget)` 映射成 loop 的 `run(task_id, worker_id, ...)`，
+  并把「没有候选」拆成两种具名结果：`BlockDeclined`（第三种合法出口）与 `BlockRuntimeError`。
+  由 `tests/test_runner.py::test_block_runtime_satisfies_the_agent_runtime_port` 守着。
+- [x] gate 的证据不由 loop 产生 —— 接线点：`services/checks.py::shell_command_check` + `BlockJudge.verify`。
+  `custom` 约束提供命令（**契约是人写的，不是模型生成的代码**），执行后走
+  `gate.record_evidence` → `gate.evaluate`，`attribute_exit` 保证管道/后台命令的退出码不算数。
+  **边界**：只有声明了 `custom` 检查的块才有命令证据；其余块的闸门是 `core/kernel.admit`
+  （它同样不看 worker 的自我报告，这正是 §7.3 要的独立性）。
+- [x] `gate` 的 `declined` 出口没有真实生产者 —— 接线点：`assemble_impl/produce.py::_declined`。
+  模型回答 `{"declined": true, "reason": "..."}` 时，产出 `TurnProposal(declined=True)`，
+  loop 据此构造 `GateVerdict(status="declined")`；`tests/test_runner.py::test_a_declined_block_is_reported_as_declined_not_failed`
+  证明它一路走到报告里是「declined」而不是「failed」。
+- [x] `compress` 的 LLM 摘要回调从未被 loop 传入 —— 接线点：`WorkerLoop(summarize=...)`
+  （`loop._prepare` 把它交给 `compact`）+ `assemble_impl/runtime.py::llm_summarizer`，
+  由 `cli.py::build_app` 注入。摘要调用是第二条打模型的路径，因此它也走 `RuntimeGate`。
+- [x] `ToolCall.effect/targets` 是调用方自报、没有核对机制 —— 接线点：`services/registry.py`。
+  `RegisteredTool` 声明 effect 与 target 参数，`ToolRegistry.calls` 负责填；
+  `tests/test_services.py::test_write_calls_become_a_barrier_because_the_registry_says_so`
+  证明模型把写谎报成读也拦不住屏障。
+- [ ] `join_truncated_parts` / `continuation_overlap_length` 无调用方 —— **不接的理由：**
+  loop 里根本不存在流式文本路径（`TurnProposal.text` 是一次到齐的整段），
+  接上它等于先实现流式组装，那是**新机制**不是接线；本块范围外。
+- [ ] `PROGRESS_RULER` 无读者 —— **不接的理由：** 需要「无进展检测」（跨 turn 比较候选指纹），
+  属于新机制。当前 loop 用 `max_turns` / `max_restarts` / `max_retries` 封顶，不会空转到预算耗尽；
+  但确实没有用正确的尺子判「有没有进展」（`AGENTS §7⑤`）。这是**已知缺口**。
+- [x] `attribution.BLAME_ACTIONS` 无读者 —— 接线点：`assemble_impl/runner.py::Runner._attribute`。
+  失败时产出 `Attribution`，再用 `actions_for(blame)` 把结论转成动作，写进
+  `summary.json` 与 `CONFLICTS.md`；归不出来就写 `blame=null, confidence=unknown`。
+- [x] `RuntimeGate` 的 `acquire` / `single_flight` / `route` —— 现在两条模型调用路径都走它：
+  loop 的 `_call_model`（块执行）与 `llm_summarizer`（压缩摘要）。
+- [x] `done_actions` 已接：`loop._persist` 传本 turn 已完成动作的稳定 id（`tool:<call_id>`），
+  `state.resume` 的「不重放已完成动作」因此在 loop 侧成立。
 
 **设计决定（不是待办）**：`sandbox.py` 提供的是**执行级目录隔离**，不是 OS 级隔离（无 namespace/seccomp/权限位）；真隔离交给容器/OS。同 UID 的 worker 仍能读对方目录 —— 这是有意为之，不要当成待办去补。
+
+**接线时新发现的三处**（都不是 agentloop 的问题，是装配口径问题）：
+
+1. `CheckpointStore` 只按 `task_id` 索引，一个任务的多个块会互相覆盖 —— 装配侧用
+   `assemble_impl/runtime.py::PerWorkerCheckpointStore` 按 `(task_id, worker_id)` 收口。
+2. `kernel.admit` 是「一个候选对一个包」的判定；把整份 plan 的包递给单块会拿邻块的
+   `AUTO-*` 约束去判它 —— 装配侧用 `assemble_impl/runtime.py::block_bundle` 先切片。
+3. `agentloop/metrics.py::tool_metrics` 按 `task_id` 归并「任务成功率」，一个任务的多个块
+   只算一个样本 —— 这是运行时既有的口径，装配侧不改它，只在报告里注明。
 
 ## 许可
 

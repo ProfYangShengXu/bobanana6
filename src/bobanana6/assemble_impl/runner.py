@@ -1,0 +1,504 @@
+"""The end-to-end pipeline: contract -> ontology -> gates -> blocks -> assembly -> reports.
+
+This is where the pieces are *ordered*, and the order is itself a judgment the
+design makes (``实现规格 §10``, ``架构设计 §8``):
+
+  1. the ontology is frozen **before** any worker exists, because a moving
+     semantics layer is what makes two blocks disagree;
+  2. four gates run **before** the cluster starts -- ontology self-consistency,
+     the split legality checks, the constraint-bundle consistency checks, and
+     the fetch of every declared source. ``实现规格 §8`` is explicit that any hit
+     refuses the run: starting a cluster on a plan that cannot be assembled only
+     burns the budget;
+  3. a source that fails to fetch is a *named* failure, never an empty snapshot;
+  4. per block: run -> judge -> converge; then assembly over the produced pieces;
+  5. if anything failed, attribute it to a layer and turn the blame into actions
+     (``AGENTS §6``: a conclusion without an action is not a conclusion worth
+     printing).
+
+Nothing in this module decides whether a block is good -- it calls
+``core/kernel.py`` and reports what came back.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ..agentloop.attribution import (
+    BLAME_ACTIONS,
+    Attribution,
+    Experiment,
+    actions_for,
+    attribute,
+)
+from ..agentloop.events import EventLog
+from ..agentloop.metrics import tool_metrics
+from ..contract import ContractDocument
+from ..core.assemble import AssemblyReport, check_assembly
+from ..core.capabilities import BlockSpec, Capability, WorkerCapabilities
+from ..core.checkers.base import CheckContext
+from ..core.consist import ConsistencyReport, check_consistency
+from ..core.kernel import converge
+from ..core.model import (
+    DEFAULT_LIMITS,
+    AssemblyOutcome,
+    Budget,
+    Candidate,
+    Classification,
+    ConstraintBundle,
+    ConvergeDecision,
+    Convergence,
+    DeliverableSpec,
+    Limits,
+    Ontology,
+    Recon,
+    Snapshot,
+    SourceRef,
+    SplitPlan,
+    Subtask,
+    TaskContract,
+    Verdict,
+)
+from ..core.ontology import validate_ontology
+from ..core.ports import DecomposerPort, OntologyPort, SourcePort
+from ..core.split import SplitReport, check_split
+from ..report import ReportBundle, build_reports
+from ..services import TOOL_NAMES, BoundChecks, artifact_payload, build_toolset
+from ..sources import SnapshotStore, SourceError
+from .runtime import (
+    BlockDeclined,
+    BlockRuntime,
+    BlockRuntimeError,
+    ContractConstraintSource,
+    block_bundle,
+)
+
+__all__ = ["RunRefused", "RunResult", "Runner"]
+
+#: Severity order used when several blocks converge differently. The aggregate
+#: reports the *most demanding* decision, because reporting DELIVER while one
+#: block still needs arbitration would be the one lie that matters.
+_DECISION_ORDER: tuple[ConvergeDecision, ...] = (
+    ConvergeDecision.DELIVER,
+    ConvergeDecision.REFINE_SPLIT,
+    ConvergeDecision.NORMALIZE_DEFINITION,
+    ConvergeDecision.RECORD_CONFLICT,
+    ConvergeDecision.ARBITRATE,
+)
+
+
+class RunRefused(RuntimeError):
+    """A pre-cluster gate refused the run. ``codes`` names the exact rule(s)."""
+
+    def __init__(self, gate: str, detail: str, codes: tuple[str, ...] = ()) -> None:
+        super().__init__(f"{gate}: {detail}")
+        self.gate = gate
+        self.detail = detail
+        self.codes = codes
+
+
+@dataclass(frozen=True)
+class RunResult:
+    task_id: str
+    ontology: Ontology
+    plan: SplitPlan
+    bundle: ConstraintBundle
+    recon: Recon
+    snapshots: Mapping[str, Snapshot]
+    candidates: Mapping[str, Candidate]
+    verdicts: Mapping[str, Verdict]
+    convergence: Convergence
+    assembly: AssemblyReport
+    split_report: SplitReport
+    consistency: ConsistencyReport
+    ontology_codes: tuple[str, ...]
+    attribution: Attribution | None
+    attribution_actions: tuple[str, ...]
+    metrics: Mapping[str, Any]
+    outcome: AssemblyOutcome
+    exit_reason: str
+    reports: ReportBundle | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome.passed
+
+
+@dataclass
+class Runner:
+    document: ContractDocument
+    ontology_port: OntologyPort
+    decomposer: DecomposerPort
+    constraint_source: ContractConstraintSource
+    runtime: BlockRuntime
+    fetcher: SourcePort
+    store: SnapshotStore
+    #: ISO-8601 "now", injected because ``freshness`` never reads a clock.
+    now: str
+    #: Monotonic seconds for evidence timestamps, injected for the same reason.
+    epoch: Callable[[], float]
+    limits: Limits = DEFAULT_LIMITS
+    budget: Budget = field(default_factory=lambda: Budget(max_calls=64, max_wall_s=3600, max_output=8192))
+    #: The capabilities the deployment declares. ``None`` means "nothing was
+    #: declared", and then capability matching is not evaluated at all rather
+    #: than being reported as a gap (an undeclared pool is not a missing pool).
+    worker_pool: tuple[WorkerCapabilities, ...] | None = None
+    event_log: EventLog = field(default_factory=EventLog)
+    report_dir: Path | None = None
+    exit_reason: str = "unknown"
+    fetch_failures: dict[str, str] = field(default_factory=dict)
+
+    # -- the pipeline ------------------------------------------------------ #
+
+    def run(self) -> RunResult:
+        contract = self.document.contract
+        survey_note = f"{len(contract.sources)} declared sources"
+        from ..core.model import InputSurvey
+
+        survey = InputSurvey(source_refs=tuple(source.ref for source in contract.sources), notes=survey_note)
+
+        # 1. semantics first, frozen before any worker exists.
+        ontology = self.ontology_port.obtain(contract, survey)
+        ontology = ontology.freeze()
+        ontology_report = validate_ontology(ontology)
+        ontology_codes = ontology_report.codes()
+        if ontology_codes:
+            raise RunRefused(
+                "ontology",
+                "the shared semantics are not self-consistent; refusing to start workers",
+                ontology_codes,
+            )
+
+        # 2. freeze every source into a snapshot (or fail by name).
+        snapshots = self._fetch_sources(contract)
+
+        # 3. plan, bundle, and the gates that keep a bad plan from being shipped.
+        recon = Recon(
+            evidence=f"fetched {len(snapshots)} of {len(contract.sources)} declared sources",
+            source_ids=tuple(sorted(snapshots)),
+            findings=tuple(f"{ref}: {snapshot.source_kind}" for ref, snapshot in sorted(snapshots.items())),
+        )
+        plan = self.decomposer.split(contract, ontology, recon)
+        bundle = self.constraint_source.compile(contract, plan, ontology)
+        split_report = check_split(plan, contract, bundle, ontology, frozen_hash=ontology.content_hash(), limits=self.limits)
+        if not split_report.ok:
+            raise RunRefused("split", "the plan does not pass the legality checks", split_report.codes())
+        consistency = check_consistency(
+            plan,
+            contract,
+            bundle,
+            ontology,
+            budget=self.budget,
+            # ★ The capability inventory is the tool surface this deployment can
+            #   actually serve; without it the check refuses to guess.
+            available_capabilities=TOOL_NAMES,
+            limits=self.limits,
+            frozen_hash=ontology.content_hash(),
+        )
+        if not consistency.start_allowed:
+            raise RunRefused("consist", "the plan and its bundle are not self-consistent", consistency.codes())
+
+        # 4. run the blocks.
+        context = CheckContext(
+            ontology=ontology,
+            snapshots=snapshots,
+            unmapped_fields=bundle.unmapped_fields,
+            now=self.now,
+            limits=self.limits,
+            custom_checks=self._custom_checks(),
+        )
+        self.runtime.context = context
+        pieces: dict[str, Any] = {}
+        candidates: dict[str, Candidate] = {}
+        verdicts: dict[str, Verdict] = {}
+        decisions: list[Convergence] = []
+        for subtask in plan.subtasks:
+            toolset = self._toolset(plan, subtask, bundle, ontology, snapshots, pieces, context)
+            try:
+                candidate = self.runtime.run(subtask, bundle, ontology, toolset, self.budget)
+            except BlockDeclined as declined:
+                self._note_gate(subtask, False, {"exit": declined.exit_reason, "declined": True})
+                verdicts[subtask.id] = Verdict(ok=False, failed=("declined",), evidence={"exit": declined.exit_reason})
+                continue
+            except BlockRuntimeError as failed:
+                self._note_gate(subtask, False, {"exit": failed.exit_reason})
+                verdicts[subtask.id] = Verdict(
+                    ok=False,
+                    failed=("runtime",),
+                    evidence={"exit": failed.exit_reason, "errors": "; ".join(failed.errors)},
+                )
+                continue
+            candidates[subtask.id] = candidate
+            judge = self.runtime.last_judge
+            verdict = judge.last_verdict if judge is not None and judge.last_verdict is not None else judge.admit(candidate)  # type: ignore[union-attr]
+            verdicts[subtask.id] = verdict
+            # ★ judged against this block's slice, not the whole plan's bundle
+            decisions.append(converge(block_bundle(bundle, subtask), (candidate,), context))
+            artifact = candidate.artifact(subtask.output)
+            if artifact is not None:
+                pieces[subtask.output] = artifact
+            self._note_gate(subtask, verdict.ok, {"failed": list(verdict.failed)})
+
+        convergence = self._aggregate(decisions)
+        assembly = check_assembly(
+            plan,
+            contract,
+            bundle,
+            pieces,
+            context,
+            provenance=tuple(p for candidate in candidates.values() for p in candidate.provenance),
+            snapshots=snapshots,
+            limits=self.limits,
+            blocks=self._block_specs(plan) if self.worker_pool is not None else None,
+            workers=self.worker_pool,
+        )
+
+        outcome = AssemblyOutcome(
+            passed=assembly.passed and all(v.ok for v in verdicts.values()),
+            failed_blocks=tuple(sorted({block for block, verdict in verdicts.items() if not verdict.ok})),
+            coverage={"blocks": f"{len(candidates)}/{len(plan.subtasks)}", "pieces": str(len(pieces))},
+        )
+        attribution, actions = self._attribute(outcome)
+        metrics = self._metrics()
+
+        self.exit_reason = (
+            "passed"
+            if outcome.passed
+            else ("declined" if verdicts and all(v.failed == ("declined",) for v in verdicts.values()) else "failed")
+        )
+        reports = None
+        if self.report_dir is not None:
+            reports = build_reports(
+                contract=contract,
+                plan=plan,
+                recon=recon,
+                ontology=ontology,
+                bundle=bundle,
+                convergence=convergence,
+                outcome=outcome,
+                verdicts=verdicts,
+                candidates=candidates,
+                snapshots=snapshots,
+                provenances=tuple(p for candidate in candidates.values() for p in candidate.provenance),
+                fetch_failures=self.fetch_failures,
+                metrics=metrics,
+                attribution=self._attribution_view(attribution, actions),
+                blocks=self._block_rows(plan) if self.worker_pool is not None else (),
+                capability_matching=self._matching_view(assembly),
+                exit_reason=self.exit_reason,
+            )
+            reports.write(self.report_dir)
+
+        return RunResult(
+            task_id=contract.task_id,
+            ontology=ontology,
+            plan=plan,
+            bundle=bundle,
+            recon=recon,
+            snapshots=snapshots,
+            candidates=candidates,
+            verdicts=verdicts,
+            convergence=convergence,
+            assembly=assembly,
+            split_report=split_report,
+            consistency=consistency,
+            ontology_codes=ontology_codes,
+            attribution=attribution,
+            attribution_actions=actions,
+            metrics=metrics,
+            outcome=outcome,
+            exit_reason=self.exit_reason,
+            reports=reports,
+        )
+
+    # -- helpers ----------------------------------------------------------- #
+
+    def _fetch_sources(self, contract: TaskContract) -> dict[str, Snapshot]:
+        snapshots: dict[str, Snapshot] = {}
+        for source in contract.sources:
+            try:
+                snapshots[source.ref] = self.fetcher.fetch(SourceRef(ref=source.ref, locator=source.locator))
+            except SourceError as exc:
+                # ★ Named, and fatal. An empty snapshot would read as "the data is empty".
+                self.fetch_failures[source.ref] = str(exc)
+                raise RunRefused("sources", f"source {source.ref!r} could not be fetched: {exc}", ("fetch_failed",)) from exc
+        return snapshots
+
+    def _custom_checks(self) -> Mapping[str, Callable[..., Any]]:
+        """The ``custom`` checks this host is willing to run (see services/checks.py)."""
+        from ..services import (
+            SHELL_COMMAND_CHECK,
+            RecordedEvidence,
+            shell_command_check,
+        )
+
+        evidence = RecordedEvidence()
+        return {SHELL_COMMAND_CHECK: shell_command_check(evidence, self.epoch)}
+
+    def _toolset(
+        self,
+        plan: SplitPlan,
+        subtask: Subtask,
+        bundle: ConstraintBundle,
+        ontology: Ontology,
+        snapshots: Mapping[str, Snapshot],
+        pieces: Mapping[str, Any],
+        context: CheckContext,
+    ) -> Any:
+        # ★ The upstream tool hands over the *content* of the declared inputs, not
+        #   a summary: a block that can only see a row count cannot merge anything.
+        upstream = {}
+        for name in subtask.inputs:
+            artifact = pieces.get(name)
+            if artifact is None:
+                upstream[name] = {"schema": plan.interfaces.get(name, ""), "missing": True}
+            else:
+                upstream[name] = {"schema": plan.interfaces.get(name, ""), **artifact_payload(artifact)}
+        checks = BoundChecks(
+            block=subtask.id,
+            verdict=None,
+            provenance_report=None,
+            split_report=self._split_report_for(plan, bundle, ontology),
+        )
+        return build_toolset(
+            plan=plan,
+            subtask=subtask,
+            contract=self.document.contract,
+            ontology=ontology,
+            authorized=self.document.contract.sources,
+            fetched=snapshots,
+            upstream=upstream,
+            checks=checks,
+        )
+
+    def _split_report_for(self, plan: SplitPlan, bundle: ConstraintBundle, ontology: Ontology) -> SplitReport:
+        return check_split(plan, self.document.contract, bundle, ontology, frozen_hash=ontology.content_hash(), limits=self.limits)
+
+    def _block_specs(self, plan: SplitPlan) -> tuple[BlockSpec, ...]:
+        specs: list[BlockSpec] = []
+        for subtask in plan.subtasks:
+            needs = (
+                frozenset({Capability.READ, Capability.COMPUTE})
+                if subtask.mode == "read"
+                else frozenset({Capability.COMPUTE, Capability.WRITE_DELIVERABLE})
+            )
+            specs.append(
+                BlockSpec(
+                    block_id=subtask.id,
+                    dimension=subtask.axis,
+                    needs=needs,
+                    produces=self._deliverable_for(subtask.output),
+                    partition=subtask.partition,
+                )
+            )
+        return tuple(specs)
+
+    def _deliverable_for(self, name: str) -> DeliverableSpec:
+
+        for deliverable in self.document.contract.deliverables:
+            if deliverable.name == name:
+                return deliverable
+        return DeliverableSpec(name=name)
+
+    def _block_rows(self, plan: SplitPlan) -> tuple[Mapping[str, Any], ...]:
+        return tuple(
+            {
+                "block": spec.block_id,
+                "dimension": spec.dimension,
+                "needs": sorted(capability.value for capability in spec.needs),
+                "partition": spec.partition,
+            }
+            for spec in self._block_specs(plan)
+        )
+
+    @staticmethod
+    def _matching_view(assembly: AssemblyReport) -> Mapping[str, Any]:
+        """The §6.8 needs<->provides outcome, or an explicit "not evaluated"."""
+        matched = assembly.matched
+        if matched is None:
+            return {"evaluated": False, "reason": "no worker pool was declared"}
+        return {
+            "evaluated": True,
+            "assignments": [
+                {"block": a.block_id, "worker": a.worker_id, "surplus": [c.value for c in a.surplus]}
+                for a in matched.assignments
+            ],
+            "issues": [{"issue": str(i.issue), "block": i.block_id, "detail": i.detail} for i in matched.issues],
+        }
+
+    def _aggregate(self, decisions: list[Convergence]) -> Convergence:
+        if not decisions:
+            return Convergence(decision=ConvergeDecision.ARBITRATE, note="no block produced a candidate")
+        worst = max(decisions, key=lambda c: _DECISION_ORDER.index(c.decision))
+        merged = Classification(
+            blind_spots=tuple(item for c in decisions for item in c.classification.blind_spots),
+            conflicts=tuple(item for c in decisions for item in c.classification.conflicts),
+            definition_mismatches=tuple(item for c in decisions for item in c.classification.definition_mismatches),
+        )
+        return Convergence(
+            decision=worst.decision,
+            verdicts=tuple(v for c in decisions for v in c.verdicts),
+            classification=merged,
+            note=worst.note,
+        )
+
+    def _attribute(self, outcome: AssemblyOutcome) -> tuple[Attribution | None, tuple[str, ...]]:
+        if outcome.passed:
+            return None, ()
+        failure = f"assembly failed on {len(outcome.failed_blocks)} block(s)"
+        result = attribute(failure, self.event_log.events, experiment=Experiment.NOT_RUN)
+        self.event_log.record(
+            kind="attribute",
+            task_id=self.document.contract.task_id,
+            worker_id="runner",
+            at=self.epoch(),
+            ok=result.blame is not None,
+            detail={"blame": result.blame, "confidence": result.confidence},
+        )
+        actions = actions_for(result.blame) if result.blame is not None else ()
+        return result, tuple(actions)
+
+    def _attribution_view(self, attribution: Attribution | None, actions: tuple[str, ...]) -> Mapping[str, Any] | None:
+        if attribution is None:
+            return None
+        return {
+            "failure": attribution.failure,
+            "blame": attribution.blame,
+            "confidence": attribution.confidence,
+            "experiment": attribution.experiment,
+            "actions": list(actions),
+            "evidence": [f"{event.kind}({event.worker_id})" for event in attribution.evidence],
+        }
+
+    def _metrics(self) -> Mapping[str, Any]:
+        tool = tool_metrics(self.event_log.events)
+        return {
+            "tool.calls": tool.calls,
+            "tool.call_accuracy": tool.call_accuracy,
+            "tool.argument_correctness": tool.argument_correctness,
+            "tool.task_success_rate": tool.task_success_rate,
+            "tool.failure_recovery_rate": tool.failure_recovery_rate,
+            # ★ No delivery number: it needs labelled outcomes, and none were
+            #   supplied. 0/0 would print as 0.0 and read as "nothing worked".
+            "delivery": "not evaluated (no labelled outcomes were supplied)",
+            "blame_actions": {str(blame): list(actions) for blame, actions in BLAME_ACTIONS.items()},
+        }
+
+    def _note_gate(self, subtask: Subtask, ok: bool, detail: Mapping[str, Any]) -> None:
+        """Record one block's outcome on the structured event stream.
+
+        ``gate_check`` is the only kind that fits a block outcome: the event
+        vocabulary is fixed by ``agentloop/events.py`` and inventing a new kind
+        would be a change to the runtime, not to the wiring.
+        """
+        self.event_log.record(
+            kind="gate_check",
+            task_id=self.document.contract.task_id,
+            worker_id=subtask.id,
+            at=self.epoch(),
+            ok=ok,
+            detail=dict(detail),
+        )

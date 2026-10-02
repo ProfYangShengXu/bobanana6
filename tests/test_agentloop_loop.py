@@ -351,3 +351,36 @@ def test_completed_actions_are_persisted_and_not_replayed() -> None:
     assert checkpoint.status == "failed"
     assert checkpoint.done_actions == ("tool:1", "tool:2")
     assert resume(checkpoint).completed_actions == ("tool:1", "tool:2")
+
+
+def test_the_compression_callback_is_the_injected_summarizer() -> None:
+    """★ Wiring point: ``summarize`` is injected, so the loop never builds one.
+
+    Without it, compression can only drop messages; the dropped span is never
+    summarized. The loop must not know how to reach a model to summarize, so the
+    callback has to arrive from outside.
+    """
+    # Sized so exactly one compaction happens: after the first drop the
+    # transcript is under the threshold again, and the next turn reaches produce.
+    policy = CompressionPolicy(context_length=200, max_tokens=2, pct=0.5, keep_recent=0)
+    messages = tuple({"role": "user", "content": f"msg-{i:02d}-" + "x" * 16} for i in range(12))
+    dropped_spans: list[tuple[dict, ...]] = []
+
+    def summarize(dropped: tuple[dict, ...]) -> str:
+        dropped_spans.append(tuple(dropped))
+        return "SUMMARY-OF-DROPPED"
+
+    seen: list[tuple[dict, ...]] = []
+
+    class IO(FakeIO):
+        def produce(self, state):  # type: ignore[no-untyped-def]
+            seen.append(state.messages)
+            return super().produce(state)
+
+    loop = WorkerLoop(IO([TurnProposal(text="done")]), config=LoopConfig(max_turns=3), compression=policy, summarize=summarize)
+    loop.run(task_id="t", worker_id="w", messages=messages)
+
+    assert dropped_spans, "the summarizer was never called; compression only dropped"
+    assert any(
+        "SUMMARY-OF-DROPPED" in str(message.get("content", "")) for message in seen[-1]
+    ), "the summary the callback returned never reached the transcript"

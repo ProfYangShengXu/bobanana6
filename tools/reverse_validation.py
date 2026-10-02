@@ -25,7 +25,18 @@ SRC = REPO / "src" / "bobanana6" / "core"
 
 #: Packages whose modules can be reached by a bare ``<package>/<module>.py`` path.
 #: ``core`` is the default (``SRC``); the rest live beside it.
-SOURCE_PACKAGES = ("core", "agentloop", "ontology", "contract", "decompose")
+SOURCE_PACKAGES = (
+    "core",
+    "agentloop",
+    "ontology",
+    "contract",
+    "decompose",
+    "sources",
+    "adapters",
+    "services",
+    "assemble_impl",
+    "report",
+)
 
 
 def clear_bytecode_cache() -> None:
@@ -907,6 +918,159 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_arch_guard.py::test_core_does_not_import_the_mid_layer",
         "an arrow points from core/ back at the mid layer (AGENTS.md 1.2)",
     ),
+    # -- steps 11-14: sources/ adapters/ services/ assemble_impl/ report/ cli --
+    Mutation(
+        "W01-block-bundle-not-projected",
+        "assemble_impl/runtime.py",
+        "            bundle=block_bundle(bundle, subtask),",
+        "            bundle=bundle,",
+        "tests/test_runner.py::test_two_source_task_runs_the_pipeline_and_the_merge_block",
+        "each block is judged against the whole plan's bundle, so neighbours' constraints fail it",
+    ),
+    Mutation(
+        "W02-decline-not-recognised",
+        "assemble_impl/produce.py",
+        "        if _declined(response.text):",
+        "        if False:",
+        "tests/test_runner.py::test_a_declined_block_is_reported_as_declined_not_failed",
+        "the third legal exit loses its producer and declines look like failures",
+    ),
+    Mutation(
+        "W03-source-id-is-the-block",
+        "assemble_impl/produce.py",
+        '        source_id=str(document.get("source_id") or document.get("ref") or source_id),',
+        "        source_id=source_id,",
+        "tests/test_runner.py::test_parse_candidate_reads_rows_columns_and_provenance",
+        "the asserting source is replaced by the block id, breaking independence checks",
+    ),
+    Mutation(
+        "W04-empty-snapshot-frozen",
+        "sources/store.py",
+        "        if not body:",
+        "        if False:",
+        "tests/test_sources.py::test_empty_body_is_refused_not_frozen",
+        "an empty fetch is frozen, so 'no data' reads as 'the data is empty'",
+    ),
+    Mutation(
+        "W05-content-addressing-keyed-by-ref",
+        "sources/store.py",
+        "        path = self.path_for(body, suffix=suffix)",
+        "        path = self.path_for(body + ref.encode(), suffix=suffix)",
+        "tests/test_sources.py::test_same_bytes_twice_produce_one_file",
+        "the same bytes fetched twice produce two snapshots",
+    ),
+    Mutation(
+        "W06-fetch-failure-swallowed",
+        "assemble_impl/runner.py",
+        '                raise RunRefused("sources", f"source {source.ref!r} could not be fetched: {exc}", ("fetch_failed",)) from exc',
+        "                continue  # mutation: the failure is swallowed",
+        "tests/test_runner.py::test_a_source_that_cannot_be_fetched_refuses_the_run",
+        "a failed fetch no longer stops the run before the cluster starts",
+    ),
+    Mutation(
+        "W07-ontology-gate-skipped",
+        "assemble_impl/runner.py",
+        "        if ontology_codes:",
+        "        if False:",
+        "tests/test_runner.py::test_an_inconsistent_ontology_refuses_the_run",
+        "workers start on semantics the kernel already refuted",
+    ),
+    Mutation(
+        "W08-split-gate-skipped",
+        "assemble_impl/runner.py",
+        "        if not split_report.ok:",
+        "        if False:",
+        "tests/test_runner.py::test_an_illegal_plan_refuses_the_run",
+        "an illegal plan is shipped to the cluster",
+    ),
+    Mutation(
+        "W09-inventory-empty",
+        "assemble_impl/runner.py",
+        "            available_capabilities=TOOL_NAMES,",
+        "            available_capabilities=(),",
+        "tests/test_runner.py::test_the_tool_inventory_is_what_the_consistency_check_compares_against",
+        "the stated capability inventory stops matching the tool surface",
+    ),
+    Mutation(
+        "W10-registry-effect-not-filled",
+        "services/registry.py",
+        "                    effect=self.effect(name),",
+        '                    effect="read",',
+        "tests/test_services.py::test_write_calls_become_a_barrier_because_the_registry_says_so",
+        "the caller's claim about a write call is trusted again",
+    ),
+    Mutation(
+        "W11-upstream-permission-dropped",
+        "services/tools.py",
+        "        if name not in self.allowed_inputs:",
+        "        if False:",
+        "tests/test_services.py::test_upstream_refuses_an_input_the_block_never_declared",
+        "a block can read an input it never declared",
+    ),
+    Mutation(
+        "W12-snapshot-ambiguity-guessed",
+        "services/tools.py",
+        "        if len(self.authorized) == 1:",
+        "        if self.authorized:",
+        "tests/test_services.py::test_snapshot_refuses_to_guess_between_two_sources",
+        "the registry picks a source instead of refusing an ambiguous call",
+    ),
+    Mutation(
+        "W13-evidence-ignored-by-the-gate",
+        "services/checks.py",
+        "        if recorded is None:",
+        "        if True:",
+        "tests/test_services.py::test_verify_uses_the_recorded_command_evidence",
+        "the gate stops reading the recorded evidence",
+    ),
+    Mutation(
+        "W14-adapters-import-a-judgment-module",
+        "adapters/offline.py",
+        "from ..core.model import ModelResponse",
+        "from ..core.kernel import admit  # mutation\nfrom ..core.model import ModelResponse",
+        "tests/test_arch_guard.py::test_adapters_reach_the_kernel_only_through_ports_and_data",
+        "the adapter layer starts deciding",
+    ),
+    Mutation(
+        "W15-second-assembly-point",
+        "services/checks.py",
+        '        command = constraint.spec.get("command")',
+        "        _offline = EchoToolResultClient()\n        command = constraint.spec.get(\"command\")",
+        "tests/test_arch_guard.py::test_only_the_cli_constructs_boundary_implementations",
+        "a second module new-s up a boundary implementation",
+    ),
+    Mutation(
+        "W19-second-assembly-point-unlisted-name",
+        "services/checks.py",
+        '        command = constraint.spec.get("command")',
+        '        _store = SnapshotStore(root=Path("/tmp"))\n        command = constraint.spec.get("command")',
+        "tests/test_arch_guard.py::test_only_the_cli_constructs_boundary_implementations",
+        "a class the hand-written list never names still escapes the assembly-point rule",
+    ),
+    Mutation(
+        "W16-summary-drops-the-contract-notes",
+        "report/builders.py",
+        '            "notes": contract.notes,',
+        '            "notes": "",',
+        "tests/test_report.py::test_summary_reads_notes_recon_evidence_findings_and_coverage",
+        "TaskContract.notes loses its only reader",
+    ),
+    Mutation(
+        "W17-ontology-map-drops-cardinality",
+        "report/builders.py",
+        '            lines.append(f"| `{relation.src}` | {relation.kind} | `{relation.dst}` | {relation.cardinality} |")',
+        '            lines.append(f"| `{relation.src}` | {relation.kind} | `{relation.dst}` |  |")',
+        "tests/test_report.py::test_ontology_map_renders_relations_with_kind_and_cardinality",
+        "Relation.cardinality loses its only reader",
+    ),
+    Mutation(
+        "W18-summarize-not-passed-to-compact",
+        "agentloop/loop.py",
+        "        result = compact(turn.state.messages, self._compression, summarize=self._summarize)",
+        "        result = compact(turn.state.messages, self._compression)",
+        "tests/test_agentloop_loop.py::test_the_compression_callback_is_the_injected_summarizer",
+        "compression can only drop messages again; the callback is never reached",
+    ),
     Mutation(
         "L16-decomposer-ignores-the-field-strategy",
         "decompose/strategies.py",
@@ -964,6 +1128,10 @@ def main() -> int:
             path = (REPO / "src" / "bobanana6" / relative).resolve()
         else:
             path = (SRC / relative).resolve()
+        if not path.is_file():
+            failures.append(f"{mutation.ident}: no such file {relative}")
+            print(f"{mutation.ident:44} ERROR   no such file {relative}")
+            continue
         # Keep the exact original bytes: text-mode read normalizes CRLF to LF,
         # and writing that back silently rewrites every line ending in the file.
         original_bytes = path.read_bytes()
