@@ -360,7 +360,10 @@ def main() -> int:
     print("-" * 120)
     for mutation in MUTATIONS:
         path = (REPO / mutation.relative_path).resolve() if mutation.relative_path.startswith("tests/") else (SRC / mutation.relative_path).resolve()
-        original = path.read_text(encoding="utf-8")
+        # Keep the exact original bytes: text-mode read normalizes CRLF to LF,
+        # and writing that back silently rewrites every line ending in the file.
+        original_bytes = path.read_bytes()
+        original = original_bytes.decode("utf-8").replace("\r\n", "\n")
         if original.count(mutation.old) != 1:
             failures.append(f"{mutation.ident}: anchor not found exactly once ({original.count(mutation.old)})")
             print(f"{mutation.ident:44} ERROR   anchor not found exactly once")
@@ -368,10 +371,10 @@ def main() -> int:
         try:
             shutil.rmtree(REPO / "src" / "bobanana6" / "core" / "__pycache__", ignore_errors=True)
             shutil.rmtree(REPO / "tests" / "__pycache__", ignore_errors=True)
-            path.write_text(original.replace(mutation.old, mutation.new), encoding="utf-8")
+            path.write_text(original.replace(mutation.old, mutation.new), encoding="utf-8", newline="\n")
             caught, red = run_selector(mutation.selector)
         finally:
-            path.write_text(original, encoding="utf-8")
+            path.write_bytes(original_bytes)
             shutil.rmtree(REPO / "src" / "bobanana6" / "core" / "__pycache__", ignore_errors=True)
             shutil.rmtree(REPO / "tests" / "__pycache__", ignore_errors=True)
         if caught:
