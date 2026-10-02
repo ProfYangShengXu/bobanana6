@@ -14,6 +14,13 @@
 | `metrics.py` | 散落在 `agent_runtime_helpers.py` / 观测钩子里的计数 | 16 |
 | `state.py` | `session_persistence.py` 的幂等落盘 + turn 边界 | 17 |
 | `attribution.py` | **Hermes 没有**，本项目自补（FORK-NOTES §D） | 18 |
+| `concurrency.py` | `tool_dispatch_helpers.py` 的并发规划 + 端点限流 | 19 |
+| `sandbox.py` | `file_safety.py` 的边界思路（**执行级**隔离是本项目改的） | 19 |
+| `gate.py` | `verification_evidence.py` 的五条 | 20 |
+| `tools.py` | `tool_executor.py`（严格解析/合成拒绝）+ `tool_guardrails.py` + `_plan_tool_batch_segments` | 21 |
+| `compress.py` | `context_compressor.py` 的**最小内核**（其余整块不抄） | 21 |
+| `recovery.py` | `turn_recovery.py` 的三级出口 + taint | 21 |
+| `loop.py` | `conversation_loop.py` / `turn_finalizer.py` 的 phase/verdict + 收尾不变式 | 21 |
 
 ## 四类决策（对着 `FORK-NOTES.md §2/§3/§4`）
 
@@ -35,22 +42,30 @@
 - Hermes 的恢复提示（`should_rotate_credential` / `should_fallback` / tier 路由）换成
   `retryable` / `should_compress` 两个本项目决策层真正会读的字段。
 - `Checkpoint` 换成 `task_id / worker_id / turn / messages_digest / done_actions / status`。
+- **`verification_evidence` 从「被动账本」接成硬闸**（`gate.py`）：Hermes 自陈「从不阻断完成」，
+  本项目要求 `passed` 且 scope 覆盖才能完成 —— 这是 §7.3「自我报告不可信」的落地。
+- 压缩只保留**最小内核**并加了「不缩小就拒绝提交 + 可恢复」两条本项目要求。
 
 **C · 直接删（不抄，附理由）**
 
 - **provider 怪癖**（Copilot/Nous/Ollama/codex_app_server 特判、entitlement 文案、
   billing 文案表）——那是 provider 形态问题，换 provider 就过期，且 core 要环境无关。
-- **压缩子系统**（`context_compressor.py` 5753 行）——worker 的上下文天然比单 agent 小，
-  FORK-NOTES §0 结论：整块不抄，最小内核也留到第 21 步再说。
-- **会话轮转 / SessionDB lineage / orphan 恢复 / watermark / durable 锁**——worker 不跨进程
-  长时间驻留，这些机制是净负债。
+- **压缩子系统里的重型件**（`context_compressor.py` 5753 行）：micro-compaction /
+  proactive prune / idle compaction / anti-thrash / telemetry / 会话轮转 /
+  SessionDB lineage / orphan 恢复 / watermark / durable 锁 / commit fence +
+  四路守护线程池 / admission 限流 —— worker 的上下文天然比单 agent 小，整块净负债。
 - **展示层**（spinner / emoji / vprint）与**计费权益**——与判定无关。
-- **`TurnRetryState` 的一次性修复 flag 模式**——本块没有恢复分支，第 21 步再抄。
+- **`TurnRetryState` 的一次性修复 flag 模式**——本项目的恢复走 `recovery.py` 的
+  重试/反思/降级三段，不需要每个分支配一个 flag。
 
 **D · 自己补**
 
 - **`attribution.py` 整块**：Hermes 只有错误分类，没有「该怪谁」。四出口 + 分离实验
   （上下文原样交给正常人）是本项目 §7.8 的缺口。
+- **`gate.py` 的 `declined` 第三出口**：Hermes 的 gate 是二分，本项目把它改成三分，
+  且拒答不触发重试（`should_retry` 对 declined 返回 False）。
+- **`sandbox.py` 的执行级隔离 + fail-closed**：Hermes 的 `file_safety` 是路径级边界；
+  并发 worker 互相踩工作目录是另一回事，且隔离落不下来时**拒绝执行**而不是静默放开。
 
 ## 架构纪律
 

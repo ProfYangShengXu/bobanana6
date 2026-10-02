@@ -1,5 +1,5 @@
-"""Hermes-derived worker runtime (steps 15-18: errors, events, metrics, state,
-attribution).
+"""Hermes-derived worker runtime (steps 15-21: errors, events, metrics, state,
+attribution, concurrency, sandbox, gate, tools, compress, recovery, loop).
 
 ``agentloop/`` sits beside ``core/``, never inside it: ``core/`` is the domain
 judgment (what counts as admissible), ``agentloop/`` is infrastructure (how to

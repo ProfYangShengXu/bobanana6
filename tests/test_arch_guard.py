@@ -452,7 +452,20 @@ def test_unit_whitelist_guard_detects_a_bad_symbol() -> None:
 
 AGENTLOOP = REPO / "src" / "bobanana6" / "agentloop"
 
-AGENTLOOP_STEP_MODULES = ("attribution.py", "errors.py", "events.py", "metrics.py", "state.py")
+AGENTLOOP_STEP_MODULES = (
+    "attribution.py",
+    "compress.py",
+    "concurrency.py",
+    "errors.py",
+    "events.py",
+    "gate.py",
+    "loop.py",
+    "metrics.py",
+    "recovery.py",
+    "sandbox.py",
+    "state.py",
+    "tools.py",
+)
 
 FORBIDDEN_AGENTLOOP_DEPS = (
     "bobanana6.adapters",
