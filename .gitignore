@@ -1,0 +1,50 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ── 虚拟环境 ────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── 测试与类型检查缓存 ──────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.hypothesis/
+
+# ── 凭据（★ 绝不入库）──────────────────────────────────
+.env
+*.env
+!.env.example
+secrets/
+*.pem
+*.key
+
+# ── 编辑器 / 系统 ──────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 本机运行产物（不是设计的一部分）────────────────────
+.chen/                  # dsh 的工作记忆（suspicious.md / 审计发现）
+.bobanana6/             # 运行时自动起草的本体（每个项目一份，不该跟着仓库走）
+out/
+result.csv
+*.log
