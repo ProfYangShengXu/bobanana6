@@ -119,7 +119,7 @@ MAX_ROUNDS = 3
 #: ``calls`` were removed: nothing would ever declare them because the field
 #: name already states the unit (§5.0.1 ①). The model-output ruler and the
 #: body-size ruler stay distinct because the *same* output can be counted either
-#: way, and mixing them is the mistake recorded in ``aGent.md §7⑤``.
+#: way, and mixing them is the mistake recorded in ``AGENTS.md §7⑤``.
 #:
 #: NOTE: this set also drives the environment guard's vocabulary exemption, so
 #: it is security-relevant -- adding a symbol widens what the guard lets pass.
