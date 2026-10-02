@@ -378,6 +378,95 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_model.py::test_every_declared_unit_symbol_is_whitelisted",
         "a symbol with no reader sneaks back into the whitelist",
     ),
+    # -- agentloop steps 15-18 --------------------------------------------- #
+    Mutation(
+        "AL1-429-overflow-priority-lost",
+        "agentloop/errors.py",
+        "        # Overflow disguised as throttling must not become RETRY_LOCAL.\n        if _is_overflow(message):",
+        "        # Overflow disguised as throttling must not become RETRY_LOCAL.\n        if False:",
+        "tests/test_agentloop_errors.py::test_429_context_length_becomes_reshard_not_retry",
+        "a 429 context-length error is retried instead of resharded",
+    ),
+    Mutation(
+        "AL2-413-ruler-conflated",
+        "agentloop/errors.py",
+        "    if status == 413:\n        return FailoverReason.PAYLOAD_TOO_LARGE  # byte ruler, before generic 4xx",
+        "    if status == 413:\n        return FailoverReason.CONTEXT_OVERFLOW  # byte ruler, before generic 4xx",
+        "tests/test_agentloop_errors.py::test_413_is_a_byte_problem_even_with_overflow_wording",
+        "413 collapses into the token ruler",
+    ),
+    Mutation(
+        "AL3-validation-after-overflow",
+        "agentloop/errors.py",
+        "        if _has(message, _VALIDATION_SIGNALS):\n            return FailoverReason.FORMAT_ERROR",
+        "        if False:\n            return FailoverReason.FORMAT_ERROR",
+        "tests/test_agentloop_errors.py::test_400_validation_precedes_overflow",
+        "an unsupported max_tokens parameter is misread as overflow",
+    ),
+    Mutation(
+        "AL4-event-seq-not-owned-by-the-log",
+        "agentloop/events.py",
+        "        if ev.seq != len(self._events) + 1:",
+        "        if False:",
+        "tests/test_agentloop_events.py::test_log_refuses_an_event_with_a_foreign_seq",
+        "a caller can smuggle in its own seq",
+    ),
+    Mutation(
+        "AL5-resume-collapses-never-started",
+        "agentloop/state.py",
+        "        return Resume(start_turn=0, completed_actions=(), run=True)",
+        "        return Resume(start_turn=checkpoint.turn, completed_actions=checkpoint.done_actions, run=True)",
+        "tests/test_agentloop_state.py::test_resume_distinguishes_failed_from_never_started",
+        "never_started becomes indistinguishable from failed",
+    ),
+    Mutation(
+        "AL6-recovery-folded-into-success",
+        "agentloop/metrics.py",
+        '    recovered_calls = sum(1 for event in results if event.ok and event.detail.get("recovered") is True)',
+        "    recovered_calls = ok_calls",
+        "tests/test_agentloop_metrics.py::test_failure_recovery_is_its_own_number_not_folded_into_success",
+        "recovered calls are counted as first-try wins",
+    ),
+    Mutation(
+        "AL7-refusal-pollutes-answer-accuracy",
+        "agentloop/metrics.py",
+        "    correct = sum(1 for row in rows if row.answered and row.correct)",
+        "    correct = sum(1 for row in rows if row.correct)",
+        "tests/test_agentloop_metrics.py::test_delivery_refusal_is_scored_on_its_own_denominator",
+        "declined outcomes leak into the answered accuracy",
+    ),
+    Mutation(
+        "AL8-unknown-may-carry-a-blame",
+        "agentloop/attribution.py",
+        '        if (self.blame is None) != (self.confidence == "unknown"):',
+        "        if False:",
+        "tests/test_agentloop_attribution.py::test_unknown_and_a_blame_are_mutually_exclusive",
+        "a hard guess is allowed alongside confidence=unknown",
+    ),
+    Mutation(
+        "AL9-blame-without-evidence",
+        "agentloop/attribution.py",
+        "        if self.blame is not None and not self.evidence:",
+        "        if False:",
+        "tests/test_agentloop_attribution.py::test_a_blamed_attribution_must_carry_evidence",
+        "a conclusion without evidence is accepted",
+    ),
+    Mutation(
+        "AL10-experiment-branch-lost",
+        "agentloop/attribution.py",
+        "    if experiment == Experiment.HUMAN_CANNOT_ANSWER:",
+        "    if False:",
+        "tests/test_agentloop_attribution.py::test_experiment_human_cannot_answer_means_context",
+        "the decisive experiment cannot blame the context",
+    ),
+    Mutation(
+        "AL11-agentloop-guard-blind-to-absolute-imports",
+        "tests/test_arch_guard.py",
+        "                if node.module:\n                    found.append(node.module)",
+        "                if False:\n                    found.append(node.module)",
+        "tests/test_arch_guard.py::test_agentloop_dependency_guard_detects_a_violation",
+        "the agentloop dependency scanner cannot see absolute imports",
+    ),
 )
 
 
@@ -399,7 +488,13 @@ def main() -> int:
     print(f"{'mutation':44} {'caught':7} red tests")
     print("-" * 120)
     for mutation in MUTATIONS:
-        path = (REPO / mutation.relative_path).resolve() if mutation.relative_path.startswith("tests/") else (SRC / mutation.relative_path).resolve()
+        relative = mutation.relative_path
+        if relative.startswith("tests/"):
+            path = (REPO / relative).resolve()
+        elif relative.startswith("agentloop/"):
+            path = (REPO / "src" / "bobanana6" / relative).resolve()
+        else:
+            path = (SRC / relative).resolve()
         # Keep the exact original bytes: text-mode read normalizes CRLF to LF,
         # and writing that back silently rewrites every line ending in the file.
         original_bytes = path.read_bytes()
@@ -409,13 +504,15 @@ def main() -> int:
             print(f"{mutation.ident:44} ERROR   anchor not found exactly once")
             continue
         try:
-            shutil.rmtree(REPO / "src" / "bobanana6" / "core" / "__pycache__", ignore_errors=True)
+            for package in ("core", "agentloop"):
+                shutil.rmtree(REPO / "src" / "bobanana6" / package / "__pycache__", ignore_errors=True)
             shutil.rmtree(REPO / "tests" / "__pycache__", ignore_errors=True)
             path.write_text(original.replace(mutation.old, mutation.new), encoding="utf-8", newline="\n")
             caught, red = run_selector(mutation.selector)
         finally:
             path.write_bytes(original_bytes)
-            shutil.rmtree(REPO / "src" / "bobanana6" / "core" / "__pycache__", ignore_errors=True)
+            for package in ("core", "agentloop"):
+                shutil.rmtree(REPO / "src" / "bobanana6" / package / "__pycache__", ignore_errors=True)
             shutil.rmtree(REPO / "tests" / "__pycache__", ignore_errors=True)
         if caught:
             print(f"{mutation.ident:44} {'yes':7} {red}")

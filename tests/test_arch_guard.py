@@ -443,3 +443,74 @@ def test_unit_whitelist_guard_detects_a_bad_symbol() -> None:
     defaults = unit_field_defaults(source)
     assert defaults == {"X.max_unit": "widgets"}
     assert set(defaults.values()) - UNIT_SYMBOLS == {"widgets"}
+
+
+# --------------------------------------------------------------------------- #
+# agentloop/ boundary (实现规格 §9.1): it implements core ports, and it must
+# not reach for the volatile side or for core's concrete judgment modules.
+# --------------------------------------------------------------------------- #
+
+AGENTLOOP = REPO / "src" / "bobanana6" / "agentloop"
+
+AGENTLOOP_STEP_MODULES = ("attribution.py", "errors.py", "events.py", "metrics.py", "state.py")
+
+FORBIDDEN_AGENTLOOP_DEPS = (
+    "bobanana6.adapters",
+    "bobanana6.sources",
+    "bobanana6.cli",
+    "bobanana6.core.kernel",
+    "bobanana6.core.checkers",
+    "bobanana6.core.split",
+    "bobanana6.core.assemble",
+    "bobanana6.core.consist",
+    "bobanana6.core.ontology",
+    "bobanana6.core.capabilities",
+    "bobanana6.core.provenance",
+)
+
+
+def agentloop_files() -> list[Path]:
+    return sorted(path for path in AGENTLOOP.rglob("*.py") if path.is_file())
+
+
+def resolved_imports(module_name: str, source: str, *, is_package: bool = False) -> list[str]:
+    """Absolute module names for absolute imports and resolved relative ones."""
+    package = module_name.split(".") if is_package else module_name.split(".")[:-1]
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if node.module:
+                    found.append(node.module)
+                continue
+            remaining = len(package) - (node.level - 1)
+            if remaining > 0:
+                base = ".".join(package[:remaining])
+                found.append(f"{base}.{node.module}" if node.module else base)
+    return found
+
+
+def test_agentloop_step_modules_are_present() -> None:
+    names = {path.name for path in agentloop_files()}
+    assert set(AGENTLOOP_STEP_MODULES) <= names, f"missing agentloop modules: {set(AGENTLOOP_STEP_MODULES) - names}"
+
+
+def test_agentloop_has_no_forbidden_dependencies() -> None:
+    offenders: list[str] = []
+    for path in agentloop_files():
+        source = path.read_text(encoding="utf-8")
+        for module in resolved_imports(module_name_for(path), source, is_package=path.name == "__init__.py"):
+            if module.startswith(FORBIDDEN_AGENTLOOP_DEPS):
+                offenders.append(f"{path.relative_to(REPO)} imports {module}")
+    assert offenders == [], f"agentloop reached outside its allowed dependencies: {offenders}"
+
+
+def test_agentloop_dependency_guard_detects_a_violation() -> None:
+    absolute = resolved_imports("bobanana6.agentloop.errors", "from bobanana6.adapters import glm")
+    assert absolute == ["bobanana6.adapters"]
+    assert any(module.startswith(FORBIDDEN_AGENTLOOP_DEPS) for module in absolute)
+
+    relative = resolved_imports("bobanana6.agentloop.errors", "from .events import Event")
+    assert relative == ["bobanana6.agentloop.events"]
