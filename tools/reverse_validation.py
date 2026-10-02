@@ -716,6 +716,46 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_agentloop_loop.py::test_a_failed_turn_is_persisted_before_the_retry",
         "a failed turn is not written to the checkpoint",
     ),
+    Mutation(
+        "BB32-throttle-not-called",
+        "agentloop/loop.py",
+        "        if not self._gate.acquire(route):",
+        "        if False:",
+        "tests/test_agentloop_loop.py::test_the_loop_throttles_before_the_model_call",
+        "the loop bypasses the proactive throttle",
+    ),
+    Mutation(
+        "BB33-route-table-bypassed",
+        "agentloop/loop.py",
+        '        route = self._routes.route(turn.route_key) if self._routes is not None else "default"',
+        "        route = turn.route_key",
+        "tests/test_agentloop_loop.py::test_the_loop_routes_through_the_route_table",
+        "the loop picks the model itself instead of routing",
+    ),
+    Mutation(
+        "BB34-single-flight-bypassed",
+        "agentloop/loop.py",
+        "            return self._gate.single_flight(request_key)(lambda: self._io.produce(turn.state))",
+        "            return self._io.produce(turn.state)",
+        "tests/test_agentloop_loop.py::test_the_loop_dedupes_identical_in_flight_requests",
+        "a duplicate in-flight request fires a second model call",
+    ),
+    Mutation(
+        "BB35-done-actions-still-empty",
+        "agentloop/loop.py",
+        "            done_actions=turn.state.done_actions,",
+        "            done_actions=(),",
+        "tests/test_agentloop_loop.py::test_completed_actions_are_persisted_and_not_replayed",
+        "a resumed run cannot tell which actions already ran",
+    ),
+    Mutation(
+        "BB36-throttle-recorded-as-failed",
+        "agentloop/loop.py",
+        '                self._persist(turn, status="never_started" if turn.throttled else "failed")',
+        '                self._persist(turn, status="failed")',
+        "tests/test_agentloop_loop.py::test_the_loop_throttles_before_the_model_call",
+        "a turn that never started is recorded as a failure",
+    ),
 )
 
 

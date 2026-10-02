@@ -32,12 +32,12 @@ from typing import Any, Protocol, TypeVar
 
 from ..core.model import Candidate
 from .compress import CompressionPolicy, compact
-from .concurrency import RuntimeGate, SessionRegistry
+from .concurrency import ResourceGate, RouteTable, SessionRegistry
 from .errors import BobananaAction, ClassifiedError, classify_error
 from .events import EventLog
 from .gate import GateVerdict, can_complete
 from .recovery import RecoveryAction, TaintTracker, decide_recovery, reflect_message
-from .state import CheckpointStore, save_turn
+from .state import CheckpointStore, messages_digest, save_turn
 from .tools import (
     ToolCall,
     ToolCallGuardrailController,
@@ -223,6 +223,15 @@ def guarded(label: str, fn: Callable[[], T], errors: list[str]) -> T | None:
         return None
 
 
+def _merge_actions(existing: tuple[str, ...], new: tuple[str, ...]) -> tuple[str, ...]:
+    """Append newly completed action ids, preserving order and dropping repeats."""
+    merged = list(existing)
+    for action in new:
+        if action not in merged:
+            merged.append(action)
+    return tuple(merged)
+
+
 def resolve_budget_fallback(
     withheld: Candidate | None,
     supplier: Callable[[], Candidate | None] | None = None,
@@ -302,6 +311,9 @@ class LoopState:
     calls: int = 0
     messages: tuple[Mapping[str, Any], ...] = ()
     withheld: Candidate | None = None
+    #: Stable ids (not indices) of the actions this turn already completed, so a
+    #: resumed run does not replay them (AGENTS §7①②).
+    done_actions: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     exit_reason: str = "unknown"
     tainted: tuple[str, ...] = ()
@@ -325,11 +337,14 @@ class _Turn:
     state: LoopState
     task_id: str
     worker_id: str
+    route_key: str = ""
     proposal: TurnProposal | None = None
     gate: GateVerdict | None = None
     results: tuple[ToolResult, ...] = ()
     final_candidate: Candidate | None = None
     declined: bool = False
+    throttled: bool = False
+    route: str | None = None
     exit_reason: str = "unknown"
     injected: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
 
@@ -343,7 +358,8 @@ class WorkerLoop:
         *,
         config: LoopConfig | None = None,
         store: CheckpointStore | None = None,
-        gate: RuntimeGate | None = None,
+        gate: ResourceGate | None = None,
+        routes: RouteTable | None = None,
         sessions: SessionRegistry | None = None,
         log: EventLog | None = None,
         taint: TaintTracker | None = None,
@@ -355,6 +371,7 @@ class WorkerLoop:
         self._config = config or LoopConfig()
         self._store = store
         self._gate = gate
+        self._routes = routes
         self._sessions = sessions
         self._log = log
         self._taint = taint or TaintTracker(self._config.taint_threshold)
@@ -372,6 +389,7 @@ class WorkerLoop:
         task_id: str,
         worker_id: str,
         messages: Sequence[Mapping[str, Any]] = (),
+        route_key: str | None = None,
     ) -> LoopResult:
         if not task_id or not worker_id:
             raise ValueError("task_id and worker_id must not be empty")
@@ -379,10 +397,11 @@ class WorkerLoop:
             self._sessions.session(worker_id)  # isolate this worker's mutable state
         state = LoopState(messages=tuple(messages))
         last_gate: GateVerdict | None = None
+        routing_key = route_key or task_id
 
         while state.turn < self._config.max_turns:
             state = replace(state, turn=state.turn + 1)
-            turn = _Turn(state=state, task_id=task_id, worker_id=worker_id)
+            turn = _Turn(state=state, task_id=task_id, worker_id=worker_id, route_key=routing_key)
             outcome = run_phase_chain(
                 {
                     Phase.BEGIN: PhaseResult.fallthrough,
@@ -413,7 +432,8 @@ class WorkerLoop:
                     declined=turn.declined,
                 )
             if outcome.action is PhaseAction.BREAK:
-                self._persist(turn, status="failed")
+                # A turn that was throttled never started; anything else failed.
+                self._persist(turn, status="never_started" if turn.throttled else "failed")
                 return LoopResult(
                     candidate=None,
                     gate=turn.gate or last_gate,
@@ -464,10 +484,16 @@ class WorkerLoop:
 
     def _gate_phase(self, turn: _Turn) -> PhaseResult:
         if turn.proposal is None:
-            proposal, exc = self._attempt(turn, "produce", lambda: self._io.produce(turn.state))
+            proposal, exc = self._attempt(turn, "produce", lambda: self._call_model(turn))
             turn.proposal = proposal
+            if turn.throttled:
+                # ★ Over budget: the request was never sent, so the turn never ran.
+                turn.exit_reason = "throttled"
+                return PhaseResult.stop("throttled")
             if exc is not None:
                 return self._classify_and_recover(turn, exc)
+            if proposal is None:
+                return self._classify_and_recover(turn, RuntimeError("produce returned no proposal"))
         proposal = turn.proposal
         if proposal.declined:
             turn.gate = GateVerdict(status="declined", scope=self._config.required_scope)
@@ -488,6 +514,31 @@ class WorkerLoop:
         # Withheld: keep it for the budget fallback, then try to fix it.
         turn.state = replace(turn.state, withheld=proposal.candidate, attempts=turn.state.attempts + 1)
         return PhaseResult.fallthrough()
+
+    def _call_model(self, turn: _Turn) -> TurnProposal | None:
+        """The single model call, routed and throttled *before* it is sent.
+
+        The loop's only model call goes through the gate here, so the limiter in
+        :mod:`bobanana6.agentloop.concurrency` is on the real path and not a dead
+        dependency. Two distinct keys, matching 架构设计 §7.6:
+
+          * the **route** keys the proactive throttle (the limit belongs to the
+            model endpoint);
+          * the **request** key (route + task + content digest) keys single-flight,
+            so a re-run of the *same* request waits instead of firing a duplicate.
+        """
+        if self._gate is None:
+            return self._io.produce(turn.state)
+        route = self._routes.route(turn.route_key) if self._routes is not None else "default"
+        turn.route = route
+        if not self._gate.acquire(route):
+            turn.throttled = True
+            return None
+        try:
+            request_key = f"{route}:{turn.task_id}:{messages_digest(turn.state.messages)}"
+            return self._gate.single_flight(request_key)(lambda: self._io.produce(turn.state))
+        finally:
+            self._gate.release(route)
 
     def _retry(self, turn: _Turn) -> PhaseResult:
         state = turn.state
@@ -559,7 +610,12 @@ class WorkerLoop:
                 self._guardrails.observe(call, result)
                 self._taint.observe(call.name, result.ok)
         turn.results = order_results(proposal.tool_calls, results)
-        turn.state = replace(turn.state, calls=turn.state.calls + len(proposal.tool_calls))
+        completed = tuple(f"tool:{call.call_id}" for call in proposal.tool_calls)
+        turn.state = replace(
+            turn.state,
+            calls=turn.state.calls + len(proposal.tool_calls),
+            done_actions=_merge_actions(turn.state.done_actions, completed),
+        )
         appended = tuple(
             {"role": "tool", "tool_call_id": result.call_id, "content": result.content} for result in turn.results
         )
@@ -629,6 +685,6 @@ class WorkerLoop:
             worker_id=turn.worker_id,
             turn=turn.state.turn,
             messages=turn.state.messages,
-            done_actions=(),
+            done_actions=turn.state.done_actions,
             status=status,
         )

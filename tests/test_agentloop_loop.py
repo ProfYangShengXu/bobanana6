@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 from bobanana6.agentloop.compress import CompressionPolicy
+from bobanana6.agentloop.concurrency import GateConfig, RouteTable, RuntimeGate
 from bobanana6.agentloop.gate import GateVerdict
 from bobanana6.agentloop.loop import (
     LoopConfig,
@@ -20,7 +24,12 @@ from bobanana6.agentloop.loop import (
     resolve_budget_fallback,
     run_phase_chain,
 )
-from bobanana6.agentloop.state import InMemoryCheckpointStore, load_checkpoint
+from bobanana6.agentloop.state import (
+    InMemoryCheckpointStore,
+    load_checkpoint,
+    messages_digest,
+    resume,
+)
 from bobanana6.agentloop.tools import ToolCall, ToolResult
 from bobanana6.core.model import Candidate
 
@@ -230,3 +239,115 @@ def test_run_phase_chain_honours_the_action_protocol() -> None:
     )
     assert outcome.action is PhaseAction.CONTINUE
     assert seen == ["begin", "prepare"]  # nothing after a non-fallthrough action
+
+
+# --------------------------------------------------------------------------- #
+# concurrency is on the loop's real path (架构设计 §7.6)
+# --------------------------------------------------------------------------- #
+
+
+class SpyGate:
+    """Records the throttle key while delegating to a real gate."""
+
+    def __init__(self, inner: RuntimeGate) -> None:
+        self._inner = inner
+        self.acquired: list[str] = []
+
+    def acquire(self, key, timeout=None):
+        self.acquired.append(key)
+        return self._inner.acquire(key, 0.0)
+
+    def release(self, key):
+        self._inner.release(key)
+
+    def single_flight(self, key):
+        return self._inner.single_flight(key)
+
+
+def _wait_for_waiters(gate: RuntimeGate, key: str, count: int, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while gate.waiters(key) < count and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert gate.waiters(key) >= count, "no waiter registered on the in-flight request"
+
+
+def test_the_loop_throttles_before_the_model_call() -> None:
+    """★ Over budget => the request is never sent, and the turn never started."""
+    io = FakeIO([TurnProposal(candidate=candidate())])
+    gate = RuntimeGate(GateConfig(max_concurrent=1))
+    assert gate.acquire("cheap") is True  # occupy the endpoint
+    store = InMemoryCheckpointStore()
+    loop = WorkerLoop(io, gate=gate, routes=RouteTable({"task-1": "cheap"}), store=store)
+
+    result = loop.run(task_id="task-1", worker_id="w")
+
+    assert result.exit_reason == "throttled"
+    assert io.states == []  # ★ the request was not sent
+    checkpoint = load_checkpoint(store, "task-1")
+    assert checkpoint is not None and checkpoint.status == "never_started"
+
+
+def test_the_loop_routes_through_the_route_table() -> None:
+    io = FakeIO([TurnProposal(candidate=candidate())])
+    gate = SpyGate(RuntimeGate())
+    loop = WorkerLoop(io, gate=gate, routes=RouteTable({"task-1": "cheap"}))
+
+    loop.run(task_id="task-1", worker_id="w")
+
+    assert gate.acquired == ["cheap"], "the loop must not pick a model on its own"
+
+
+def test_the_loop_dedupes_identical_in_flight_requests() -> None:
+    gate = RuntimeGate(GateConfig(max_concurrent=4))
+    calls: list[int] = []
+    in_flight = threading.Event()
+    release = threading.Event()
+
+    class IO(FakeIO):
+        def produce(self, state):
+            calls.append(1)
+            in_flight.set()
+            release.wait(3.0)
+            return TurnProposal(candidate=candidate())
+
+    messages = ({"role": "user", "content": "hi"},)
+    request_key = f"default:task-1:{messages_digest(messages)}"
+    results: list = []
+
+    def run_once() -> None:
+        results.append(WorkerLoop(IO([]), gate=gate).run(task_id="task-1", worker_id="w", messages=messages))
+
+    first = threading.Thread(target=run_once)
+    first.start()
+    assert in_flight.wait(2.0)
+    second = threading.Thread(target=run_once)
+    second.start()
+    _wait_for_waiters(gate, request_key, 1)
+    release.set()
+    first.join(3.0)
+    second.join(3.0)
+
+    assert len(calls) == 1  # ★ the duplicate never fired a model call
+    assert len(results) == 2
+
+
+def test_completed_actions_are_persisted_and_not_replayed() -> None:
+    """★ The three-state checkpoint is only useful if done_actions is filled in."""
+    store = InMemoryCheckpointStore()
+
+    class IO(FakeIO):
+        def produce(self, state):
+            self.states.append(state)
+            if len(self.states) == 1:
+                return TurnProposal(tool_calls=(read("1"), read("2")))
+            raise RuntimeError("boom")
+
+    loop = WorkerLoop(IO([]), config=LoopConfig(max_retries=0, max_reflections=0), store=store)
+    result = loop.run(task_id="task-1", worker_id="w")
+
+    assert result.exit_reason not in {"passed", "declined"}
+    checkpoint = load_checkpoint(store, "task-1")
+    assert checkpoint is not None
+    assert checkpoint.status == "failed"
+    assert checkpoint.done_actions == ("tool:1", "tool:2")
+    assert resume(checkpoint).completed_actions == ("tool:1", "tool:2")
