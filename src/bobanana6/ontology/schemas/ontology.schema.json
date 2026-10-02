@@ -66,7 +66,7 @@
           "src": { "type": "string", "minLength": 1 },
           "dst": { "type": "string", "minLength": 1 },
           "kind": { "enum": ["belongs_to", "subtype_of", "measured_in", "derived_from"] },
-          "cardinality": { "enum": ["1:1", "1:N", "N:M"] }
+          "cardinality": { "enum": ["1:1", "1:N", "N:1", "N:M"] }
         }
       }
     },
