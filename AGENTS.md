@@ -10,9 +10,21 @@
 **bobanana6**：用充裕并发资源，把复杂任务切成 N 块分工砸完；
 判定内核保证**每块合格、语义一致、整体拼得上**。
 
-**当前状态（诚实标注）**：仓库里**只有文档，还没有代码**。
-`agentloop/` 尚未 fork（fork 步骤见 §1.6 + `FORK-NOTES.md`）。
-**所以下面的命令是目标形态，不是现状。**
+**当前状态（诚实标注）**：**内核、fork 来的运行时、本体/契约/切分三层都已落地并可自证，
+但端到端还跑不起来** —— 装配点 `cli.py` 还没写，`uv` 在本机也未安装。
+
+- ✅ 已实现：`core/`（步骤 1–7）· `agentloop/`（步骤 15–21，含 `LICENSE.hermes` + `README.md`）·
+  `ontology/` `contract/` `decompose/`（步骤 8–10）· `tests/` · `tools/`（反向验证脚本）
+- ❌ 未实现：`services/` · `adapters/` · `sources/` · `cli.py`（唯一装配点）· `__main__.py` —— 步骤 11–14
+
+| 命令 | 现状 |
+|---|---|
+| `pytest tests/ -q` | ✅ 513 passed |
+| `pytest -m arch_guard -q` | ✅ 28 passed（含 §1.2 依赖方向守卫） |
+| `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
+| `uv run bobanana6 run task.yaml` | ❌ 无 `cli.py`，也没有 console script；本机未装 `uv` |
+
+**所以 §3 的命令是目标形态，不是现状。**
 
 | 你要做什么 | 先读 |
 |---|---|

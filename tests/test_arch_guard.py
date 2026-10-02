@@ -527,3 +527,99 @@ def test_agentloop_dependency_guard_detects_a_violation() -> None:
 
     relative = resolved_imports("bobanana6.agentloop.errors", "from .events import Event")
     assert relative == ["bobanana6.agentloop.events"]
+
+
+# --------------------------------------------------------------------------- #
+# Steps 8-10: ontology/ contract/ decompose/
+#
+# These sit below the volatile side (adapters/sources/cli) and above the frozen
+# kernel.  Two arrows must hold, both direction-bearing:
+#   * nothing in core/ may import them       (core is the terminal, zero-model)
+#   * they may not import adapters/sources/cli (only the assembly point may)
+# --------------------------------------------------------------------------- #
+
+MID_LAYER_PACKAGES = ("ontology", "contract", "decompose")
+
+MID_LAYER_STEP_MODULES = (
+    "ontology/loader.py",
+    "ontology/__init__.py",
+    "ontology/schemas/ontology.schema.json",
+    "contract/parser.py",
+    "contract/__init__.py",
+    "decompose/strategies.py",
+    "decompose/budget.py",
+    "decompose/__init__.py",
+)
+
+FORBIDDEN_MID_LAYER_DEPS = (
+    "bobanana6.adapters",
+    "bobanana6.sources",
+    "bobanana6.cli",
+)
+
+
+def mid_layer_files() -> list[Path]:
+    root = REPO / "src" / "bobanana6"
+    return sorted(path for package in MID_LAYER_PACKAGES for path in (root / package).rglob("*.py"))
+
+
+def mid_layer_offenders(module_name: str, source: str, *, is_package: bool = False) -> list[str]:
+    """Imports that would drag the volatile side into ontology/contract/decompose.
+
+    Only resolvable names are reported; a relative import that climbs above
+    ``bobanana6`` is not representable (Python raises at import time), so there
+    is nothing to resolve it to.
+    """
+    return [
+        module
+        for module in resolved_imports(module_name, source, is_package=is_package)
+        if module.startswith(FORBIDDEN_MID_LAYER_DEPS)
+    ]
+
+
+def test_mid_layer_step_modules_are_present() -> None:
+    root = REPO / "src" / "bobanana6"
+    missing = [name for name in MID_LAYER_STEP_MODULES if not (root / name).is_file()]
+    assert missing == [], f"missing step 8-10 modules: {missing}"
+
+
+def test_mid_layer_packages_do_not_reach_the_volatile_side() -> None:
+    offenders: list[str] = []
+    for path in mid_layer_files():
+        source = path.read_text(encoding="utf-8")
+        for module in mid_layer_offenders(
+            module_name_for(path), source, is_package=path.name == "__init__.py"
+        ):
+            offenders.append(f"{path.relative_to(REPO)} imports {module}")
+    assert offenders == [], f"mid-layer reached the volatile side: {offenders}"
+
+
+def test_core_does_not_import_the_mid_layer() -> None:
+    """§1.2: the arrow points at core; core never points back."""
+    forbidden = tuple(f"bobanana6.{package}" for package in MID_LAYER_PACKAGES)
+    offenders: list[str] = []
+    for path in core_files():
+        source = path.read_text(encoding="utf-8")
+        for module in resolved_imports(
+            module_name_for(path), source, is_package=path.name == "__init__.py"
+        ):
+            if module.startswith(forbidden):
+                offenders.append(f"{path.relative_to(REPO)} imports {module}")
+    assert offenders == [], f"core depends on the mid layer: {offenders}"
+
+
+def test_mid_layer_dependency_guard_detects_a_violation() -> None:
+    module = "bobanana6.decompose.strategies"
+    assert mid_layer_offenders(module, "from bobanana6.adapters import glm") == [
+        "bobanana6.adapters"
+    ]
+    assert mid_layer_offenders(module, "from ..adapters import glm") == ["bobanana6.adapters"]
+    assert mid_layer_offenders(module, "from ..core import split") == []
+    assert mid_layer_offenders(module, "import os") == []
+
+    core_guard = tuple(f"bobanana6.{package}" for package in MID_LAYER_PACKAGES)
+    assert [
+        found
+        for found in resolved_imports("bobanana6.core.kernel", "from bobanana6.ontology import loader")
+        if found.startswith(core_guard)
+    ] == ["bobanana6.ontology"]

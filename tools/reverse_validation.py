@@ -12,6 +12,7 @@ Exit: 0 when every mutation is caught, 1 otherwise.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -21,6 +22,21 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "bobanana6" / "core"
+
+#: Packages whose modules can be reached by a bare ``<package>/<module>.py`` path.
+#: ``core`` is the default (``SRC``); the rest live beside it.
+SOURCE_PACKAGES = ("core", "agentloop", "ontology", "contract", "decompose")
+
+
+def clear_bytecode_cache() -> None:
+    """Drop stale bytecode so a mutated source cannot be served from a .pyc.
+
+    Same-second edits can leave a cache entry with an unchanged mtime/size
+    stamp, which would make the mutation invisible to the test subprocess.
+    """
+    shutil.rmtree(REPO / "tests" / "__pycache__", ignore_errors=True)
+    for package in SOURCE_PACKAGES:
+        shutil.rmtree(REPO / "src" / "bobanana6" / package / "__pycache__", ignore_errors=True)
 
 
 @dataclass(frozen=True)
@@ -756,6 +772,159 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_agentloop_loop.py::test_the_loop_throttles_before_the_model_call",
         "a turn that never started is recorded as a failure",
     ),
+    # -- steps 8-10: ontology/ contract/ decompose/ ------------------------ #
+    Mutation(
+        "L01-empty-unmapped-reason-accepted",
+        "contract/parser.py",
+        '        if not isinstance(raw.get("reason"), str) or not raw["reason"].strip():',
+        "        if False:",
+        "tests/test_contract_parser.py::test_empty_unmapped_reason_is_refused",
+        "an empty unmapped reason is no longer refused (core does not check it either)",
+    ),
+    Mutation(
+        "L02-whitespace-rationale-accepted",
+        "contract/parser.py",
+        '        if not isinstance(raw.get("rationale"), str) or not raw["rationale"].strip():',
+        '        if not isinstance(raw.get("rationale"), str) or not raw["rationale"]:',
+        "tests/test_contract_parser.py::test_whitespace_only_rationale_is_refused",
+        "a whitespace-only rationale slips past the non-empty rule",
+    ),
+    Mutation(
+        "L03-auto-constraint-never-synthesized",
+        "contract/parser.py",
+        "        if subtask.id in covered or subtask.output in covered:",
+        "        if True:",
+        "tests/test_decompose.py::test_plan_from_strategy_passes_core_split",
+        "blocks stop being decidable, so split.verifiable would refuse the plan",
+    ),
+    Mutation(
+        "L04-consumer-suppression-ignored",
+        "contract/parser.py",
+        "        if subtask.id in covered or subtask.output in covered:",
+        "        if False:",
+        "tests/test_contract_parser.py::test_a_declared_per_block_constraint_suppresses_the_auto_one",
+        "an AUTO constraint is added even for a block that is already covered",
+    ),
+    Mutation(
+        "L05-schema-validation-disabled",
+        "ontology/loader.py",
+        "    errors = sorted(validator.iter_errors(data), key=lambda error: list(error.absolute_path))\n"
+        "    if not errors:\n"
+        "        return",
+        "    return",
+        "tests/test_ontology_loader.py::test_wildcard_version_is_rejected",
+        "the JSON Schema stop being consulted at all",
+    ),
+    Mutation(
+        "L06-dangling-unit-dropped",
+        "ontology/loader.py",
+        "        if unit_name is not None and unit_name not in symbols:",
+        "        if False:",
+        "tests/test_ontology_loader.py::test_dangling_unit_reference_is_refused_not_dropped",
+        "an unresolvable unit name vanishes instead of failing the load",
+    ),
+    Mutation(
+        "L07-concept-domain-default-lost",
+        "ontology/loader.py",
+        "    concepts = _concepts(data, domain)",
+        '    concepts = _concepts(data, "")',
+        "tests/test_ontology_loader.py::test_concept_domain_defaults_to_the_file_domain",
+        "per-concept domain no longer inherits the file domain",
+    ),
+    Mutation(
+        "L08-unmapped-field-dropped-by-strategy",
+        "decompose/strategies.py",
+        "    return tuple(map_field(name, ontology) or name for name in sorted(set(fields)))",
+        "    return tuple(mapped for mapped in (map_field(name, ontology) for name in sorted(set(fields))) if mapped)",
+        "tests/test_decompose.py::test_an_unmapped_deliverable_field_survives_as_its_raw_name",
+        "a field the ontology cannot map is silently dropped, so concept_mapped never fires",
+    ),
+    Mutation(
+        "L09-merge-writers-share-a-partition",
+        "decompose/strategies.py",
+        '                inputs=tuple(parts),\n'
+        "                output=deliverable.name,\n"
+        "                contract_ref=contract.task_id,\n"
+        "                axis=axis,\n"
+        '                mode="write",\n'
+        '                partition=f"deliverable:{deliverable.name}",',
+        '                inputs=tuple(parts),\n'
+        "                output=deliverable.name,\n"
+        "                contract_ref=contract.task_id,\n"
+        "                axis=axis,\n"
+        '                mode="write",\n'
+        '                partition="deliverable:all",',
+        "tests/test_decompose.py::test_two_same_layer_writers_get_distinct_partitions",
+        "two same-layer writers collide on one partition (split.write_serial)",
+    ),
+    Mutation(
+        "L10-single-write-loses-its-partition",
+        "decompose/strategies.py",
+        "                inputs=(),\n"
+        "                output=deliverable.name,\n"
+        "                contract_ref=contract.task_id,\n"
+        '                axis="source",\n'
+        '                mode="write",\n'
+        '                partition=f"deliverable:{deliverable.name}",',
+        "                inputs=(),\n"
+        "                output=deliverable.name,\n"
+        "                contract_ref=contract.task_id,\n"
+        '                axis="source",\n'
+        '                mode="write",\n'
+        "                partition=None,",
+        "tests/test_decompose.py::test_single_strategy_produces_one_write_per_deliverable",
+        "a write block declares no partition, so write_serial cannot be satisfied",
+    ),
+    Mutation(
+        "L11-refine-round-never-advances",
+        "decompose/strategies.py",
+        "            round=plan.round + 1,",
+        "            round=plan.round,",
+        "tests/test_decompose.py::test_refine_advances_when_the_budget_allows",
+        "a refinement round stops being countable, defeating round_budget",
+    ),
+    Mutation(
+        "L12-refine-ceiling-ignored",
+        "decompose/budget.py",
+        "    return budget.allows(plan.round + 1)",
+        "    return True",
+        "tests/test_decompose.py::test_refine_is_capped_by_the_round_budget",
+        "the round ceiling stops limiting refinement -- an unbounded loop",
+    ),
+    Mutation(
+        "L13-mid-layer-imports-the-volatile-side",
+        "contract/parser.py",
+        "from ..core.model import (",
+        "from ..adapters import glm  # noqa: F401\nfrom ..core.model import (",
+        "tests/test_arch_guard.py::test_mid_layer_packages_do_not_reach_the_volatile_side",
+        "contract/ reaches for adapters/, which only the assembly point may do",
+    ),
+    Mutation(
+        "L14-core-imports-the-mid-layer",
+        "core/split.py",
+        "from .model import (",
+        "from ..ontology import loader  # noqa: F401\nfrom .model import (",
+        "tests/test_arch_guard.py::test_core_does_not_import_the_mid_layer",
+        "an arrow points from core/ back at the mid layer (AGENTS.md 1.2)",
+    ),
+    Mutation(
+        "L16-decomposer-ignores-the-field-strategy",
+        "decompose/strategies.py",
+        '        if self._strategy == "field":\n'
+        "            return split_by_field(contract, ontology, round=round, version=version)",
+        "        if False:\n"
+        "            return split_by_field(contract, ontology, round=round, version=version)",
+        "tests/test_decompose.py::test_decomposer_dispatches_every_declared_strategy",
+        "strategy='field' silently falls through to the single-block builder",
+    ),
+    Mutation(
+        "L15-guard-blind-to-relative-imports",
+        "tests/test_arch_guard.py",
+        '                found.append(f"{base}.{node.module}" if node.module else base)',
+        "                found.append(base)",
+        "tests/test_arch_guard.py::test_mid_layer_dependency_guard_detects_a_violation",
+        "the dependency scanner can no longer resolve a relative import",
+    ),
 )
 
 
@@ -766,10 +935,21 @@ def run_selector(selector: str) -> tuple[bool, str]:
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    failing = tuple(
+        sorted(
+            set(re.findall(r"^(?:FAILED|ERROR) (\S+)", result.stdout, flags=re.MULTILINE))
+        )
     )
     caught = result.returncode != 0
-    failing = tuple(sorted(set(re.findall(r"^FAILED (\S+)", result.stdout, flags=re.MULTILINE))))
-    return caught, ", ".join(failing) if failing else ("ERROR/collection" if caught else "none")
+    if not caught:
+        return False, "none"
+    # A non-zero exit is not proof by itself: a misspelled selector also exits
+    # non-zero. Only a test that actually went red counts as a catch.
+    if not failing:
+        return False, "SELECTOR ERROR -- no test ran, the mutation proves nothing"
+    return True, ", ".join(failing)
 
 
 def main() -> int:
@@ -780,7 +960,7 @@ def main() -> int:
         relative = mutation.relative_path
         if relative.startswith("tests/"):
             path = (REPO / relative).resolve()
-        elif relative.startswith("agentloop/"):
+        elif relative.split("/")[0] in SOURCE_PACKAGES:
             path = (REPO / "src" / "bobanana6" / relative).resolve()
         else:
             path = (SRC / relative).resolve()
@@ -793,16 +973,12 @@ def main() -> int:
             print(f"{mutation.ident:44} ERROR   anchor not found exactly once")
             continue
         try:
-            for package in ("core", "agentloop"):
-                shutil.rmtree(REPO / "src" / "bobanana6" / package / "__pycache__", ignore_errors=True)
-            shutil.rmtree(REPO / "tests" / "__pycache__", ignore_errors=True)
+            clear_bytecode_cache()
             path.write_text(original.replace(mutation.old, mutation.new), encoding="utf-8", newline="\n")
             caught, red = run_selector(mutation.selector)
         finally:
             path.write_bytes(original_bytes)
-            for package in ("core", "agentloop"):
-                shutil.rmtree(REPO / "src" / "bobanana6" / package / "__pycache__", ignore_errors=True)
-            shutil.rmtree(REPO / "tests" / "__pycache__", ignore_errors=True)
+            clear_bytecode_cache()
         if caught:
             print(f"{mutation.ident:44} {'yes':7} {red}")
         else:

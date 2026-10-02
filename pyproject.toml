@@ -9,12 +9,12 @@ description = "Deterministic judgment kernel for sharded multi-worker task execu
 # 3.11+ is the floor because the core is meant to stay dependency-free while
 # still being able to read TOML through the stdlib (`tomllib`, added in 3.11).
 requires-python = ">=3.11"
-dependencies = []
+# `core/` itself stays stdlib-only -- the architecture guard enforces it. These
+# are for the environment-side packages: `ontology/` reads YAML, and the JSON
+# Schema in `ontology/schemas/` is validated with jsonschema.
+dependencies = ["pyyaml>=6", "jsonschema>=4"]
 
 [project.optional-dependencies]
-# Runtime dependencies for later units (adapters/ sources/ contract/ ...) are
-# intentionally NOT declared here: this unit ships `core/` only, and `core/`
-# must remain importable with an empty environment.
 dev = ["pytest>=8"]
 
 [dependency-groups]
