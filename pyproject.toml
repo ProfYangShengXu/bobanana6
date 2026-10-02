@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bobanana6"
+version = "0.0.0"
+description = "Deterministic judgment kernel for sharded multi-worker task execution."
+# 3.11+ is the floor because the core is meant to stay dependency-free while
+# still being able to read TOML through the stdlib (`tomllib`, added in 3.11).
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+# Runtime dependencies for later units (adapters/ sources/ contract/ ...) are
+# intentionally NOT declared here: this unit ships `core/` only, and `core/`
+# must remain importable with an empty environment.
+dev = ["pytest>=8"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# Tests import `bobanana6` straight from src/ so the kernel is verifiable
+# without installing anything and without a build step.
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+  "arch_guard: architecture purity guards (deterministic, no model, no network)",
+  "acceptance_smoke: end-to-end smoke gate over the core kernel with fakes only",
+]

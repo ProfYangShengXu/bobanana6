@@ -1,0 +1,476 @@
+"""Per-kind checker tests: positive, negative and boundary cases.
+
+Every kind gets at least one failing case, and the two special semantics get
+their identity asserted: corroboration disagreement yields a ``Conflict`` while
+still passing, and a definition drift yields a ``DefinitionMismatch`` rather
+than a ``Conflict``.
+"""
+
+from __future__ import annotations
+
+from fakes import artifact, candidate, constraint, mini_ontology, provenance, snapshot
+
+from bobanana6.core.checkers import CHECKS, JUDGMENT_ORDER, check_kind
+from bobanana6.core.checkers.base import CheckContext
+from bobanana6.core.model import (
+    Artifact,
+    Claim,
+    Column,
+    Conflict,
+    DefinitionMismatch,
+)
+
+
+def context(**overrides) -> CheckContext:
+    values = {
+        "ontology": mini_ontology(),
+        "snapshots": {"snap-1": snapshot("snap-1")},
+        "now": "2026-01-02T00:00:00",
+    }
+    values.update(overrides)
+    return CheckContext(**values)
+
+
+def run(kind: str, spec: dict, *, target: str = "out.csv", cand=None, ctx=None):
+    item = constraint("C-1", kind, target, spec)
+    return check_kind(item, cand if cand is not None else candidate(artifacts=(artifact(),)), ctx or context())
+
+
+def test_registry_covers_all_fourteen_kinds() -> None:
+    assert len(CHECKS) == 14
+    assert set(CHECKS) == set(JUDGMENT_ORDER)
+    assert len(JUDGMENT_ORDER) == 14
+
+
+def test_unknown_kind_fails_closed() -> None:
+    outcome = run("rang3", {})
+    assert outcome.ok is False
+    assert "unknown constraint kind" in outcome.facts[0]
+
+
+# --------------------------------------------------------------------------- #
+# schema
+# --------------------------------------------------------------------------- #
+
+
+def test_schema_accepts_matching_columns() -> None:
+    art = artifact("out.csv", ({"pd": 0.1},), columns=(Column("pd", "float"),))
+    outcome = run("schema", {"columns": [{"name": "pd", "dtype": "float"}]}, cand=candidate(artifacts=(art,)))
+    assert outcome.ok
+
+
+def test_schema_rejects_missing_column_and_reports_it() -> None:
+    art = artifact("out.csv", ({"pd": 0.1},))
+    outcome = run("schema", {"columns": [{"name": "amount", "dtype": "float"}]}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok
+    assert "missing column 'amount'" in outcome.facts[0]
+
+
+def test_schema_rejects_wrong_dtype() -> None:
+    art = artifact("out.csv", ({"pd": "x"},))
+    outcome = run("schema", {"columns": [{"name": "pd", "dtype": "float"}]}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "dtype" in outcome.facts[0]
+
+
+def test_schema_column_order_is_ignored_unless_asked() -> None:
+    art = artifact("out.csv", ({"a": 1, "b": 2},), columns=(Column("b", "float"), Column("a", "float")))
+    assert run("schema", {"columns": [{"name": "a", "dtype": "float"}, {"name": "b", "dtype": "float"}]}, cand=candidate(artifacts=(art,))).ok
+    assert not run(
+        "schema",
+        {"columns": [{"name": "a", "dtype": "float"}, {"name": "b", "dtype": "float"}], "order_sensitive": True},
+        cand=candidate(artifacts=(art,)),
+    ).ok
+
+
+def test_schema_rejects_malformed_spec() -> None:
+    assert not run("schema", {"columns": "not-a-list"}).ok
+
+
+# --------------------------------------------------------------------------- #
+# presence
+# --------------------------------------------------------------------------- #
+
+
+def test_presence_accepts_enough_rows() -> None:
+    art = artifact("out.csv", ({"a": 1}, {"a": 2}))
+    assert run("presence", {"min_rows": 2}, cand=candidate(artifacts=(art,))).ok
+
+
+def test_presence_rejects_missing_artifact() -> None:
+    outcome = run("presence", {"min_rows": 1}, cand=candidate(artifacts=()))
+    assert not outcome.ok and "not found" in outcome.facts[0]
+
+
+def test_presence_rejects_too_few_rows() -> None:
+    art = artifact("out.csv", ({"a": 1},))
+    outcome = run("presence", {"min_rows": 2}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "needs >= 2" in outcome.facts[0]
+
+
+def test_presence_rejects_bad_min_rows() -> None:
+    assert not run("presence", {"min_rows": -1}).ok
+
+
+# --------------------------------------------------------------------------- #
+# range
+# --------------------------------------------------------------------------- #
+
+
+def test_range_reports_first_violating_coordinate() -> None:
+    art = artifact("out.csv", ({"pd": 0.5}, {"pd": 1.5}, {"pd": 9.0}))
+    outcome = run("range", {"column": "pd", "min": 0.0, "max": 1.0}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok
+    assert "row=1" in outcome.facts[0]
+
+
+def test_range_tolerance_is_inclusive_on_both_sides() -> None:
+    inside = artifact("out.csv", ({"pd": 1.0000005},))
+    outside = artifact("out.csv", ({"pd": 1.001},))
+    spec = {"column": "pd", "min": 0.0, "max": 1.0, "tol": 1e-6}
+    assert run("range", spec, cand=candidate(artifacts=(inside,))).ok
+    assert not run("range", spec, cand=candidate(artifacts=(outside,))).ok
+
+
+def test_range_rejects_non_numeric_value() -> None:
+    art = artifact("out.csv", ({"pd": "n/a"},))
+    outcome = run("range", {"column": "pd", "min": 0.0, "max": 1.0}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "not numeric" in outcome.facts[0]
+
+
+# --------------------------------------------------------------------------- #
+# invariant
+# --------------------------------------------------------------------------- #
+
+
+def test_invariant_accepts_a_true_expression() -> None:
+    art = artifact("out.csv", ({"a": 1, "b": 2},))
+    assert run("invariant", {"expr": "b > a"}, cand=candidate(artifacts=(art,))).ok
+
+
+def test_invariant_reports_the_first_false_row() -> None:
+    art = artifact("out.csv", ({"a": 1, "b": 2}, {"a": 3, "b": 1}))
+    outcome = run("invariant", {"expr": "b > a"}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "row=1" in outcome.facts[0]
+
+
+def test_invariant_refuses_attribute_access() -> None:
+    art = artifact("out.csv", ({"a": 1},))
+    outcome = run("invariant", {"expr": "a.__class__"}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "not allowed" in outcome.facts[0]
+
+
+def test_invariant_reports_unknown_identifier() -> None:
+    art = artifact("out.csv", ({"a": 1},))
+    outcome = run("invariant", {"expr": "nope > 0"}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "unknown identifier" in outcome.facts[0]
+
+
+# --------------------------------------------------------------------------- #
+# relation
+# --------------------------------------------------------------------------- #
+
+
+def test_relation_accepts_equal_columns() -> None:
+    art = artifact("out.csv", ({"a": 1, "b": 1},))
+    assert run("relation", {"left": {"column": "a"}, "right": {"column": "b"}, "op": "eq"}, cand=candidate(artifacts=(art,))).ok
+
+
+def test_relation_reports_the_first_break_row() -> None:
+    art = artifact("out.csv", ({"a": 1, "b": 1}, {"a": 2, "b": 3}))
+    outcome = run("relation", {"left": {"column": "a"}, "right": {"column": "b"}, "op": "eq"}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "row=1" in outcome.facts[0]
+
+
+def test_relation_detects_row_count_mismatch() -> None:
+    cand = candidate(
+        artifacts=(
+            artifact("left.csv", ({"a": 1},)),
+            artifact("right.csv", ({"a": 1}, {"a": 2})),
+        )
+    )
+    outcome = run(
+        "relation",
+        {"left": {"artifact": "left.csv", "column": "a"}, "right": {"artifact": "right.csv", "column": "a"}, "op": "eq"},
+        cand=cand,
+    )
+    assert not outcome.ok and "row counts differ" in outcome.facts[0]
+
+
+def test_relation_rejects_bad_op() -> None:
+    assert not run("relation", {"left": {"column": "a"}, "right": {"column": "a"}, "op": "≈"}).ok
+
+
+# --------------------------------------------------------------------------- #
+# provenance
+# --------------------------------------------------------------------------- #
+
+
+def test_provenance_accepts_full_coverage() -> None:
+    art = artifact("out.csv", ({"a": 1}, {"a": 2}))
+    cand = candidate(
+        artifacts=(art,),
+        provenance=(provenance("out.csv:row=0"), provenance("out.csv:row=1")),
+    )
+    assert run("provenance", {}, cand=cand).ok
+
+
+def test_provenance_rejects_missing_coverage() -> None:
+    art = artifact("out.csv", ({"a": 1}, {"a": 2}))
+    cand = candidate(artifacts=(art,), provenance=(provenance("out.csv:row=0"),))
+    outcome = run("provenance", {}, cand=cand)
+    assert not outcome.ok and "coverage" in outcome.facts[0]
+
+
+def test_provenance_rejects_artifact_with_no_points() -> None:
+    art = Artifact(name="out.csv")
+    outcome = run("provenance", {}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "no traceable points" in outcome.facts[0]
+
+
+def test_provenance_names_unknown_snapshots() -> None:
+    art = artifact("out.csv", ({"a": 1},))
+    cand = candidate(artifacts=(art,), provenance=(provenance("out.csv:row=0", "ghost"),))
+    outcome = run("provenance", {}, cand=cand)
+    assert not outcome.ok and "unknown snapshots" in outcome.facts[0]
+
+
+# --------------------------------------------------------------------------- #
+# corroboration / definition_pin -- the two semantics that must stay distinct
+# --------------------------------------------------------------------------- #
+
+
+def test_corroboration_fails_when_sources_are_too_few() -> None:
+    cand = candidate(claims=(Claim("pd", 0.1, "src-1", provenance("a")),))
+    outcome = run("corroboration", {"field": "pd", "min_sources": 2}, cand=cand)
+    assert not outcome.ok and outcome.divergences == ()
+
+
+def test_corroboration_disagreement_is_a_conflict_not_a_failure() -> None:
+    cand = candidate(
+        claims=(
+            Claim("pd_3y", 0.1, "src-1", provenance("a")),
+            Claim("pd_3y", 0.2, "src-2", provenance("b")),
+        )
+    )
+    outcome = run("corroboration", {"field": "pd_3y", "min_sources": 2}, cand=cand)
+    assert outcome.ok, "a real disagreement is a signal, not a failed block"
+    assert len(outcome.divergences) == 1
+    assert isinstance(outcome.divergences[0], Conflict)
+    assert not isinstance(outcome.divergences[0], DefinitionMismatch)
+
+
+def test_corroboration_equal_values_raise_nothing() -> None:
+    cand = candidate(
+        claims=(
+            Claim("pd_3y", 0.1, "src-1", provenance("a")),
+            Claim("pd_3y", 0.1, "src-2", provenance("b")),
+        )
+    )
+    outcome = run("corroboration", {"field": "pd_3y", "min_sources": 2}, cand=cand)
+    assert outcome.ok and outcome.divergences == ()
+
+
+def test_definition_pin_mismatch_is_a_definition_mismatch_not_a_conflict() -> None:
+    outcome = run("definition_pin", {"concept": "credit.pd", "version": "v2"})
+    assert not outcome.ok
+    assert len(outcome.divergences) == 1
+    assert isinstance(outcome.divergences[0], DefinitionMismatch)
+    assert not isinstance(outcome.divergences[0], Conflict)
+
+
+def test_definition_pin_match_passes() -> None:
+    assert run("definition_pin", {"concept": "credit.pd", "version": "v1"}).ok
+
+
+def test_definition_pin_without_a_definition_fails() -> None:
+    outcome = run("definition_pin", {"concept": "credit.amount", "version": "v1"})
+    assert not outcome.ok and "no definition" in outcome.facts[0]
+
+
+# --------------------------------------------------------------------------- #
+# freshness
+# --------------------------------------------------------------------------- #
+
+
+def test_freshness_accepts_recent_snapshot() -> None:
+    cand = candidate(provenance=(provenance("a", "snap-1"),))
+    assert run("freshness", {"max_age_s": 100000}, cand=cand).ok
+
+
+def test_freshness_rejects_stale_snapshot() -> None:
+    cand = candidate(provenance=(provenance("a", "snap-1"),))
+    outcome = run("freshness", {"max_age_s": 10}, cand=cand)
+    assert not outcome.ok and "max 10" in outcome.facts[0]
+
+
+def test_freshness_needs_an_injected_now() -> None:
+    cand = candidate(provenance=(provenance("a", "snap-1"),))
+    outcome = run("freshness", {"max_age_s": 10}, cand=cand, ctx=context(now=None))
+    assert not outcome.ok and "never reads the clock" in outcome.facts[0]
+
+
+def test_freshness_rejects_snapshot_before_not_before() -> None:
+    cand = candidate(provenance=(provenance("a", "snap-1"),))
+    outcome = run("freshness", {"not_before": "2026-06-01T00:00:00"}, cand=cand)
+    assert not outcome.ok and "not_before" in outcome.facts[0]
+
+
+def test_freshness_fails_when_no_snapshot_is_referenced() -> None:
+    outcome = run("freshness", {"max_age_s": 10}, cand=candidate())
+    assert not outcome.ok and "unverifiable" in outcome.facts[0]
+
+
+# --------------------------------------------------------------------------- #
+# coverage
+# --------------------------------------------------------------------------- #
+
+
+def test_coverage_accepts_all_required_sources() -> None:
+    cand = candidate(provenance=(provenance("a", "src-1"), provenance("b", "src-2")))
+    assert run("coverage", {"required_sources": ["src-1", "src-2"]}, cand=cand).ok
+
+
+def test_coverage_rejects_undeclared_missing_source() -> None:
+    cand = candidate(provenance=(provenance("a", "src-1"),))
+    outcome = run("coverage", {"required_sources": ["src-1", "src-2"]}, cand=cand)
+    assert not outcome.ok and "src-2" in outcome.facts[0]
+
+
+def test_coverage_accepts_declared_missing_source() -> None:
+    cand = candidate(provenance=(provenance("a", "src-1"),))
+    outcome = run("coverage", {"required_sources": ["src-1", "src-2"], "declared_missing": ["src-2"]}, cand=cand)
+    assert outcome.ok
+
+
+# --------------------------------------------------------------------------- #
+# concept_ref / unit_consistency / code_valid
+# --------------------------------------------------------------------------- #
+
+
+def test_concept_ref_maps_via_alias() -> None:
+    assert run("concept_ref", {"field": "pd_3y"}).ok
+
+
+def test_concept_ref_rejects_unmapped_field() -> None:
+    outcome = run("concept_ref", {"field": "mystery"})
+    assert not outcome.ok and "not declared unmapped" in outcome.facts[0]
+
+
+def test_concept_ref_accepts_explicitly_unmapped_field() -> None:
+    outcome = run("concept_ref", {"field": "mystery"}, ctx=context(unmapped_fields=frozenset({"mystery"})))
+    assert outcome.ok
+
+
+def test_concept_ref_requires_the_pinned_concept_to_exist() -> None:
+    outcome = run("concept_ref", {"field": "pd_3y", "concept": "ghost"})
+    assert not outcome.ok and "not in the ontology" in outcome.facts[0]
+
+
+def test_concept_ref_needs_an_ontology() -> None:
+    outcome = run("concept_ref", {"field": "pd_3y"}, ctx=context(ontology=None))
+    assert not outcome.ok and "ontology is required" in outcome.facts[0]
+
+
+def test_unit_consistency_accepts_matching_unit() -> None:
+    assert run("unit_consistency", {"concept": "credit.amount", "unit": "CNY"}).ok
+
+
+def test_unit_consistency_rejects_undeclared_conversion() -> None:
+    outcome = run("unit_consistency", {"concept": "credit.amount", "unit": "USD"})
+    assert not outcome.ok and "no conversion" in outcome.facts[0]
+
+
+def test_unit_consistency_accepts_declared_conversion() -> None:
+    outcome = run("unit_consistency", {"concept": "credit.amount", "unit": "USD", "conversion": "7 CNY/USD"})
+    assert outcome.ok
+
+
+def test_unit_consistency_detects_peer_conflict() -> None:
+    outcome = run(
+        "unit_consistency",
+        {"concept": "credit.amount", "unit": "CNY"},
+        ctx=context(peer_units={"credit.amount": "USD"}),
+    )
+    assert not outcome.ok and "peer block" in outcome.facts[0]
+
+
+def test_code_valid_accepts_declared_code() -> None:
+    art = artifact("out.csv", ({"rating": "AAA"},))
+    assert run("code_valid", {"column": "rating", "code_system": "rating_scale"}, cand=candidate(artifacts=(art,))).ok
+
+
+def test_code_valid_rejects_unknown_code_with_coordinate() -> None:
+    art = artifact("out.csv", ({"rating": "AAA"}, {"rating": "ZZZ"}))
+    outcome = run("code_valid", {"column": "rating", "code_system": "rating_scale"}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "row=1" in outcome.facts[0]
+
+
+def test_code_valid_rejects_unknown_system() -> None:
+    art = artifact("out.csv", ({"rating": "AAA"},))
+    outcome = run("code_valid", {"column": "rating", "code_system": "ghost"}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "not declared" in outcome.facts[0]
+
+
+# --------------------------------------------------------------------------- #
+# custom
+# --------------------------------------------------------------------------- #
+
+
+def test_custom_registered_check_passes_and_fails() -> None:
+    passing = context(custom_checks={"always_ok": lambda c, cand, ctx: True})
+    failing = context(custom_checks={"always_no": lambda c, cand, ctx: (False, ["nope"])})
+    assert run("custom", {"check": "always_ok"}, ctx=passing).ok
+    outcome = run("custom", {"check": "always_no"}, ctx=failing)
+    assert not outcome.ok and outcome.facts == ("nope",)
+
+
+def test_custom_unknown_check_fails_closed() -> None:
+    assert not run("custom", {"check": "missing"}).ok
+
+
+def test_custom_exception_is_visible_not_swallowed() -> None:
+    def boom(constraint, candidate, ctx):
+        raise RuntimeError("detonated")
+
+    outcome = run("custom", {"check": "boom"}, ctx=context(custom_checks={"boom": boom}))
+    assert not outcome.ok
+    assert "RuntimeError: detonated" in outcome.facts[0]
+
+
+def test_schema_rejects_unexpected_nullability() -> None:
+    art = artifact("out.csv", ({"a": 1},), columns=(Column("a", "float", nullable=True),))
+    outcome = run("schema", {"columns": [{"name": "a", "dtype": "float", "nullable": False}]}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "nullable" in outcome.facts[0]
+
+
+def test_provenance_traces_text_lines_as_well_as_rows() -> None:
+    art = Artifact(name="out.txt", text="alpha\nbeta\n")
+    cand = candidate(
+        artifacts=(art,),
+        provenance=(provenance("out.txt:line=0"), provenance("out.txt:line=1")),
+    )
+    assert run("provenance", {}, target="out.txt", cand=cand).ok
+
+
+def test_freshness_rejects_unparseable_timestamp() -> None:
+    cand = candidate(provenance=(provenance("a", "snap-bad"),))
+    ctx = context(snapshots={"snap-bad": snapshot("snap-bad", captured_at="not-a-date")})
+    outcome = run("freshness", {"max_age_s": 100}, cand=cand, ctx=ctx)
+    assert not outcome.ok and "not a timestamp" in outcome.facts[0]
+
+
+def test_coverage_rejects_malformed_declared_missing() -> None:
+    cand = candidate(provenance=(provenance("a", "src-1"),))
+    outcome = run("coverage", {"required_sources": ["src-1"], "declared_missing": "src-1"}, cand=cand)
+    assert not outcome.ok and "must be a list" in outcome.facts[0]
+
+
+def test_invariant_supports_arithmetic_expressions() -> None:
+    art = artifact("out.csv", ({"a": 2, "b": 3},))
+    assert run("invariant", {"expr": "a * b == 6 and abs(a - b) == 1"}, cand=candidate(artifacts=(art,))).ok
+
+
+def test_invariant_rejects_disallowed_operators() -> None:
+    art = artifact("out.csv", ({"a": 2},))
+    outcome = run("invariant", {"expr": "a @ 2"}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "not allowed" in outcome.facts[0]
