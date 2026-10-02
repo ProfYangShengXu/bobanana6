@@ -186,6 +186,12 @@ def check_split(
             add("axis_uniform", f"layer {layer} mixes axes {sorted(axis_by_layer[layer])!r}", *members)
 
     # -- no_orphan ---------------------------------------------------------
+    # `contract_deliverables` deliberately includes optional deliverables: the
+    # check asks "is this output wanted by anyone", and a declared optional
+    # deliverable is wanted by definition. Being unconsumed by another block is
+    # fine for a deliverable -- it is the terminal artifact of the task, not an
+    # orphan. (Contrast assemble.cut_complete, which only *requires* the
+    # `required=True` ones to actually exist.)
     for subtask in sorted(plan.subtasks, key=lambda s: s.id):
         if subtask.output not in contract_deliverables and subtask.output not in consumed:
             add("no_orphan", f"output {subtask.output!r} is neither delivered nor consumed", subtask.id)

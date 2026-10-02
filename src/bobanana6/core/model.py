@@ -110,19 +110,23 @@ KNOWN_KINDS: frozenset[str] = frozenset(
 #: Iterative splitting is bounded; the default is a hard limit, not a hint.
 MAX_ROUNDS = 3
 
-#: The single source of truth for ruler symbols (spec §5.0.1 ④, criterion ③:
-#: use a controlled table, never invent a symbol ad hoc). ``core`` never
-#: interprets what a symbol means -- it only refuses to compare numbers declared
-#: under different rulers, and refuses a ruler outside this set. The model-output
-#: ruler and the body-size ruler are deliberately distinct; mixing them is the
-#: mistake recorded in ``aGent.md §7⑤``.
+#: The single source of truth for cost/output ruler symbols (spec §5.0.1 ④,
+#: criterion ③: use a controlled table, never invent a symbol ad hoc). ``core``
+#: never interprets what a symbol means -- it only refuses to compare numbers
+#: declared under different rulers, and refuses a ruler outside this set.
+#:
+#: Only genuinely ambiguous quantities get a symbol. ``chars`` / ``seconds`` /
+#: ``calls`` were removed: nothing would ever declare them because the field
+#: name already states the unit (§5.0.1 ①). The model-output ruler and the
+#: body-size ruler stay distinct because the *same* output can be counted either
+#: way, and mixing them is the mistake recorded in ``aGent.md §7⑤``.
+#:
+#: NOTE: this set also drives the environment guard's vocabulary exemption, so
+#: it is security-relevant -- adding a symbol widens what the guard lets pass.
 UNIT_SYMBOLS: frozenset[str] = frozenset(
     {
         "tokens",  # model-output ruler
-        "chars",  # alternative: character count
         "bytes",  # body-size ruler only; never mixed with the model-output ruler
-        "seconds",  # wall clock
-        "calls",  # invocation count
     }
 )
 
@@ -360,7 +364,7 @@ class TaskContract:
     goal: str  # external:decompose —— 切分策略读它
     deliverables: tuple[DeliverableSpec, ...] = ()  # core:split —— deliverable_names 供切分/装配判定读
     sources: tuple[SourceRef, ...] = ()  # external:sources —— 取网实现读它
-    notes: str = ""  # external:report (summary.json) —— 给人看的契约备注
+    notes: str = ""  # external:report (summary.json) —— 契约备注；报告模块未落地，当前无实现读者
 
     def __post_init__(self) -> None:
         _require_non_empty(self.task_id, "TaskContract.task_id must not be empty")
@@ -429,7 +433,7 @@ class SplitPlan:
     interfaces: Mapping[str, str] = field(  # core:split —— iface_complete / iface_match 读它
         default_factory=dict
     )
-    recon_evidence: str = ""  # external:report (summary.json) —— 回答「为什么这么切」
+    recon_evidence: str = ""  # external:report (summary.json) —— 「为什么这么切」；报告模块未落地，当前无实现读者
     costs: PlanCosts | None = None  # core:split —— merge_cheap 读它
 
     def __post_init__(self) -> None:
@@ -455,7 +459,7 @@ class InputSurvey:
 class Recon:
     evidence: str = ""  # external:decompose —— 切分策略读侦察结论
     source_ids: tuple[str, ...] = ()  # external:decompose —— 侦察覆盖的源，切分读它
-    findings: tuple[str, ...] = ()  # external:decompose —— 侦察发现是切分的输入
+    findings: tuple[str, ...] = ()  # external:decompose —— 切分输入；decompose 模块未落地，当前无实现读者
 
     # 说明：Recon 整体只作为 DecomposerPort.split 的入参出现，core 不解释它。
 
@@ -471,7 +475,7 @@ class Constraint:
     kind: str  # core:checkers —— 分派到哪个 checker 读它
     target: str  # core:checkers —— 定位被判定对象读它
     spec: Mapping[str, Any]  # core:checkers —— 各 kind 的参数都在这里，checker 读它
-    rationale: str  # external:report (CONFLICTS.md) —— 回答「这条约束为什么存在」
+    rationale: str  # external:report (CONFLICTS.md) —— 回答「这条约束为什么存在」；报告模块未落地，当前无实现读者
 
     def __post_init__(self) -> None:
         _require_non_empty(self.id, "Constraint.id must not be empty")
@@ -577,7 +581,7 @@ class Snapshot:
     ref: str  # core:checkers —— freshness/provenance 按 ref 查表
     body_path: Path  # external:sources —— 固化载体的位置，core 不打开
     captured_at: str  # core:checkers —— freshness 的时间戳比较读它
-    source_kind: str = ""  # external:report (SOURCES.md) —— 溯源链按来源分层的依据
+    source_kind: str = ""  # external:report (SOURCES.md) —— 溯源按来源分层；报告模块未落地，当前无实现读者
 
     def __post_init__(self) -> None:
         _require_non_empty(self.ref, "Snapshot.ref must not be empty")

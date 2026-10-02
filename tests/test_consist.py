@@ -6,6 +6,7 @@ clean input and *open with the right code* on each injected defect.
 
 from __future__ import annotations
 
+import pytest
 from fakes import bundle, constraint, contract, mini_ontology, plan, subtask
 
 from bobanana6.core.consist import CHECKS, check_consistency
@@ -258,23 +259,35 @@ def test_reports_every_hit_not_only_the_first() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_ruler_mixed_accepts_a_uniform_ruler() -> None:
+@pytest.mark.parametrize(
+    ("dimension", "unit"),
+    [("requires_calls", "calls"), ("requires_output", "tokens"), ("requires_wall_s", "seconds")],
+)
+def test_ruler_mixed_accepts_a_uniform_ruler(dimension: str, unit: str) -> None:
     item_bundle = good_bundle(
         hard=(
             constraint("C-0", "presence", "T-01", {"min_rows": 1}),
-            constraint("C-1", "presence", "T-01", {"requires_calls": 5, "unit": "calls"}),
-            constraint("C-2", "presence", "T-01", {"requires_calls": 7, "unit": "calls"}),
+            constraint("C-1", "presence", "T-01", {dimension: 5, "unit": unit}),
+            constraint("C-2", "presence", "T-01", {dimension: 7, "unit": unit}),
         )
     )
     assert "ruler_mixed" not in consist(item_bundle=item_bundle).codes()
 
 
-def test_ruler_mixed_rejects_two_rulers_in_one_dimension() -> None:
+@pytest.mark.parametrize(
+    ("dimension", "left", "right"),
+    [
+        ("requires_calls", "calls", "requests"),
+        ("requires_output", "tokens", "bytes"),
+        ("requires_wall_s", "seconds", "minutes"),
+    ],
+)
+def test_ruler_mixed_rejects_two_rulers_in_one_dimension(dimension: str, left: str, right: str) -> None:
     item_bundle = good_bundle(
         hard=(
             constraint("C-0", "presence", "T-01", {"min_rows": 1}),
-            constraint("C-1", "presence", "T-01", {"requires_wall_s": 5, "unit": "seconds"}),
-            constraint("C-2", "presence", "T-01", {"requires_wall_s": 7, "unit": "minutes"}),
+            constraint("C-1", "presence", "T-01", {dimension: 5, "unit": left}),
+            constraint("C-2", "presence", "T-01", {dimension: 7, "unit": right}),
         )
     )
     assert "ruler_mixed" in consist(item_bundle=item_bundle).codes()

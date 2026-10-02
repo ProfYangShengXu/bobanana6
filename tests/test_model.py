@@ -165,12 +165,15 @@ def test_budget_carries_its_own_output_ruler() -> None:
 
 
 def test_budget_rejects_a_ruler_outside_the_whitelist() -> None:
-    with pytest.raises(ValueError):
-        Budget(max_calls=1, max_wall_s=1, max_output=1, max_output_unit="widgets")
+    for bad in ("widgets", "chars", "seconds", "calls"):
+        with pytest.raises(ValueError):
+            Budget(max_calls=1, max_wall_s=1, max_output=1, max_output_unit=bad)
 
 
 def test_every_declared_unit_symbol_is_whitelisted() -> None:
-    assert UNIT_SYMBOLS == frozenset({"tokens", "chars", "bytes", "seconds", "calls"})
+    # Narrowed to the two genuinely ambiguous rulers (spec §5.0.1 ④): chars /
+    # seconds / calls were removed because nothing would ever declare them.
+    assert UNIT_SYMBOLS == frozenset({"tokens", "bytes"})
     for symbol in UNIT_SYMBOLS:
         Budget(max_calls=0, max_wall_s=0, max_output=0, max_output_unit=symbol)
 

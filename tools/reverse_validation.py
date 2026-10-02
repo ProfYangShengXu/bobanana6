@@ -362,6 +362,22 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_arch_guard.py::test_every_unit_field_uses_a_whitelisted_symbol",
         "a *_unit field defaults to a symbol outside the whitelist",
     ),
+    Mutation(
+        "M42-ruler-vs-limits-fails-open",
+        "consist.py",
+        '    if budget is None:\n        return [\n            ConsistencyViolation(\n                "ruler_vs_limits",',
+        '    if False:\n        return [\n            ConsistencyViolation(\n                "ruler_vs_limits",',
+        "tests/test_consist.py::test_ruler_vs_limits_fails_closed_without_a_budget",
+        "a missing budget lets the output ruler go unchecked",
+    ),
+    Mutation(
+        "M43-unit-whitelist-widened",
+        "model.py",
+        '        "tokens",  # model-output ruler\n        "bytes",  # body-size ruler only; never mixed with the model-output ruler',
+        '        "tokens",  # model-output ruler\n        "bytes",  # body-size ruler only; never mixed with the model-output ruler\n        "chars",  # mutated: was removed because nothing reads it',
+        "tests/test_model.py::test_every_declared_unit_symbol_is_whitelisted",
+        "a symbol with no reader sneaks back into the whitelist",
+    ),
 )
 
 

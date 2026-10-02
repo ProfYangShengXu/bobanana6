@@ -218,7 +218,7 @@ def test_guard_detects_vocabulary_leak() -> None:
 
 def test_unit_symbol_exemptions_come_from_the_whitelist() -> None:
     assert set(UNIT_SYMBOL_LITERALS) == {f'"{symbol}"' for symbol in UNIT_SYMBOLS}
-    assert "chars" in UNIT_SYMBOLS and "tokens" in UNIT_SYMBOLS
+    assert UNIT_SYMBOLS == frozenset({"tokens", "bytes"})
 
 
 def test_core_knows_no_runtime() -> None:
@@ -301,6 +301,10 @@ def test_content_digest_is_order_stable() -> None:
 # Field reader rule (实现规格 §5.0)
 # --------------------------------------------------------------------------- #
 
+#: The three reader classes from 实现规格 §5.0. ``passthrough:`` is kept as a
+#: general mechanism for a *known* external reader that is not a named module
+#: (spec §5.0.2 forbids using it as a catch-all for "nobody reads this yet").
+#: No field currently uses it; its reason text is still required.
 READER_MARKERS = ("core:", "external:", "passthrough:")
 
 
