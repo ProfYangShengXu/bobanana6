@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from bobanana6.core.model import (
+    UNIT_SYMBOLS,
     BlindSpot,
     Candidate,
     Concept,
@@ -50,11 +51,16 @@ FORBIDDEN_IMPORTS = (
 
 FORBIDDEN_VOCABULARY = ("prompt", "token", "temperature", "llm", "model_id", "http", "url", "html", "cookie")
 
-#: Identifiers the spec itself mandates on the stable side even though they
-#: contain forbidden substrings: three port members named in 实现规格 §3, and the
-#: ``"tokens"`` ruler literal mandated by §5.0.1 ① (``output_unit`` must not be
-#: bytes). These are the only exemptions; any other occurrence still fails.
-MANDATED_IDENTIFIERS = ("llmclient", "max_tokens", "approx_tokens", '"tokens"')
+#: Port members the spec mandates on the stable side even though they contain
+#: forbidden substrings (实现规格 §3).
+_MANDATED_PORT_IDENTIFIERS = ("llmclient", "max_tokens", "approx_tokens")
+
+#: Ruler literals are exempt *only* because they appear in the controlled
+#: UNIT_SYMBOLS table (spec §5.0.1 ④). A quoted string is not automatically
+#: safe: any literal outside the table still trips the vocabulary scan.
+UNIT_SYMBOL_LITERALS = tuple(f'"{symbol}"' for symbol in sorted(UNIT_SYMBOLS))
+
+MANDATED_IDENTIFIERS = _MANDATED_PORT_IDENTIFIERS + UNIT_SYMBOL_LITERALS
 
 RUNTIME_CLASS_NAMES = (
     "Attribution",
@@ -204,9 +210,15 @@ def test_guard_detects_vocabulary_leak() -> None:
     assert vocabulary_hits("class LLMClient(Protocol): ...") == []
     assert vocabulary_hits("def complete(self, max_tokens: int): ...") == []
     assert vocabulary_hits("a_tokenizer = 1") == ["token"]
-    # Only the quoted ruler literal from §5.0.1 ① is exempt, not the word.
-    assert vocabulary_hits('output_unit: str = "tokens"') == []
+    # Only literals in UNIT_SYMBOLS are exempt, not "anything quoted".
+    assert vocabulary_hits('max_output_unit: str = "tokens"') == []
+    assert vocabulary_hits('max_output_unit: str = "token_bucket"') == ["token"]
     assert vocabulary_hits("tokens = 5") == ["token"]
+
+
+def test_unit_symbol_exemptions_come_from_the_whitelist() -> None:
+    assert set(UNIT_SYMBOL_LITERALS) == {f'"{symbol}"' for symbol in UNIT_SYMBOLS}
+    assert "chars" in UNIT_SYMBOLS and "tokens" in UNIT_SYMBOLS
 
 
 def test_core_knows_no_runtime() -> None:
@@ -382,3 +394,48 @@ def test_guard_rejects_empty_passthrough_reason() -> None:
     filled = "from dataclasses import dataclass\n\n@dataclass\nclass X:\n    a: int = 0  # passthrough: carried for the report\n"
     assert passthrough_without_reason(empty) == ("X.a",)
     assert passthrough_without_reason(filled) == ()
+
+
+# --------------------------------------------------------------------------- #
+# kind set and ruler whitelist: one source of truth each
+# --------------------------------------------------------------------------- #
+
+
+def test_known_kinds_and_dispatch_table_agree() -> None:
+    """架构设计 §9: KNOWN_KINDS and checkers.CHECKS must be the same set.
+
+    They drifted silently before: a kind present only in CHECKS would be
+    dispatchable while KNOWN_KINDS still denied it, and vice versa.
+    """
+    from bobanana6.core.checkers import CHECKS as dispatched
+    from bobanana6.core.model import KNOWN_KINDS
+
+    assert len(dispatched) == 14, "the dispatch table must not silently shrink"
+    assert set(KNOWN_KINDS) == set(dispatched)
+
+
+def unit_field_defaults(source: str) -> dict[str, str]:
+    """Literal defaults of every ``*_unit`` field in a dataclass source."""
+    found: dict[str, str] = {}
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.ClassDef) or not _is_dataclass_decorator(node.decorator_list):
+            continue
+        for stmt in node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.target.id.endswith("_unit"):
+                assert isinstance(stmt.value, ast.Constant), f"{node.name}.{stmt.target.id} needs a literal default"
+                found[f"{node.name}.{stmt.target.id}"] = stmt.value.value
+    return found
+
+
+def test_every_unit_field_uses_a_whitelisted_symbol() -> None:
+    defaults = unit_field_defaults((CORE / "model.py").read_text(encoding="utf-8"))
+    assert defaults, "no *_unit field found -- the whitelist guard would be vacuous"
+    bad = {name: value for name, value in defaults.items() if value not in UNIT_SYMBOLS}
+    assert bad == {}, f"*_unit fields outside UNIT_SYMBOLS: {bad}"
+
+
+def test_unit_whitelist_guard_detects_a_bad_symbol() -> None:
+    source = "from dataclasses import dataclass\n\n@dataclass\nclass X:\n    max_unit: str = 'widgets'\n"
+    defaults = unit_field_defaults(source)
+    assert defaults == {"X.max_unit": "widgets"}
+    assert set(defaults.values()) - UNIT_SYMBOLS == {"widgets"}

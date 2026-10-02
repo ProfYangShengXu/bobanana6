@@ -188,15 +188,11 @@ def classify(
             continue
         covering = _covering((*bundle.hard, *bundle.soft), artifact_name, column, left.subtask_id)
         if not covering:
-            magnitude = None
-            if isinstance(left_value, (int, float)) and isinstance(right_value, (int, float)):
-                magnitude = abs(float(left_value) - float(right_value))
             blind.append(
                 BlindSpot(
                     path=f"{artifact_name}:row={index}:{column}",
                     left=left_value,
                     right=right_value,
-                    magnitude=magnitude,
                 )
             )
             continue
@@ -210,7 +206,6 @@ def classify(
                     path=f"{artifact_name}:row={index}:{column}",
                     left=left_value,
                     right=right_value,
-                    magnitude=None,
                 )
             )
 

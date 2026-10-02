@@ -9,7 +9,7 @@ from __future__ import annotations
 from fakes import bundle, constraint, contract, mini_ontology, plan, subtask
 
 from bobanana6.core.consist import CHECKS, check_consistency
-from bobanana6.core.model import Budget, Limits, PlanCosts
+from bobanana6.core.model import Budget, PlanCosts
 
 
 def good_plan(**overrides):
@@ -45,8 +45,8 @@ def consist(item=None, contract_=None, item_bundle=None, **overrides):
 
 
 def test_check_list_matches_the_spec() -> None:
-    assert len(CHECKS) == 15
-    assert "ruler_mismatch" in CHECKS
+    assert len(CHECKS) == 16
+    assert {"ruler_mixed", "ruler_vs_limits"} <= set(CHECKS)
 
 
 def test_clean_input_is_allowed_to_start() -> None:
@@ -254,11 +254,11 @@ def test_reports_every_hit_not_only_the_first() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# ruler consistency (§5.0.1 ①) -- the reader for Limits.cost_unit / output_unit
+# ruler checks (架构设计 §10; spec §5.0.1): ruler_mixed / ruler_vs_limits
 # --------------------------------------------------------------------------- #
 
 
-def test_ruler_consistency_accepts_a_uniform_ruler() -> None:
+def test_ruler_mixed_accepts_a_uniform_ruler() -> None:
     item_bundle = good_bundle(
         hard=(
             constraint("C-0", "presence", "T-01", {"min_rows": 1}),
@@ -266,10 +266,10 @@ def test_ruler_consistency_accepts_a_uniform_ruler() -> None:
             constraint("C-2", "presence", "T-01", {"requires_calls": 7, "unit": "calls"}),
         )
     )
-    assert "ruler_mismatch" not in consist(item_bundle=item_bundle).codes()
+    assert "ruler_mixed" not in consist(item_bundle=item_bundle).codes()
 
 
-def test_ruler_consistency_rejects_mixed_rulers_in_one_dimension() -> None:
+def test_ruler_mixed_rejects_two_rulers_in_one_dimension() -> None:
     item_bundle = good_bundle(
         hard=(
             constraint("C-0", "presence", "T-01", {"min_rows": 1}),
@@ -277,37 +277,10 @@ def test_ruler_consistency_rejects_mixed_rulers_in_one_dimension() -> None:
             constraint("C-2", "presence", "T-01", {"requires_wall_s": 7, "unit": "minutes"}),
         )
     )
-    assert "ruler_mismatch" in consist(item_bundle=item_bundle).codes()
+    assert "ruler_mixed" in consist(item_bundle=item_bundle).codes()
 
 
-def test_ruler_consistency_rejects_a_ruler_that_disagrees_with_limits() -> None:
-    item_bundle = good_bundle(
-        hard=(
-            constraint("C-0", "presence", "T-01", {"min_rows": 1}),
-            constraint("C-1", "presence", "T-01", {"requires_calls": 5, "unit": "requests"}),
-        )
-    )
-    assert "ruler_mismatch" in consist(item_bundle=item_bundle).codes()
-
-
-def test_ruler_consistency_output_dimension_uses_output_unit() -> None:
-    tokens = good_bundle(
-        hard=(
-            constraint("C-0", "presence", "T-01", {"min_rows": 1}),
-            constraint("C-1", "presence", "T-01", {"requires_output": 100, "unit": "tokens"}),
-        )
-    )
-    bytes_declared = good_bundle(
-        hard=(
-            constraint("C-0", "presence", "T-01", {"min_rows": 1}),
-            constraint("C-1", "presence", "T-01", {"requires_output": 100, "unit": "bytes"}),
-        )
-    )
-    assert "ruler_mismatch" not in consist(item_bundle=tokens).codes()
-    assert "ruler_mismatch" in consist(item_bundle=bytes_declared).codes()
-
-
-def test_ruler_consistency_ignores_declarations_without_a_ruler() -> None:
+def test_ruler_mixed_ignores_declarations_without_a_ruler() -> None:
     item_bundle = good_bundle(
         hard=(
             constraint("C-0", "presence", "T-01", {"min_rows": 1}),
@@ -315,14 +288,56 @@ def test_ruler_consistency_ignores_declarations_without_a_ruler() -> None:
             constraint("C-2", "presence", "T-01", {"requires_calls": 6, "unit": "calls"}),
         )
     )
-    assert "ruler_mismatch" not in consist(item_bundle=item_bundle).codes()
+    assert "ruler_mixed" not in consist(item_bundle=item_bundle).codes()
 
 
-def test_ruler_consistency_can_be_pointed_at_other_limits() -> None:
+def test_ruler_vs_limits_accepts_a_matching_budget_ruler() -> None:
     item_bundle = good_bundle(
         hard=(
             constraint("C-0", "presence", "T-01", {"min_rows": 1}),
-            constraint("C-1", "presence", "T-01", {"requires_calls": 5, "unit": "requests"}),
+            constraint("C-1", "presence", "T-01", {"requires_output": 100, "unit": "tokens"}),
         )
     )
-    assert "ruler_mismatch" not in consist(item_bundle=item_bundle, limits=Limits(cost_unit="requests")).codes()
+    assert "ruler_vs_limits" not in consist(item_bundle=item_bundle).codes()
+
+
+def test_ruler_vs_limits_rejects_a_ruler_the_budget_does_not_use() -> None:
+    item_bundle = good_bundle(
+        hard=(
+            constraint("C-0", "presence", "T-01", {"min_rows": 1}),
+            constraint("C-1", "presence", "T-01", {"requires_output": 100, "unit": "bytes"}),
+        )
+    )
+    # bytes (HTTP body ruler) vs tokens (model-output ruler): not comparable.
+    assert "ruler_vs_limits" in consist(item_bundle=item_bundle).codes()
+
+
+def test_ruler_vs_limits_checks_against_the_budget_it_is_given() -> None:
+    item_bundle = good_bundle(
+        hard=(
+            constraint("C-0", "presence", "T-01", {"min_rows": 1}),
+            constraint("C-1", "presence", "T-01", {"requires_output": 100, "unit": "bytes"}),
+        )
+    )
+    matching = Budget(max_calls=10, max_wall_s=100, max_output=100, max_output_unit="bytes")
+    assert "ruler_vs_limits" not in consist(item_bundle=item_bundle, budget=matching).codes()
+
+
+def test_ruler_vs_limits_fails_closed_without_a_budget() -> None:
+    item_bundle = good_bundle(
+        hard=(
+            constraint("C-0", "presence", "T-01", {"min_rows": 1}),
+            constraint("C-1", "presence", "T-01", {"requires_output": 100, "unit": "tokens"}),
+        )
+    )
+    assert "ruler_vs_limits" in consist(item_bundle=item_bundle, budget=None).codes()
+
+
+def test_ruler_vs_limits_is_silent_when_no_output_ruler_is_declared() -> None:
+    item_bundle = good_bundle(
+        hard=(
+            constraint("C-0", "presence", "T-01", {"min_rows": 1}),
+            constraint("C-1", "presence", "T-01", {"requires_calls": 5, "unit": "calls"}),
+        )
+    )
+    assert "ruler_vs_limits" not in consist(item_bundle=item_bundle).codes()

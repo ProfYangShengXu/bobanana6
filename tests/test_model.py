@@ -10,6 +10,8 @@ from fakes import mini_ontology, subtask, toolset_for
 from bobanana6.core.model import (
     KNOWN_KINDS,
     MAX_ROUNDS,
+    UNIT_SYMBOLS,
+    Artifact,
     BlindSpot,
     Budget,
     Candidate,
@@ -144,14 +146,40 @@ def test_mini_fixtures_are_usable() -> None:
     assert item.mode == "read"
 
 
-def test_limits_defaults_name_concrete_rulers() -> None:
-    limits = Limits()
-    assert limits.cost_unit == "calls"
-    assert limits.output_unit == "tokens"
+def test_limits_has_no_global_ruler_fields() -> None:
+    """`requires_calls` is counted in calls, so a global cost ruler is redundant
+    (spec §5.0.1 ①). The ambiguous output ruler lives on Budget instead."""
+    from dataclasses import fields
+
+    assert {f.name for f in fields(Limits)} == {
+        "max_rounds",
+        "merge_cost_ratio",
+        "tol",
+        "provenance_min_coverage",
+        "corroboration_min_sources",
+    }
 
 
-def test_limits_rejects_an_empty_ruler_name() -> None:
+def test_budget_carries_its_own_output_ruler() -> None:
+    assert Budget(max_calls=1, max_wall_s=1, max_output=1).max_output_unit == "tokens"
+
+
+def test_budget_rejects_a_ruler_outside_the_whitelist() -> None:
     with pytest.raises(ValueError):
-        Limits(cost_unit="")
-    with pytest.raises(ValueError):
-        Limits(output_unit="")
+        Budget(max_calls=1, max_wall_s=1, max_output=1, max_output_unit="widgets")
+
+
+def test_every_declared_unit_symbol_is_whitelisted() -> None:
+    assert UNIT_SYMBOLS == frozenset({"tokens", "chars", "bytes", "seconds", "calls"})
+    for symbol in UNIT_SYMBOLS:
+        Budget(max_calls=0, max_wall_s=0, max_output=0, max_output_unit=symbol)
+
+
+def test_removed_declaration_only_fields_are_gone() -> None:
+    """The §5.0.2 '待复核' fields had no reader anywhere, so they were deleted
+    rather than kept 'just in case'."""
+    from dataclasses import fields
+
+    assert "provenance" not in {f.name for f in fields(ConstraintBundle)}
+    assert "magnitude" not in {f.name for f in fields(BlindSpot)}
+    assert "path" not in {f.name for f in fields(Artifact)}

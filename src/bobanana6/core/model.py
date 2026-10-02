@@ -50,6 +50,7 @@ from typing import Any
 __all__ = [
     "KNOWN_KINDS",
     "MAX_ROUNDS",
+    "UNIT_SYMBOLS",
     "Artifact",
     "BlindSpot",
     "Budget",
@@ -109,6 +110,22 @@ KNOWN_KINDS: frozenset[str] = frozenset(
 #: Iterative splitting is bounded; the default is a hard limit, not a hint.
 MAX_ROUNDS = 3
 
+#: The single source of truth for ruler symbols (spec §5.0.1 ④, criterion ③:
+#: use a controlled table, never invent a symbol ad hoc). ``core`` never
+#: interprets what a symbol means -- it only refuses to compare numbers declared
+#: under different rulers, and refuses a ruler outside this set. The model-output
+#: ruler and the body-size ruler are deliberately distinct; mixing them is the
+#: mistake recorded in ``aGent.md §7⑤``.
+UNIT_SYMBOLS: frozenset[str] = frozenset(
+    {
+        "tokens",  # model-output ruler
+        "chars",  # alternative: character count
+        "bytes",  # body-size ruler only; never mixed with the model-output ruler
+        "seconds",  # wall clock
+        "calls",  # invocation count
+    }
+)
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
@@ -142,8 +159,8 @@ def content_digest(value: Any) -> str:
 class Concept:
     id: str  # core:ontology —— 概念表键、映射、层级图都读它
     label: str  # core:ontology —— 别名消歧与 map_field 的标签匹配读它
-    kind: str  # passthrough: 仅构造期枚举校验与冻结哈希；无判定读它
-    domain: str  # passthrough: 仅冻结哈希；无判定读它
+    kind: str  # external:report (ONTOLOGY-MAP.md) —— 概念类型，报告渲染；core 只做构造期枚举校验
+    domain: str  # external:report (ONTOLOGY-MAP.md) —— 领域标签，报告渲染
     parent: str | None = None  # core:ontology —— 层级/环检测读它
     aliases: tuple[str, ...] = ()  # core:ontology —— map_field 与别名冲突检测读它
 
@@ -157,9 +174,9 @@ class Concept:
 class Definition:
     concept_id: str  # core:ontology —— definition_orphan 与 pinned_version 读它
     version: str  # core:ontology —— definition_pin 与口径归一读它
-    text: str  # passthrough: 人读的口径文本，core 不解释（仅冻结哈希）
-    formula: str | None = None  # passthrough: 可选形式化文本；无判定读它
-    edge_cases: tuple[str, ...] = ()  # passthrough: 人读的边界说明；无判定读它
+    text: str  # external:report (ONTOLOGY-MAP.md) —— 人读口径文本
+    formula: str | None = None  # external:report (ONTOLOGY-MAP.md) —— 可选形式化
+    edge_cases: tuple[str, ...] = ()  # external:report (ONTOLOGY-MAP.md) —— 边界说明
 
     def __post_init__(self) -> None:
         _require_non_empty(self.concept_id, "Definition.concept_id must not be empty")
@@ -186,8 +203,8 @@ class Unit:
 class Relation:
     src: str  # core:ontology —— 端点存在性校验读它
     dst: str  # core:ontology —— 端点存在性校验读它
-    kind: str  # passthrough: 仅构造期枚举校验与冻结哈希；ontology 只查端点
-    cardinality: str  # passthrough: 声明性元数据；无判定读它
+    kind: str  # external:report (ONTOLOGY-MAP.md) —— 关系类型；core 只做构造期枚举校验
+    cardinality: str  # external:report (ONTOLOGY-MAP.md) —— 基数声明
 
     def __post_init__(self) -> None:
         _require_non_empty(self.src, "Relation.src must not be empty")
@@ -200,8 +217,8 @@ class Relation:
 
 @dataclass(frozen=True)
 class Ontology:
-    domain: str  # passthrough: 仅构造期非空校验与冻结哈希；无判定读它
-    version: str  # passthrough: 领域版本，仅冻结哈希；口径版本走 Definition.version
+    domain: str  # external:report (ONTOLOGY-MAP.md) —— 领域标签；core 只做构造期非空校验
+    version: str  # external:report (ONTOLOGY-MAP.md) —— 领域版本；口径版本走 Definition.version
     concepts: Mapping[str, Concept]  # core:ontology —— 校验/映射/层级读它
     definitions: Mapping[str, Definition]  # core:ontology —— 口径版本判定读它
     units: Mapping[str, Unit]  # core:ontology —— 单位一致性读它
@@ -320,7 +337,7 @@ class DeliverableSpec:
     schema: Mapping[str, str] = field(  # external:contract —— 产物字段契约，core 不读
         default_factory=dict
     )
-    required: bool = True  # passthrough: 声明必交性；无判定读它
+    required: bool = True  # core:assemble —— cut_complete 只强制 required 的交付物必须产出
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "DeliverableSpec.name must not be empty")
@@ -343,7 +360,7 @@ class TaskContract:
     goal: str  # external:decompose —— 切分策略读它
     deliverables: tuple[DeliverableSpec, ...] = ()  # core:split —— deliverable_names 供切分/装配判定读
     sources: tuple[SourceRef, ...] = ()  # external:sources —— 取网实现读它
-    notes: str = ""  # passthrough: 人读备注；无判定读它
+    notes: str = ""  # external:report (summary.json) —— 给人看的契约备注
 
     def __post_init__(self) -> None:
         _require_non_empty(self.task_id, "TaskContract.task_id must not be empty")
@@ -351,6 +368,16 @@ class TaskContract:
     @property
     def deliverable_names(self) -> frozenset[str]:
         return frozenset(d.name for d in self.deliverables)
+
+    @property
+    def required_deliverable_names(self) -> frozenset[str]:
+        """Only these must be produced; optional deliverables may be absent.
+
+        Read by ``assemble.check_assembly`` when judging cut completeness, which
+        is what makes ``DeliverableSpec.required`` load-bearing instead of a
+        decorative marker.
+        """
+        return frozenset(d.name for d in self.deliverables if d.required)
 
 
 @dataclass(frozen=True)
@@ -402,7 +429,7 @@ class SplitPlan:
     interfaces: Mapping[str, str] = field(  # core:split —— iface_complete / iface_match 读它
         default_factory=dict
     )
-    recon_evidence: str = ""  # passthrough: 侦察结论文字；无判定读它（R0 强制靠流程）
+    recon_evidence: str = ""  # external:report (summary.json) —— 回答「为什么这么切」
     costs: PlanCosts | None = None  # core:split —— merge_cheap 读它
 
     def __post_init__(self) -> None:
@@ -428,7 +455,7 @@ class InputSurvey:
 class Recon:
     evidence: str = ""  # external:decompose —— 切分策略读侦察结论
     source_ids: tuple[str, ...] = ()  # external:decompose —— 侦察覆盖的源，切分读它
-    findings: tuple[str, ...] = ()  # passthrough: 侦察发现条目；无判定读它
+    findings: tuple[str, ...] = ()  # external:decompose —— 侦察发现是切分的输入
 
     # 说明：Recon 整体只作为 DecomposerPort.split 的入参出现，core 不解释它。
 
@@ -444,7 +471,7 @@ class Constraint:
     kind: str  # core:checkers —— 分派到哪个 checker 读它
     target: str  # core:checkers —— 定位被判定对象读它
     spec: Mapping[str, Any]  # core:checkers —— 各 kind 的参数都在这里，checker 读它
-    rationale: str  # passthrough: 强制非空的人读理由；无判定读它
+    rationale: str  # external:report (CONFLICTS.md) —— 回答「这条约束为什么存在」
 
     def __post_init__(self) -> None:
         _require_non_empty(self.id, "Constraint.id must not be empty")
@@ -455,12 +482,12 @@ class Constraint:
 
 @dataclass(frozen=True)
 class Limits:
-    """Capacity ceilings and thresholds.
+    """Capacity ceilings and thresholds, each in the unit its name states.
 
-    ``cost_unit`` / ``output_unit`` are *rulers*, not quantities: they name what
-    the numbers are counted in, and ``consist.py`` refuses to compare numbers
-    declared under different rulers. core checks whether the rulers agree; it
-    never interprets what a ruler means (same discipline as ``ontology.py``).
+    There is deliberately no ``cost_unit``: ``requires_calls`` is counted in
+    calls, so the field name *is* the unit (spec §5.0.1 ①). The one genuinely
+    ambiguous ruler -- ``max_output`` -- lives on the value it measures, i.e.
+    ``Budget.max_output_unit``, not on a global limits object.
     """
 
     max_rounds: int = MAX_ROUNDS  # core:split —— round_budget 读它
@@ -468,8 +495,6 @@ class Limits:
     tol: float = 1e-9  # core:checkers —— range/relation 的容差默认值
     provenance_min_coverage: float = 0.95  # core:checkers —— provenance 覆盖下限
     corroboration_min_sources: int = 2  # core:checkers —— corroboration 来源数下限
-    cost_unit: str = "calls"  # core:consist —— 成本尺子一致性检查读它
-    output_unit: str = "tokens"  # core:consist —— 输出尺子一致性检查读它（不是字节）
 
     def __post_init__(self) -> None:
         _require(self.max_rounds >= 0, "Limits.max_rounds must be >= 0")
@@ -477,7 +502,6 @@ class Limits:
         _require(self.tol >= 0.0, "Limits.tol must be >= 0")
         _require(0.0 <= self.provenance_min_coverage <= 1.0, "provenance_min_coverage must be in [0, 1]")
         _require(self.corroboration_min_sources >= 1, "corroboration_min_sources must be >= 1")
-        _require(self.cost_unit != "" and self.output_unit != "", "ruler names must not be empty")
 
 
 DEFAULT_LIMITS = Limits()
@@ -491,10 +515,7 @@ class ConstraintBundle:
     soft: tuple[Constraint, ...] = ()  # core:kernel —— 只计分不判定的约束
     blind: tuple[str, ...] = ()  # core:consist —— stale_blind 读它
     unmapped: tuple[tuple[str, str], ...] = ()  # core:split —— concept_mapped 读它
-    limits: Limits = DEFAULT_LIMITS  # core:checkers —— 阈值与尺子都由它提供
-    provenance: Mapping[str, str] = field(  # passthrough: 约束包来源说明；无判定读它
-        default_factory=dict
-    )
+    limits: Limits = DEFAULT_LIMITS  # core:checkers —— 阈值都由它提供
 
     def __post_init__(self) -> None:
         _require_non_empty(self.task_id, "ConstraintBundle.task_id must not be empty")
@@ -519,7 +540,6 @@ class BlindSpot:
     path: str  # core:kernel —— 去重与决策读它
     left: Any  # core:kernel —— 去重读它
     right: Any  # core:kernel —— 去重读它
-    magnitude: float | None = None  # passthrough: 差异幅度，供边界外裁决/报告；core 只填不读
 
 
 @dataclass(frozen=True)
@@ -557,7 +577,7 @@ class Snapshot:
     ref: str  # core:checkers —— freshness/provenance 按 ref 查表
     body_path: Path  # external:sources —— 固化载体的位置，core 不打开
     captured_at: str  # core:checkers —— freshness 的时间戳比较读它
-    source_kind: str = ""  # passthrough: 来源标签；core 无判定读它
+    source_kind: str = ""  # external:report (SOURCES.md) —— 溯源链按来源分层的依据
 
     def __post_init__(self) -> None:
         _require_non_empty(self.ref, "Snapshot.ref must not be empty")
@@ -597,7 +617,6 @@ class Artifact:
     columns: tuple[Column, ...] = ()  # core:checkers —— schema/range/relation 读它
     rows: tuple[Mapping[str, Any], ...] = ()  # core:checkers —— 逐值判定遍历它
     text: str | None = None  # core:checkers —— provenance 的文本行点位读它
-    path: str | None = None  # passthrough: 原始载体路径，供报告/边界外读；core 不读
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "Artifact.name must not be empty")
@@ -653,13 +672,18 @@ class ModelResponse:
 @dataclass(frozen=True)
 class Budget:
     max_calls: int  # core:consist —— unreachable 与 requires_calls 比
-    max_wall_s: int  # core:consist —— unreachable 与 requires_wall_s 比
+    max_wall_s: int  # core:consist —— 与 requires_wall_s 比；字段名的 _s 就是单位
     max_output: int  # core:consist —— unreachable 与 requires_output 比
+    max_output_unit: str = "tokens"  # core:consist —— ruler_vs_limits 读它；必须 ∈ UNIT_SYMBOLS
 
     def __post_init__(self) -> None:
         _require(self.max_calls >= 0, "Budget.max_calls must be >= 0")
         _require(self.max_wall_s >= 0, "Budget.max_wall_s must be >= 0")
         _require(self.max_output >= 0, "Budget.max_output must be >= 0")
+        _require(
+            self.max_output_unit in UNIT_SYMBOLS,
+            f"unknown unit symbol {self.max_output_unit!r}; allowed: {sorted(UNIT_SYMBOLS)!r}",
+        )
 
 
 @dataclass(frozen=True)

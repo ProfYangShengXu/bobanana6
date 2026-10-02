@@ -135,3 +135,29 @@ def test_capability_issues_surface_as_assembly_violations() -> None:
         workers=(worker("W-1", frozenset({Capability.READ})),),
     )
     assert "capability_gap" in result.codes()
+
+
+def test_optional_deliverable_may_be_absent() -> None:
+    """`DeliverableSpec.required` is load-bearing: an optional deliverable that
+    no block produced is not an assembly failure, but a required one still is."""
+    result = check_assembly(
+        good_plan(),
+        contract(("out.csv", "nice-to-have.csv"), optional=("nice-to-have.csv",)),
+        good_bundle(),
+        pieces(),
+        good_context(),
+        provenance=provenances(),
+    )
+    assert result.passed, result.codes()
+
+
+def test_required_deliverable_missing_is_still_a_failure() -> None:
+    result = check_assembly(
+        good_plan(),
+        contract(("out.csv", "must-have.csv")),
+        good_bundle(),
+        pieces(),
+        good_context(),
+        provenance=provenances(),
+    )
+    assert "cut_complete" in result.codes()

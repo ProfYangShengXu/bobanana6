@@ -31,9 +31,10 @@ from .split import check_split
 
 __all__ = ["CHECKS", "ConsistencyReport", "ConsistencyViolation", "check_consistency"]
 
-#: The fifteen checks: the spec's self-consistency list plus the ruler
-#: consistency check (§5.0.1 ①) that gives ``Limits.cost_unit`` /
-#: ``Limits.output_unit`` their reader.
+#: The gate's checks: the fourteen from 实现规格 §8 (including
+#: ``unit_conflict``) plus the two ruler checks 架构设计 §10 adds. §10 itself
+#: lists fifteen without ``unit_conflict``; keeping that working judgment gives
+#: sixteen. The two documents disagree -- reported, not silently reconciled.
 CHECKS: tuple[str, ...] = (
     "contradiction",
     "tool_missing",
@@ -49,7 +50,8 @@ CHECKS: tuple[str, ...] = (
     "concept_unmapped",
     "def_version_mix",
     "unit_conflict",
-    "ruler_mismatch",
+    "ruler_mixed",
+    "ruler_vs_limits",
 )
 
 
@@ -279,61 +281,82 @@ def _unit_conflict(bundle: ConstraintBundle) -> list[ConsistencyViolation]:
     return violations
 
 
-_DIMENSION_RULER: Mapping[str, str | None] = {
-    # cost dimension -> which Limits field names its ruler (None = internal only)
-    "requires_calls": "cost_unit",
-    "requires_output": "output_unit",
-    "requires_wall_s": None,
-}
+#: The cost dimensions a constraint may declare a ruler for. A declaration names
+#: its ruler with ``spec["unit"]``.
+_COST_DIMENSIONS: tuple[str, ...] = ("requires_calls", "requires_output", "requires_wall_s")
 
 
-def _ruler_consistency(bundle: ConstraintBundle, limits: Limits) -> list[ConsistencyViolation]:
-    """Are the declared cost rulers mutually comparable? (*not* what they mean)
-
-    Same discipline as ``ontology.py``: this checks reference legality only.
-    Within one cost dimension every declaration must name the same ruler, and
-    that ruler must be the one ``limits`` declares for the dimension. Mixed
-    rulers do not raise -- the comparison would simply compute a wrong answer --
-    so they are surfaced as a violation before anything is compared.
-
-    A declaration names its ruler with ``spec["unit"]``. ``requires_wall_s`` has
-    no ``Limits`` field of its own, so it is only required to be internally
-    uniform; inventing a ruler for it would be a new design decision.
-    """
-    violations: list[ConsistencyViolation] = []
-    for dimension in sorted(_DIMENSION_RULER):
-        declarations = sorted(
+def _rulers(bundle: ConstraintBundle, dimension: str) -> tuple[tuple[str, str], ...]:
+    """(constraint id, declared ruler) for one dimension, sorted for determinism."""
+    return tuple(
+        sorted(
             (constraint.id, str(constraint.spec.get("unit")))
             for constraint in bundle.hard
             if dimension in constraint.spec and isinstance(constraint.spec.get("unit"), str)
         )
+    )
+
+
+def _ruler_mixed(bundle: ConstraintBundle) -> list[ConsistencyViolation]:
+    """Within one cost dimension every declaration must use the same ruler.
+
+    core only checks whether the rulers agree; it never interprets a ruler (same
+    discipline as ``ontology.py`` checking reference legality). Mixed rulers do
+    not raise -- the comparison would simply compute a wrong answer -- so they
+    are surfaced before anything is compared.
+    """
+    violations: list[ConsistencyViolation] = []
+    for dimension in _COST_DIMENSIONS:
+        declarations = _rulers(bundle, dimension)
         if not declarations:
             continue
         rulers = sorted({ruler for _, ruler in declarations})
-        ids = tuple(constraint_id for constraint_id, _ in declarations)
         if len(rulers) > 1:
             violations.append(
                 ConsistencyViolation(
-                    "ruler_mismatch",
-                    f"{dimension} declarations mix rulers {rulers!r}; numbers declared under "
-                    "different rulers are not comparable",
-                    ids,
-                )
-            )
-            continue
-        reference_key = _DIMENSION_RULER[dimension]
-        if reference_key is None:
-            continue
-        reference = getattr(limits, reference_key)
-        if rulers[0] != reference:
-            violations.append(
-                ConsistencyViolation(
-                    "ruler_mismatch",
-                    f"{dimension} is declared in {rulers[0]!r} but limits.{reference_key} is {reference!r}",
-                    ids,
+                    "ruler_mixed",
+                    f"{dimension} mixes rulers {rulers!r}; numbers declared under different rulers "
+                    "are not comparable",
+                    tuple(constraint_id for constraint_id, _ in declarations),
                 )
             )
     return violations
+
+
+def _ruler_vs_limits(bundle: ConstraintBundle, budget: Budget | None) -> list[ConsistencyViolation]:
+    """A declared output ruler must equal the ruler the Budget itself carries.
+
+    ``max_output`` is the one genuinely ambiguous quantity (model-output ruler,
+    chars, or bytes), so its ruler lives on the value it measures -- ``Budget``
+    -- rather than on a global limits object. ``requires_calls`` needs no
+    comparison: its name states its unit.
+    """
+    declarations = _rulers(bundle, "requires_output")
+    if not declarations:
+        return []
+    ids = tuple(constraint_id for constraint_id, _ in declarations)
+    rulers = sorted({ruler for _, ruler in declarations})
+    if len(rulers) > 1:
+        # Already reported as ruler_mixed; comparing a mixed set adds noise.
+        return []
+    if budget is None:
+        return [
+            ConsistencyViolation(
+                "ruler_vs_limits",
+                "budget was not provided; the declared output ruler cannot be compared",
+                ids,
+            )
+        ]
+    if rulers[0] != budget.max_output_unit:
+        return [
+            ConsistencyViolation(
+                "ruler_vs_limits",
+                f"requires_output is declared in {rulers[0]!r} but budget.max_output_unit is "
+                f"{budget.max_output_unit!r}",
+                ids,
+            )
+        ]
+    return []
 
 
 def check_consistency(
@@ -368,7 +391,8 @@ def check_consistency(
     violations.extend(_concept_unmapped(plan, bundle, ontology))
     violations.extend(_def_version_mix(bundle))
     violations.extend(_unit_conflict(bundle))
-    violations.extend(_ruler_consistency(bundle, limits))
+    violations.extend(_ruler_mixed(bundle))
+    violations.extend(_ruler_vs_limits(bundle, budget))
 
     ordered = sorted(violations, key=lambda v: (v.check, v.refs, v.detail))
     return ConsistencyReport(violations=tuple(ordered))

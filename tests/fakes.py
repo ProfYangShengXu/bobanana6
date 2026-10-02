@@ -89,7 +89,7 @@ def artifact(name: str = "out.csv", rows: tuple[Mapping[str, Any], ...] = (), *,
     if columns is None:
         names = sorted({key for row in rows for key in row})
         columns = tuple(Column(name=n, dtype="float" if all(isinstance(r.get(n), (int, float)) for r in rows) else "str") for n in names)
-    return Artifact(name=name, columns=columns, rows=rows, path=f"fake/{name}")
+    return Artifact(name=name, columns=columns, rows=rows)
 
 
 def candidate(
@@ -210,11 +210,11 @@ def plan(
     )
 
 
-def contract(deliverables: tuple[str, ...] = ("out.csv",)) -> TaskContract:
+def contract(deliverables: tuple[str, ...] = ("out.csv",), optional: tuple[str, ...] = ()) -> TaskContract:
     return TaskContract(
         task_id="task-1",
         goal="assemble the panel",
-        deliverables=tuple(DeliverableSpec(name=name) for name in deliverables),
+        deliverables=tuple(DeliverableSpec(name=name, required=name not in optional) for name in deliverables),
         sources=(),
     )
 

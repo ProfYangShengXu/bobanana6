@@ -124,7 +124,7 @@ def check_assembly(
         if name not in declared_outputs:
             add("cut_complete", f"piece {name!r} was not declared by any block")
     produced = set(declared_outputs)
-    for deliverable in sorted(contract.deliverable_names):
+    for deliverable in sorted(contract.required_deliverable_names):
         if deliverable not in produced:
             add("cut_complete", f"deliverable {deliverable!r} is produced by no block")
 
