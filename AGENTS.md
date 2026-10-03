@@ -23,7 +23,7 @@
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 619 passed |
+| `pytest tests/ -q` | ✅ 631 passed |
 | `pytest -m arch_guard -q` | ✅ 35 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |
@@ -147,6 +147,12 @@ uv run bobanana6 run task.yaml            # 端到端
 - **不要设 `HTTP_PROXY` / `HTTPS_PROXY`** —— 但要**读** `env`：某些环境（如官方 House）里代理是**必须用**的，
   代码要支持从环境变量取代理，**不能自己清理掉**
 - 判分容器 `--network=none`；其他容器 `--network=bridge`
+- **模型侧两个口子只从 `env` 读，绝不写死**：
+  `BOBANANA6_EXTRA_BODY`（JSON 对象，合并进请求体最后）—— 厂商独有参数（`enable_thinking`、
+  `top_k`…）走它，**不许覆盖 `model` / `messages`**，覆盖了要报错不要静默丢；
+  `BOBANANA6_TIMEOUT_S`（秒，**默认仍然是 60**，不要为了让某个慢服务通过就调大默认值）。
+  ★ 实测依据：同一个端点同一个模型，冷启动首次 **90.8s**、之后 **1.6s**；thinking 开着必超时。
+  「模型 1.6 秒能答对，是壳把它按死了」—— 别把厂商差异改写成默认值。
 
 ---
 

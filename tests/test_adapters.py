@@ -10,6 +10,7 @@ from typing import Any, Self
 import pytest
 
 from bobanana6.adapters import (
+    DEFAULT_TIMEOUT_S,
     DraftingOntology,
     EchoToolResultClient,
     FileOntology,
@@ -53,9 +54,11 @@ class _RecordingOpener:
         self.response = response
         self.error = error
         self.requests: list[Any] = []
+        self.timeouts: list[float] = []
 
     def open(self, request: Any, timeout: float = 0.0) -> _FakeResponse:
         self.requests.append(request)
+        self.timeouts.append(timeout)
         if self.error is not None:
             raise self.error
         assert self.response is not None
@@ -234,3 +237,94 @@ def test_drafting_ontology_sends_the_contract_and_the_survey() -> None:
     assert user["goal"] == "g"
     assert user["sources"] == ["src-1"]
     assert user["input_sources"] == ["src-1"]
+
+
+# --------------------------------------------------------------------------- #
+# extra_body: the vendor-extension escape hatch
+# --------------------------------------------------------------------------- #
+
+
+def _settings(**kw: object) -> LLMSettings:
+    base: dict[str, object] = {"base_url": "http://x.invalid/v1", "model": "m"}
+    base.update(kw)
+    return LLMSettings(**base)  # type: ignore[arg-type]
+
+
+def test_extra_body_lands_in_the_payload() -> None:
+    """★ Without this, a vendor-only switch (``enable_thinking``) is dropped silently."""
+    opener = _RecordingOpener(_FakeResponse(_reply()))
+    client = OpenAICompatibleClient(_settings(extra_body={"enable_thinking": False, "top_k": 20}), opener=opener)
+    client.complete([{"role": "user", "content": "hi"}], [], 128)
+    payload = json.loads(opener.requests[0].data.decode())
+    assert payload["enable_thinking"] is False
+    assert payload["top_k"] == 20
+    assert payload["model"] == "m" and payload["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_extra_body_is_merged_last_so_it_can_override_max_tokens() -> None:
+    opener = _RecordingOpener(_FakeResponse(_reply()))
+    client = OpenAICompatibleClient(_settings(extra_body={"max_tokens": 7}), opener=opener)
+    client.complete([], [], 128)
+    payload = json.loads(opener.requests[0].data.decode())
+    assert payload["max_tokens"] == 7
+
+
+def test_extra_body_may_not_override_model() -> None:
+    with pytest.raises(LLMConfigError, match=r"must not override \['model'\]"):
+        _settings(extra_body={"model": "someone-elses-model"})
+
+
+def test_extra_body_may_not_override_messages() -> None:
+    with pytest.raises(LLMConfigError, match="call contract"):
+        _settings(extra_body={"messages": []})
+
+
+def test_extra_body_reads_a_json_object_from_the_environment() -> None:
+    settings = LLMSettings.from_env(
+        {"BOBANANA6_BASE_URL": "http://x.invalid/v1", "BOBANANA6_EXTRA_BODY": '{"enable_thinking": false}'}
+    )
+    assert settings.extra_body == {"enable_thinking": False}
+
+
+def test_extra_body_defaults_to_empty() -> None:
+    assert LLMSettings.from_env({"BOBANANA6_BASE_URL": "http://x.invalid/v1"}).extra_body == {}
+
+
+def test_extra_body_refuses_malformed_json() -> None:
+    with pytest.raises(LLMConfigError, match="must be a JSON object"):
+        LLMSettings.from_env({"BOBANANA6_BASE_URL": "http://x.invalid/v1", "BOBANANA6_EXTRA_BODY": "{not json"})
+
+
+def test_extra_body_refuses_a_non_object() -> None:
+    with pytest.raises(LLMConfigError, match="got list"):
+        LLMSettings.from_env({"BOBANANA6_BASE_URL": "http://x.invalid/v1", "BOBANANA6_EXTRA_BODY": "[1, 2]"})
+
+
+# --------------------------------------------------------------------------- #
+# timeout: configurable, default unchanged
+# --------------------------------------------------------------------------- #
+
+
+def test_timeout_default_is_unchanged() -> None:
+    """★ 60s stays the default; a slow service must be fixed by configuration."""
+    assert DEFAULT_TIMEOUT_S == 60.0
+    assert LLMSettings.from_env({"BOBANANA6_BASE_URL": "http://x.invalid/v1"}).timeout_s == 60.0
+
+
+def test_timeout_reaches_the_transport() -> None:
+    """★ A cold start measured at 90.8s needs a timeout the caller can raise."""
+    settings = LLMSettings.from_env({"BOBANANA6_BASE_URL": "http://x.invalid/v1", "BOBANANA6_TIMEOUT_S": "120"})
+    assert settings.timeout_s == 120.0
+    opener = _RecordingOpener(_FakeResponse(_reply()))
+    OpenAICompatibleClient(settings, opener=opener).complete([], [], 1)
+    assert opener.timeouts == [120.0]
+
+
+def test_timeout_refuses_a_non_number() -> None:
+    with pytest.raises(LLMConfigError, match="BOBANANA6_TIMEOUT_S"):
+        LLMSettings.from_env({"BOBANANA6_BASE_URL": "http://x.invalid/v1", "BOBANANA6_TIMEOUT_S": "soon"})
+
+
+def test_timeout_must_be_positive() -> None:
+    with pytest.raises(LLMConfigError, match="timeout_s must be > 0"):
+        _settings(timeout_s=0.0)

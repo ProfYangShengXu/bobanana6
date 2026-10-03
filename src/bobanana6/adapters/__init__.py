@@ -12,6 +12,7 @@ from __future__ import annotations
 from .offline import EchoToolResultClient, ScriptedClient
 from .ontology import DraftingOntology, FileOntology, OntologyDraftError
 from .openai_compat import (
+    DEFAULT_TIMEOUT_S,
     LLMConfigError,
     LLMConnectionError,
     LLMError,
@@ -20,6 +21,8 @@ from .openai_compat import (
 )
 
 __all__ = [
+    "DEFAULT_TIMEOUT_S",
+    "PROTECTED_PAYLOAD_KEYS",
     "DraftingOntology",
     "EchoToolResultClient",
     "FileOntology",

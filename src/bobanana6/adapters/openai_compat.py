@@ -16,13 +16,21 @@ import json
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os import environ
 from typing import Any
 
 from ..core.model import ModelResponse
 
-__all__ = ["LLMConfigError", "LLMConnectionError", "LLMError", "LLMSettings", "OpenAICompatibleClient"]
+__all__ = [
+    "DEFAULT_TIMEOUT_S",
+    "PROTECTED_PAYLOAD_KEYS",
+    "LLMConfigError",
+    "LLMConnectionError",
+    "LLMError",
+    "LLMSettings",
+    "OpenAICompatibleClient",
+]
 
 
 class LLMError(RuntimeError):
@@ -47,18 +55,46 @@ class LLMConfigError(RuntimeError):
     """No usable endpoint was configured."""
 
 
+#: Payload keys that describe *the call itself* rather than tuning it. A vendor
+#: extension has no business replacing them: overwriting ``model`` or
+#: ``messages`` would make "a model call" mean something else while still
+#: returning 200, which is the most expensive kind of silence.
+PROTECTED_PAYLOAD_KEYS: tuple[str, ...] = ("model", "messages")
+
+DEFAULT_TIMEOUT_S = 60.0
+
+
 @dataclass(frozen=True)
 class LLMSettings:
     base_url: str
     model: str
     api_key: str = ""
-    timeout_s: float = 60.0
+    #: ★ Cold starts are real: one measured service answered in 90.8s on the
+    #: first request and 1.6s afterwards. The default stays at 60s -- raising it
+    #: to make one slow service pass would slow down every other caller.
+    timeout_s: float = DEFAULT_TIMEOUT_S
+    #: Vendor extensions that are *not* part of the OpenAI request schema
+    #: (``enable_thinking``, ``top_k``, ...). OpenAI-compatible servers and the
+    #: OpenAI SDKs all call this ``extra_body``; it is the general escape hatch,
+    #: not a per-vendor branch. It is merged last, so it also wins over
+    #: ``max_tokens`` for services that spell it ``max_completion_tokens``.
+    extra_body: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.base_url:
             raise LLMConfigError("base_url is required")
         if not self.model:
             raise LLMConfigError("model is required")
+        if self.timeout_s <= 0:
+            raise LLMConfigError(f"timeout_s must be > 0, got {self.timeout_s!r}")
+        clashes = sorted(set(self.extra_body) & set(PROTECTED_PAYLOAD_KEYS))
+        if clashes:
+            # ★ Refused, never silently dropped: a setting that is accepted and
+            #   then ignored sends the caller looking in the wrong place.
+            raise LLMConfigError(
+                f"extra_body must not override {clashes!r}: "
+                f"{list(PROTECTED_PAYLOAD_KEYS)!r} are part of the call contract, not tuning"
+            )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> LLMSettings:
@@ -71,11 +107,40 @@ class LLMSettings:
                 "no endpoint configured: set BOBANANA6_BASE_URL (or OPENAI_BASE_URL), "
                 "or run the offline path"
             )
-        return cls(base_url=base_url, model=model, api_key=api_key)
+        return cls(
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            timeout_s=_timeout_from_env(source),
+            extra_body=_extra_body_from_env(source),
+        )
 
     @property
     def endpoint(self) -> str:
         return self.base_url.rstrip("/") + "/chat/completions"
+
+
+def _timeout_from_env(source: Mapping[str, str]) -> float:
+    raw = source.get("BOBANANA6_TIMEOUT_S")
+    if raw is None or raw == "":
+        return DEFAULT_TIMEOUT_S
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise LLMConfigError(f"BOBANANA6_TIMEOUT_S must be a number of seconds, got {raw!r}") from exc
+
+
+def _extra_body_from_env(source: Mapping[str, str]) -> Mapping[str, Any]:
+    raw = source.get("BOBANANA6_EXTRA_BODY")
+    if raw is None or raw.strip() == "":
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise LLMConfigError(f"BOBANANA6_EXTRA_BODY must be a JSON object: {exc}") from exc
+    if not isinstance(parsed, Mapping):
+        raise LLMConfigError(f"BOBANANA6_EXTRA_BODY must be a JSON object, got {type(parsed).__name__}")
+    return dict(parsed)
 
 
 @dataclass
@@ -102,6 +167,9 @@ class OpenAICompatibleClient:
         for key in ("temperature", "tool_choice", "response_format"):
             if key in kw:
                 payload[key] = kw[key]
+        # ★ Vendor extensions last. ``LLMSettings`` already refused to override
+        #   ``model`` / ``messages``, so this can only tune the request.
+        payload.update(self.settings.extra_body)
 
         body = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
