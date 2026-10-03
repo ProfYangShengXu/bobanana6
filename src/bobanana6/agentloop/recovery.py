@@ -20,26 +20,51 @@ weak model, whose typical death is jumping into the same hole repeatedly.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from .errors import BobananaAction
 from .gate import GateVerdict
 
 __all__ = [
+    "DECLARED_FEEDBACK_METHOD",
+    "REQUIRED_FEEDBACK_KEYS",
     "RecoveryAction",
     "RecoveryDecision",
     "TaintTracker",
     "decide_recovery",
+    "declared_feedback",
     "reflect_message",
+    "reformat_message",
 ]
+
+#: The method an exception exposes to describe **how to fix** a rejected answer.
+#: Same shape as ``errors.DECLARED_REASON_ATTRIBUTE``: whoever produced the failure
+#: supplies the semantics, the consumer only renders them.
+DECLARED_FEEDBACK_METHOD = "feedback"
+
+#: What a feedback mapping must carry: a machine code, the problem in words, and
+#: the shape that would be accepted. ``got`` (what was actually sent) is optional.
+REQUIRED_FEEDBACK_KEYS: tuple[str, ...] = ("code", "problem", "expected")
+
+#: How much of a rejected answer is echoed back. The point is for the model to
+#: recognise its own output, not to replay the transcript (lec9:125).
+GOT_LIMIT = 600
 
 
 class RecoveryAction(StrEnum):
     RETRY = "retry"  # same input again -- transient faults
     REFLECT = "reflect"  # add the failure reason to the context, then retry
     RESHARD = "reshard"  # back to the splitter: the block is too big/hard
-    FIX_CONSTRAINT = "fix_constraint"  # the request shape is wrong
+    FIX_CONSTRAINT = "fix_constraint"  # the *constraint/request* is wrong -- not the answer
+    #: The *answer's* shape is wrong and the model can fix it if it is told how.
+    #: ★ A different direction from FIX_CONSTRAINT on purpose: one changes the
+    #: constraint, the other changes the answer. Feeding a model a "your constraint
+    #: is too strict" message (or a human a "the model misbehaved" report) is the
+    #: failure mode that comes from letting one name cover both.
+    REFORMAT = "reformat"
     SWITCH_SOURCE = "switch_source"  # change worker / model / provider
     DEGRADE_SINGLE_AGENT = "degrade_single_agent"  # the split itself is wrong
     DECLINE = "decline"  # report we cannot get it -- not a failure
@@ -122,6 +147,57 @@ def reflect_message(
     return " ".join(parts)
 
 
+def declared_feedback(error: Any) -> Mapping[str, Any] | None:
+    """The *fix instructions* the raiser attached to a rejected answer, or ``None``.
+
+    This is deliberately **not** the exception's message. ``state.errors`` keeps the
+    prose a human reads; the feedback mapping is what the model reads, and the two
+    must not be the same string (the prose carries a traceback, the fix does not).
+    A raiser that does not provide feedback gets the old behaviour -- the block
+    stops and hands the problem to the caller.
+    """
+    method = getattr(error, DECLARED_FEEDBACK_METHOD, None)
+    if not callable(method):
+        return None
+    try:
+        payload = method()
+    except Exception:  # noqa: BLE001 - a broken feedback must not mask the real failure
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    for key in REQUIRED_FEEDBACK_KEYS:
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None
+    return payload
+
+
+def reformat_message(
+    failure: str,
+    feedback: Mapping[str, Any],
+    *,
+    got_limit: int = GOT_LIMIT,
+) -> str:
+    """Render structured feedback for a rejected answer.
+
+    lec9:125 -- *error code + readable reason + actionable advice*, and the raw
+    traceback never enters the context. lec9:214 -- the point is that the model can
+    act on it, not that it knows it failed.
+    """
+    got = str(feedback.get("got") or "").strip()
+    lines = [
+        f"[{failure}] the previous answer was not accepted.",
+        f"code: {feedback['code']}",
+        f"problem: {feedback['problem']}",
+    ]
+    if got:
+        snippet = got if len(got) <= got_limit else got[:got_limit] + "…[truncated]"
+        lines.append(f"what you sent: {snippet}")
+    lines.append(f"required shape: {feedback['expected']}")
+    lines.append("Send only that JSON object, corrected.")
+    return "\n".join(lines)
+
+
 def decide_recovery(
     action: BobananaAction,
     *,
@@ -134,6 +210,7 @@ def decide_recovery(
     tool_name: str | None = None,
     failure: str = "",
     detail: str = "",
+    has_feedback: bool = False,
 ) -> RecoveryDecision:
     """Pick the next exit for a failure.
 
@@ -186,6 +263,24 @@ def decide_recovery(
         return RecoveryDecision(
             action=RecoveryAction.DEGRADE_SINGLE_AGENT,
             reason="retries and reflections exhausted; stop fanning out",
+            attempts=attempts,
+            tainted_tools=tainted,
+        )
+
+    if action is BobananaAction.FIX_CONSTRAINT and has_feedback:
+        # ★ The answer's shape was wrong *and* the raiser said how to fix it: feed
+        #   that back and let the model answer again. Bounded by the reflection
+        #   budget -- no new counter, and the defaults stay as they are.
+        if attempts <= max_reflections:
+            return RecoveryDecision(
+                action=RecoveryAction.REFORMAT,
+                reason="the answer's shape was wrong; feed the fix back and ask again",
+                attempts=attempts,
+                tainted_tools=tainted,
+            )
+        return RecoveryDecision(
+            action=RecoveryAction.FIX_CONSTRAINT,
+            reason="the reformat budget is exhausted; the request shape has to change outside this block",
             attempts=attempts,
             tainted_tools=tainted,
         )

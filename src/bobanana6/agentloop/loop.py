@@ -26,7 +26,7 @@ the KMP stream-continuation dedup for truncated output.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Protocol, TypeVar
 
@@ -36,7 +36,14 @@ from .concurrency import ResourceGate, RouteTable, SessionRegistry
 from .errors import BobananaAction, ClassifiedError, classify_error
 from .events import EventLog
 from .gate import GateVerdict, can_complete
-from .recovery import RecoveryAction, TaintTracker, decide_recovery, reflect_message
+from .recovery import (
+    RecoveryAction,
+    TaintTracker,
+    decide_recovery,
+    declared_feedback,
+    reflect_message,
+    reformat_message,
+)
 from .state import CheckpointStore, messages_digest, save_turn
 from .tools import (
     ToolCall,
@@ -317,6 +324,12 @@ class LoopState:
     errors: tuple[str, ...] = ()
     exit_reason: str = "unknown"
     tainted: tuple[str, ...] = ()
+    #: ★ Recovery text waiting to be merged into the transcript. It lives in the
+    #: state, not in the per-turn scratch space: a failure is classified *after*
+    #: the ASSEMBLE phase has run, and the next turn builds a fresh scratch. Held
+    #: per turn it was written and never read -- the reflection never reached the
+    #: model. ASSEMBLE (the single assembly point) merges it and clears it.
+    injected: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -346,7 +359,6 @@ class _Turn:
     throttled: bool = False
     route: str | None = None
     exit_reason: str = "unknown"
-    injected: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
 
 
 class WorkerLoop:
@@ -482,8 +494,15 @@ class WorkerLoop:
 
     def _assemble(self, turn: _Turn) -> PhaseResult:
         # Stable rows stay at the front; injected recovery text goes to the tail.
-        turn.state = replace(turn.state, messages=assemble_messages(turn.state.messages, turn.injected))
-        turn.injected = ()
+        # ★ This is the single place recovery text enters the transcript, and it
+        #   consumes what the *previous* turn queued.
+        if not turn.state.injected:
+            return PhaseResult.fallthrough()
+        turn.state = replace(
+            turn.state,
+            messages=assemble_messages(turn.state.messages, turn.state.injected),
+            injected=(),
+        )
         return PhaseResult.fallthrough()
 
     def _gate_phase(self, turn: _Turn) -> PhaseResult:
@@ -564,8 +583,11 @@ class WorkerLoop:
             return PhaseResult.cont("retry")
         if decision.action is RecoveryAction.REFLECT:
             text = decision.injected or reflect_message("verification did not pass")
-            turn.injected = ({"role": "user", "content": text},)
-            turn.state = replace(state, reflections=state.reflections + 1)
+            turn.state = replace(
+                state,
+                injected=({"role": "user", "content": text},),
+                reflections=state.reflections + 1,
+            )
             turn.exit_reason = "reflect"
             return PhaseResult.cont("reflect")
         if decision.action is RecoveryAction.DEGRADE_SINGLE_AGENT:
@@ -656,6 +678,10 @@ class WorkerLoop:
         # A failed turn is the form that most needs resuming -- persist it even when
         # the loop is about to retry it.
         self._persist(turn, status="failed")
+        # ★ Whether the fix is *sayable* is what separates "the answer's shape was
+        #   wrong, tell the model how" from "the constraint/request is wrong, stop
+        #   and hand it to the caller". The raiser knows; nothing is inferred here.
+        feedback = declared_feedback(exc)
         decision = decide_recovery(
             classified.action,
             attempts=turn.state.attempts,
@@ -665,16 +691,31 @@ class WorkerLoop:
             taint=self._taint,
             failure=classified.reason,
             detail=classified.detail,
+            has_feedback=feedback is not None,
         )
         if decision.action is RecoveryAction.RETRY:
             turn.exit_reason = "retry_after_error"
             return PhaseResult.cont("retry_after_error")
         if decision.action is RecoveryAction.REFLECT:
             text = decision.injected or reflect_message(classified.reason, detail=classified.detail)
-            turn.injected = ({"role": "user", "content": text},)
-            turn.state = replace(turn.state, reflections=turn.state.reflections + 1)
+            turn.state = replace(
+                turn.state,
+                injected=({"role": "user", "content": text},),
+                reflections=turn.state.reflections + 1,
+            )
             turn.exit_reason = "reflect_after_error"
             return PhaseResult.cont("reflect_after_error")
+        if decision.action is RecoveryAction.REFORMAT:
+            # ★ The structured fix, not the prose: lec9:125 wants code + reason +
+            #   advice, and the prose (which is what state.errors keeps) is not that.
+            assert feedback is not None  # guaranteed by decide_recovery
+            turn.state = replace(
+                turn.state,
+                injected=({"role": "user", "content": reformat_message(classified.reason, feedback)},),
+                reflections=turn.state.reflections + 1,
+            )
+            turn.exit_reason = "reformat"
+            return PhaseResult.cont("reformat")
         turn.exit_reason = decision.action.value
         return PhaseResult.done(decision.action.value)
 

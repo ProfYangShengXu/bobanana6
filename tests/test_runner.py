@@ -22,7 +22,7 @@ from bobanana6.assemble_impl import (
     llm_summarizer,
     parse_candidate,
 )
-from bobanana6.assemble_impl.produce import CandidateFormatError
+from bobanana6.assemble_impl.produce import EXPECTED_SHAPE, CandidateFormatError
 from bobanana6.contract import parse_contract
 from bobanana6.core.capabilities import Capability, WorkerCapabilities, WorkerLimits
 from bobanana6.core.checkers.base import CheckContext
@@ -323,10 +323,12 @@ def test_a_malformed_answer_fails_the_block_without_building_a_candidate(tmp_pat
     A non-JSON answer used to classify as ``unknown`` -> ``retry_local``: the loop
     re-sent the identical request, got the identical failure, and only stopped when
     the budget ran out -- ``evidence.errors`` held two copies of the same error.
-    Now the declared reason (``format_error``) routes it to ``fix_constraint``, so
-    the block stops on the first failure with a named exit instead of burning the
-    budget. The handler for that action is *not* built yet (it is the next block's
-    job: re-feed the failure and let the answer change).
+    Now the declared reason (``format_error``) routes it to ``fix_constraint``, and
+    the raiser attached a *fix*: the loop feeds it back and asks once more (the
+    reflection budget), then stops with a named exit instead of burning the budget
+    on identical re-sends. The scripted client repeats the same bad answer, so the
+    second call has to fail too -- what matters is the shape of the run: two calls,
+    not thirteen, and a named exit.
     """
     source = _csv(tmp_path, "panel.csv", "obligor,pd,amount\nA-1,0.01,100\n")
     client = ScriptedClient([{"text": "the panel is probably fine"}])
@@ -334,7 +336,8 @@ def test_a_malformed_answer_fails_the_block_without_building_a_candidate(tmp_pat
     assert result.ok is False
     assert result.candidates == {}
     assert result.verdicts["T-01"].evidence["exit"] == "fix_constraint"
-    assert len(client.calls) == 1  # one produce call: no identical re-send
+    # one answer + one fed-back answer, then the named exit (max_reflections=1)
+    assert len(client.calls) == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -450,18 +453,37 @@ def test_parse_candidate_reads_rows_columns_and_provenance() -> None:
     assert candidate.artifact("out.csv").row_count == 2  # type: ignore[union-attr]
 
 
-def test_parse_candidate_refuses_non_json_and_bad_rows() -> None:
+def test_parse_candidate_refuses_bad_shapes_with_a_fixable_reason() -> None:
+    """★ Every rejection says what was sent, which rule broke, and what is required."""
     block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
-    with pytest.raises(CandidateFormatError, match="not JSON"):
-        parse_candidate("not json", subtask=block, source_id="s")
-    with pytest.raises(CandidateFormatError, match="must be a JSON object"):
-        parse_candidate("[]", subtask=block, source_id="s")
-    with pytest.raises(CandidateFormatError, match="'rows' must be a list"):
-        parse_candidate('{"rows": 3}', subtask=block, source_id="s")
-    with pytest.raises(CandidateFormatError, match="not an object"):
-        parse_candidate('{"rows": [3]}', subtask=block, source_id="s")
-    with pytest.raises(CandidateFormatError, match="columns must be a list"):
-        parse_candidate('{"rows": [], "columns": 3}', subtask=block, source_id="s")
+
+    with pytest.raises(CandidateFormatError) as not_json:
+        parse_candidate("not json at all", subtask=block, source_id="s")
+    feedback = not_json.value.feedback()
+    assert feedback["code"] == "not_json"
+    assert "first character is 'n'" in feedback["problem"]
+    assert feedback["got"] == "not json at all"
+    assert feedback["expected"] == EXPECTED_SHAPE
+
+    cases = {
+        "[]": "not_an_object",
+        '{"rows": 3}': "rows_not_a_list",
+        '{"rows": [3]}': "row_not_an_object",
+        '{"rows": [], "columns": 3}': "columns_not_a_list",
+        '{"rows": [], "columns": [3]}': "column_not_an_object",
+        '{"rows": [], "claims": 3}': "claims_not_a_list",
+        '{"rows": [], "claims": [3]}': "claim_not_an_object",
+        '{"rows": [], "claims": [{"field": "a"}]}': "claim_missing_keys",
+    }
+    for text, code in cases.items():
+        with pytest.raises(CandidateFormatError) as error:
+            parse_candidate(text, subtask=block, source_id="s")
+        assert error.value.feedback()["code"] == code, text
+        assert error.value.feedback()["got"] == text
+
+    with pytest.raises(CandidateFormatError) as empty:
+        parse_candidate("   ", subtask=block, source_id="s")
+    assert "empty" in empty.value.feedback()["problem"]
 
 
 def test_loop_io_produce_declines_and_executes_and_verifies(tmp_path: Path) -> None:

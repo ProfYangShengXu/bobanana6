@@ -20,7 +20,7 @@ from fakes import (
 
 from bobanana6.agentloop.tools import plan_tool_segments
 from bobanana6.core.checkers.base import CheckContext
-from bobanana6.core.model import SourceRef, Subtask
+from bobanana6.core.model import ModelResponse, SourceRef, Subtask
 from bobanana6.services import (
     SHELL_COMMAND_CHECK,
     BlockJudge,
@@ -390,3 +390,166 @@ def test_verify_uses_the_recorded_command_evidence() -> None:
 
     judge.last_edit_at = 20.0  # ★ checked, then changed
     assert judge.verify(candidate(artifacts=(artifact(rows=({"a": 1},)),))).status == "stale"
+
+
+# --------------------------------------------------------------------------- #
+# ★ structured output, layer 1+2: the schema the model is asked for
+# --------------------------------------------------------------------------- #
+
+
+def test_candidate_response_format_carries_the_answer_schema() -> None:
+    from bobanana6.assemble_impl import (
+        EXPECTED_SHAPE,
+        candidate_response_format,
+    )
+
+    fmt = candidate_response_format()
+    assert fmt["type"] == "json_schema"
+    schema = fmt["json_schema"]["schema"]
+    assert schema["required"] == ["columns", "rows"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["rows"]["items"]["type"] == "object"
+    # the text fed back on a rejection describes the same contract
+    assert "rows" in EXPECTED_SHAPE and "columns" in EXPECTED_SHAPE
+
+
+def test_every_rejection_carries_a_fix_that_names_the_same_shape() -> None:
+    from bobanana6.assemble_impl import EXPECTED_SHAPE
+    from bobanana6.assemble_impl.produce import CandidateFormatError, parse_candidate
+
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate("nope", subtask=block, source_id="s")
+    assert error.value.feedback()["expected"] == EXPECTED_SHAPE
+
+
+# --------------------------------------------------------------------------- #
+# ★ capability negotiation: a service that ignores response_format must not be fatal
+# --------------------------------------------------------------------------- #
+
+
+def _produce_io(tmp_path: Path, client: object) -> object:
+    from bobanana6.assemble_impl import LoopIOImpl, ResponseFormatSupport
+    from bobanana6.services import (
+        BlockJudge,
+        BoundChecks,
+        build_registry,
+        build_toolset,
+    )
+
+    block = subtask("T-01", output="out.csv", mode="write", axis="source")
+    tools = build_toolset(
+        plan=plan(subtasks=(block,), interfaces={"out.csv": "s"}),
+        subtask=block,
+        contract=contract(),
+        ontology=mini_ontology(),
+        authorized=(),
+        fetched={},
+        upstream={},
+        checks=BoundChecks(block="T-01"),
+    )
+    store = SnapshotStore(root=tmp_path / "s")
+    return LoopIOImpl(
+        client=client,  # type: ignore[arg-type]
+        toolset=tools,
+        registry=build_registry(tools, store.read),
+        judge=BlockJudge(bundle=bundle(), subtask=block, context=CheckContext(ontology=mini_ontology())),
+        subtask=block,
+        response_format=ResponseFormatSupport(),
+    )
+
+
+class _SchemaRefusingClient:
+    """Refuses the schema once, then answers -- like a service without support."""
+
+    def __init__(self, *, status: int = 400, message: str = "response_format is not supported") -> None:
+        self.calls: list[dict] = []
+        self.status = status
+        self.message = message
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        from bobanana6.adapters import LLMError
+
+        self.calls.append(dict(kw))
+        if "response_format" in kw:
+            raise LLMError(f"model call failed with HTTP {self.status}: {self.message}", status_code=self.status)
+        return ModelResponse(text='{"rows": [{"obn": "A-1"}]}')
+
+
+def _state():  # type: ignore[no-untyped-def]
+    from bobanana6.agentloop.loop import LoopState
+
+    return LoopState()
+
+
+def test_the_first_call_is_free_form_and_later_calls_ask_for_the_shape(tmp_path: Path) -> None:
+    """★ Forcing a schema on turn 1 would stop the model from ever calling a tool."""
+    from bobanana6.assemble_impl import LoopIOImpl
+
+    client = _SchemaRefusingClient()
+    io: LoopIOImpl = _produce_io(tmp_path, client)  # type: ignore[assignment]
+    assert io.wants_structured_output() is False
+    io.produce(_state())
+    assert io.calls == 1
+    assert "response_format" not in client.calls[0]
+
+    io.produce(_state())
+    assert io.calls == 2  # two logical produces...
+    # ...but three wire calls: the schema attempt, the refusal, the retry without it
+    assert [("response_format" in kw) for kw in client.calls] == [False, True, False]
+    assert io.response_format.refused is True
+    assert io.response_format.enabled is False
+    assert io.wants_structured_output() is False  # remembered, not re-probed
+
+
+def test_a_service_that_refuses_the_schema_degrades_instead_of_failing(tmp_path: Path) -> None:
+    client = _SchemaRefusingClient()
+    io = _produce_io(tmp_path, client)
+    io.produce(_state())  # turn 1: no schema
+    proposal = io.produce(_state())  # turn 2: schema refused, retried without it
+    assert proposal.candidate is not None
+    assert [("response_format" in kw) for kw in client.calls] == [False, True, False]
+
+
+def test_a_refusal_is_learned_once_for_the_whole_run(tmp_path: Path) -> None:
+    from bobanana6.assemble_impl import ResponseFormatSupport
+
+    support = ResponseFormatSupport()
+    first = _produce_io(tmp_path, _SchemaRefusingClient())
+    first.response_format = support
+    first.produce(_state())
+    first.produce(_state())
+    assert support.refused is True
+
+    other = _SchemaRefusingClient()
+    second = _produce_io(tmp_path / "second", other)
+    second.response_format = support  # same run, next block
+    second.produce(_state())
+    second.produce(_state())
+    assert [("response_format" in kw) for kw in other.calls] == [False, False]
+
+
+def test_a_transport_error_is_not_read_as_a_capability_answer(tmp_path: Path) -> None:
+    from bobanana6.adapters import LLMConnectionError
+    from bobanana6.assemble_impl import rejects_response_format
+
+    assert rejects_response_format(LLMConnectionError("did not reach")) is False
+    assert rejects_response_format(RuntimeError("no status at all")) is False
+    assert rejects_response_format(_StatusError(500, "response_format is not supported")) is False
+    assert rejects_response_format(_StatusError(400, "response_format is not supported")) is True
+    assert rejects_response_format(_StatusError(400, "invalid api key")) is False
+
+
+def test_a_refused_schema_does_not_swallow_other_failures(tmp_path: Path) -> None:
+    client = _SchemaRefusingClient(status=429, message="rate limit exceeded")
+    io = _produce_io(tmp_path, client)
+    io.produce(_state())
+    with pytest.raises(Exception, match="429"):
+        io.produce(_state())
+    assert io.response_format.enabled is True  # a 429 says nothing about the schema
+
+
+class _StatusError(Exception):
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status

@@ -5,7 +5,17 @@
 
 from __future__ import annotations
 
-from .produce import CandidateFormatError, LoopIOImpl, parse_candidate, tool_schemas
+from .produce import (
+    CANDIDATE_SCHEMA,
+    EXPECTED_SHAPE,
+    CandidateFormatError,
+    LoopIOImpl,
+    ResponseFormatSupport,
+    candidate_response_format,
+    parse_candidate,
+    rejects_response_format,
+    tool_schemas,
+)
 from .runner import Runner, RunRefused, RunResult
 from .runtime import (
     BlockDeclined,
@@ -18,6 +28,8 @@ from .runtime import (
 )
 
 __all__ = [
+    "CANDIDATE_SCHEMA",
+    "EXPECTED_SHAPE",
     "BlockDeclined",
     "BlockRuntime",
     "BlockRuntimeError",
@@ -25,11 +37,14 @@ __all__ = [
     "ContractConstraintSource",
     "LoopIOImpl",
     "PerWorkerCheckpointStore",
+    "ResponseFormatSupport",
     "RunRefused",
     "RunResult",
     "Runner",
     "block_bundle",
+    "candidate_response_format",
     "llm_summarizer",
     "parse_candidate",
+    "rejects_response_format",
     "tool_schemas",
 ]

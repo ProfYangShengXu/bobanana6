@@ -384,3 +384,90 @@ def test_the_compression_callback_is_the_injected_summarizer() -> None:
     assert any(
         "SUMMARY-OF-DROPPED" in str(message.get("content", "")) for message in seen[-1]
     ), "the summary the callback returned never reached the transcript"
+
+
+# --------------------------------------------------------------------------- #
+# ★ lec9:237 layer 3 -- a rejected answer is fed back, not blindly re-sent
+# --------------------------------------------------------------------------- #
+
+
+class AnswerShapeError(Exception):
+    """A format failure that carries *how to fix it* (the generic contract)."""
+
+    reason = "format_error"
+
+    def __init__(self, problem: str, got: str = "", code: str = "not_json") -> None:
+        super().__init__(problem)
+        self._feedback = {"code": code, "problem": problem, "got": got, "expected": '{"rows": [...]}'}
+
+    def feedback(self) -> dict:
+        return dict(self._feedback)
+
+
+class BareShapeError(Exception):
+    """A format failure with nothing to tell the model -- the old behaviour."""
+
+    reason = "format_error"
+
+
+class ChainedIO(FakeIO):
+    """Fails with the queued faults, then answers."""
+
+    def __init__(self, faults: list[BaseException]) -> None:
+        super().__init__([TurnProposal(candidate=candidate("answer"))])
+        self.faults = list(faults)
+        self.seen: list[tuple] = []
+
+    def produce(self, state):  # type: ignore[no-untyped-def]
+        self.seen.append(tuple(state.messages))
+        if self.faults:
+            raise self.faults.pop(0)
+        return super().produce(state)
+
+
+def test_a_rejected_answer_with_a_fix_is_fed_back_and_answered_again() -> None:
+    io = ChainedIO([AnswerShapeError("the first character is 'n', not '{'", got="I think it is fine")])
+    result = WorkerLoop(io, config=LoopConfig(max_turns=4)).run(task_id="t", worker_id="w")
+
+    assert result.candidate is not None  # the second answer was accepted
+    assert len(io.seen) == 2
+    injected = str(io.seen[1][-1].get("content", ""))
+    assert "code: not_json" in injected  # ① an error code
+    assert "problem: the first character is 'n'" in injected  # ② a readable reason
+    assert "what you sent: I think it is fine" in injected  # ③ what it actually output
+    assert 'required shape: {"rows": [...]}' in injected  # ④ what to output instead
+    assert "Traceback" not in injected and "AnswerShapeError" not in injected  # ★ no traceback
+
+
+def test_a_long_answer_is_truncated_in_the_feedback() -> None:
+    io = ChainedIO([AnswerShapeError("not JSON", got="x" * 5000)])
+    WorkerLoop(io, config=LoopConfig(max_turns=4)).run(task_id="t", worker_id="w")
+    injected = str(io.seen[1][-1].get("content", ""))
+    assert "…[truncated]" in injected
+    assert len(injected) < 2000  # the transcript is not replayed back
+
+
+def test_the_reformat_round_is_bounded_by_the_existing_budget() -> None:
+    """★ One feedback round by default (max_reflections=1), then a named exit."""
+    io = ChainedIO([AnswerShapeError("bad"), AnswerShapeError("bad"), AnswerShapeError("bad")])
+    result = WorkerLoop(io, config=LoopConfig(max_turns=6)).run(task_id="t", worker_id="w")
+    assert result.exit_reason == "fix_constraint"
+    assert len(io.seen) == 2  # answer + one reformat; the third fault is never reached
+
+
+def test_a_format_failure_without_a_fix_still_stops_immediately() -> None:
+    """No feedback means no way to tell the model what to change -- hand it over."""
+    io = ChainedIO([BareShapeError("the answer is not JSON")])
+    result = WorkerLoop(io, config=LoopConfig(max_turns=4)).run(task_id="t", worker_id="w")
+    assert result.exit_reason == "fix_constraint"
+    assert len(io.seen) == 1
+
+
+def test_the_prose_stays_in_state_errors_while_the_fix_goes_to_the_model() -> None:
+    """★ Two representations, not one string reused twice."""
+    io = ChainedIO([AnswerShapeError("the first character is 'n', not '{'", got="nope")])
+    result = WorkerLoop(io, config=LoopConfig(max_turns=4)).run(task_id="t", worker_id="w")
+    prose = "; ".join(result.errors)
+    injected = str(io.seen[1][-1].get("content", ""))
+    assert "AnswerShapeError" in prose  # the human log keeps the class name
+    assert "AnswerShapeError" not in injected  # the model-facing text does not

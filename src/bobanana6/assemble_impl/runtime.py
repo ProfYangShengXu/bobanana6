@@ -46,7 +46,7 @@ from ..core.ports import LLMClient, ToolSet
 from ..services.checks import BlockJudge
 from ..services.registry import build_registry
 from ..sources import SnapshotStore
-from .produce import LoopIOImpl
+from .produce import LoopIOImpl, ResponseFormatSupport
 
 __all__ = [
     "BlockDeclined",
@@ -186,6 +186,8 @@ class BlockRuntime:
     edit_clock: Callable[[Subtask], float] = lambda _subtask: 0.0
     #: Monotonic seconds for tool evidence timestamps; injected, never read here.
     epoch: Callable[[], float] = time.monotonic
+    #: Structured-output support, learned once per run and shared by every block.
+    response_format: ResponseFormatSupport = field(default_factory=ResponseFormatSupport)
     last_candidate: Candidate | None = None
     last_judge: BlockJudge | None = None
 
@@ -218,6 +220,7 @@ class BlockRuntime:
             log=self.event_log,
             task_id=self.contract.task_id,
             epoch=self.epoch,
+            response_format=self.response_format,
         )
         loop = WorkerLoop(
             io,

@@ -149,6 +149,18 @@ def _extra_body_from_env(source: Mapping[str, str]) -> Mapping[str, Any]:
     return dict(parsed)
 
 
+def _error_detail(exc: urllib.error.HTTPError, limit: int = 400) -> str:
+    """The service's error body, shortened. Best effort: an unreadable body is fine."""
+    try:
+        body = exc.read()
+    except Exception:  # noqa: BLE001 - a missing body must not mask the status
+        return ""
+    if not body:
+        return ""
+    text = body.decode("utf-8", errors="replace").strip().replace("\n", " ")
+    return f": {text[:limit]}"
+
+
 @dataclass
 class OpenAICompatibleClient:
     """``core/ports.py::LLMClient`` over the OpenAI chat-completions shape."""
@@ -186,7 +198,14 @@ class OpenAICompatibleClient:
         try:
             response = opener.open(request, timeout=self.settings.timeout_s)
         except urllib.error.HTTPError as exc:
-            raise LLMError(f"model call failed with HTTP {exc.code}", status_code=int(exc.code)) from exc
+            # ★ Carry the service's own words: the status alone cannot tell
+            #   "response_format is not supported" from "your key is wrong", and the
+            #   caller needs that difference to negotiate a capability instead of
+            #   failing hard. Bounded, and never required to succeed.
+            raise LLMError(
+                f"model call failed with HTTP {exc.code}{_error_detail(exc)}",
+                status_code=int(exc.code),
+            ) from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise LLMConnectionError(f"model call did not reach the server: {exc}") from exc
         with response:

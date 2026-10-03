@@ -23,7 +23,7 @@
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 641 passed |
+| `pytest tests/ -q` | ✅ 663 passed |
 | `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |
@@ -297,6 +297,14 @@ uv run bobanana6 run task.yaml            # 端到端
    → 词表是【兜底】（第三方异常我们标注不了），别再往词表里加词当修法。
    → 新增自定义异常忘了标注不会报错，只会悄悄退回兜底 ——
      所以有一条守卫在扫全仓的 `reason = "..."` 是否都在词表里。
+
+⑬ 「回填」要确认真的到了模型手上，不是到了某个字段里
+   实测教训：反思/回填文本先写进 per-turn scratch（`turn.injected`），
+   而 ASSEMBLE 阶段在它之前就跑完了、下一轮又是全新的 scratch ——
+   文本被写下来、**又从未被读过**。决策层单测全绿（它只断言 `decision.injected`
+   有内容），而链路上一句话都没送到。
+   → 跨 turn 要传的东西放进 state，不要放 per-turn scratch；
+     验证断言「模型收到的 messages」，不要断言「决定里有这段文本」。
 ```
 
 ---
