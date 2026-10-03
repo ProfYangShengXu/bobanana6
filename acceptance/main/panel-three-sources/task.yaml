@@ -37,6 +37,13 @@ constraints:
       target: panel.csv
       spec: {columns: [{name: obligor, dtype: str}, {name: pd, dtype: str}, {name: amount, dtype: str}]}
       rationale: "三份来源合并后列名与类型必须仍然一致"
+    # ★ 真模型跑测（#19）暴露的洞：面板的金额混着「千元」原值也能过三口径 ——
+    #   真值对照只比主体号，比不出单位。所以单位必须由任务【要求】判。
+    - id: C-units
+      kind: unit_consistency
+      target: panel.csv
+      spec: {concept: amount, unit: CNY}
+      rationale: "金额必须可判单位：源里带单位就归一，没标就要说出来是假设，不许静默当元"
 
 blind:
   - "来源若以千元记账且不标注，单看一列无法判定单位"

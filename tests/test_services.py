@@ -299,6 +299,18 @@ def test_a_call_carrying_only_parsed_arguments_is_not_mistaken_for_bad_json() ->
     assert "a" in results[0].content
 
 
+def test_the_part_payload_carries_the_columns_unit() -> None:
+    """★ 真模型跑测抓到的另一半：生产者声明的单位必须**跟着部件走**，
+    否则消费者看不到它，「确立/没确立」在交接处就丢了。"""
+    from bobanana6.core.model import Artifact, Column
+    from bobanana6.services import artifact_payload
+
+    payload = artifact_payload(
+        Artifact(name="part.csv", columns=(Column(name="amount", dtype="str", unit="CNY"),), rows=({"amount": 1},))
+    )
+    assert payload["columns"][0]["unit"] == "CNY"
+
+
 def test_unknown_tool_gets_a_named_failure() -> None:
     registry = _registry()
     results = registry.execute(registry.calls([_raw("c1", "nope", "{}")]))

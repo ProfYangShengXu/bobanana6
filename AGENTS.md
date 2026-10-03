@@ -24,10 +24,15 @@
   （分歧只记录、不自动补约束）。三条都写在 `agentloop/README.md` 的清单里。
 - ⚠️ 判定缺口（`acceptance/inject/README.md` 有逐条读数，**不是代码残留，是判定器看不见的东西**）：
   `target="*"` 在多块装配下永远「找不到产物」（A08，留给下一块）· 口径不一致要到 compare 期
-  才被发现（A02，时序）· 持久故障的出口是前置门拒跑而非降级（A06，出口选择）。
+  才被发现（A02，时序）。
 - ✅ `#16` 已收口的四条判定缺口：缺失成为一等状态 `MISSING`（A04）· 单位检查读**值里的单位**（A10）·
   归因读**自带病因**、两层互相指认则 `unknown`（A07）· 溯源经 `SnapshotReader` 端口逐点重放
   —— 引用的行要在、值要对得上（A11）。四条都有修前/修后对照读数。
+- ✅ `#19` 用真模型（`Qwen/Qwen3.5-4B`）把 `#15–#18` 的修复复跑了一遍：A11、具名门**一致**；
+  单位归一**不一致**（模型只会照抄，不会换算）；A07 的 context 根因**没走到**（模型不回取就答）。
+  据此修了三处真缺陷：单位解析器把小数的小数部分当单位（合法值被误拒）· 部件载荷丢了列的单位 ·
+  主验题不判单位（混着千元原值的面板能过三口径且真值对照「rows 7/7」）。顺带收掉 A06：
+  **少一个输入就降级并标记，一个源都没有才拒跑**。
 - ✅ `#18` 把 `#17` 报上来的三个口子补严：不标单位的那一段**说出来是假设**（`Column.unit` 为空
   = 没确立；任务可用 `unit_source: "explicit"` 要求显式，拿不到就拒）· 载体读不回来报**具名门
   `sources`**（形式变了，语义没变：仍然失败、不许退化成只查名字）· registry 的回退把 Mapping
@@ -39,7 +44,7 @@
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 744 passed（不再有 xfail） |
+| `pytest tests/ -q` | ✅ 750 passed（不再有 xfail） |
 | `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |

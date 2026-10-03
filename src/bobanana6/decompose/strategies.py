@@ -71,10 +71,16 @@ def _descriptor(fields: Iterable[str]) -> str:
 
 
 def _source_keys(contract: TaskContract, recon: Recon | None) -> tuple[str, ...]:
-    keys = {source.ref for source in contract.sources}
-    if recon is not None:
-        keys |= set(recon.source_ids)
-    return tuple(sorted(keys))
+    """The sources the plan is cut over.
+
+    ★ A06: when a survey is given it is authoritative -- it is the record of what was
+    actually fetched. A block cut for a source nobody holds can only fail, and keeping
+    it would turn "one input is missing" into "the whole run fails". With no survey
+    (planning outside a run) the contract's own list is used.
+    """
+    if recon is not None and recon.source_ids:
+        return tuple(sorted(recon.source_ids))
+    return tuple(sorted({source.ref for source in contract.sources}))
 
 
 def _merge_blocks(

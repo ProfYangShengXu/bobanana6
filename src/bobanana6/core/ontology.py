@@ -37,15 +37,26 @@ _QUANTITY = re.compile(r"^(?P<number>[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\
 
 
 def split_quantity(value: str) -> tuple[float, str] | None:
-    """``"250 千元"`` -> ``(250.0, "千元")``; ``None`` when the value carries no unit."""
+    """``"250 千元"`` -> ``(250.0, "千元")``; ``None`` when the value carries no unit.
+
+    ★ The symbol must start with a **letter**. Without that rule the pattern backs
+    off the number and reads the fractional part as the unit: ``"1200000.0"`` came
+    back as ``(1200000.0, ".0")`` -- so a perfectly ordinary decimal was reported as
+    a quantity in unit ``".0"``, and a value that simply has no unit got *rejected*
+    instead of counted as unlabelled. Found by a real-model run (2026-10-03): a
+    merge block was refused for ``value '1200000.0' declares unit '.0'``.
+    """
     match = _QUANTITY.match(value.strip())
     if match is None:
+        return None
+    symbol = match.group("symbol").strip()
+    if not symbol or not symbol[0].isalpha():
         return None
     try:
         number = float(match.group("number"))
     except ValueError:  # pragma: no cover - the pattern only admits number shapes
         return None
-    return number, match.group("symbol").strip()
+    return number, symbol
 
 
 @dataclass(frozen=True)

@@ -211,7 +211,12 @@ class ToolRegistry:
 def artifact_payload(artifact: Artifact) -> dict[str, Any]:
     return {
         "name": artifact.name,
-        "columns": [{"name": c.name, "dtype": c.dtype, "nullable": c.nullable} for c in artifact.columns],
+        # ★ A10 (found by a real-model run): the unit a producer established for
+        #   its column has to travel with the part, otherwise the consumer cannot
+        #   see it and the "established or not" state dies at the hand-off.
+        "columns": [
+            {"name": c.name, "dtype": c.dtype, "nullable": c.nullable, "unit": c.unit} for c in artifact.columns
+        ],
         "rows": [dict(row) for row in artifact.rows],
         "text": artifact.text,
     }

@@ -75,9 +75,9 @@ def test_the_report_keeps_the_three_steps_apart() -> None:
     assert "① found" in table and "② blame" in table and "③ action" in table
     for forbidden in ("overall", "total", "score"):
         assert forbidden not in table.lower()
-    # A06 这一行就是活证据：发现=hit（停下来了）但出口=miss（走的是前置门拒跑）
-    a06 = next(o for o in outcomes if o.attack.id.startswith("A06"))
-    assert a06.found == HIT and a06.action_step == MISS
+    # A02 这一行就是活证据：发现=hit（compare 期发现了口径不一致）但出口=miss（没在 L-1 拦住）
+    a02 = next(o for o in outcomes if o.attack.id.startswith("A02"))
+    assert a02.found == HIT and a02.action_step == MISS
     # 归因那一步同样单独存在：三个 blame 现在互不相同 → hit（A07）
     a07 = next(o for o in outcomes if o.attack.id.startswith("A07"))
     assert a07.found == HIT and a07.blame_step == HIT
@@ -110,9 +110,10 @@ def test_only_runs_what_was_asked_for() -> None:
 def test_the_gap_notes_name_the_rows_that_missed() -> None:
     """★ §14.3 的覆盖声明：没达到期望的攻击必须被点名。"""
     notes = render_gap_notes(run_attacks())
-    assert "A06-persistent" in notes
+    assert "A02-polysemy" in notes
     assert "A08-global-invariant" in notes
-    # ★ A11 已经收口：它不再出现在覆盖声明里（收口了就该从缺口名单里消失）
+    # ★ 收口了就从缺口名单里消失：A06（出口选择）与 A11（溯源真实性）都不该再被点名
+    assert "A06-persistent" not in notes
     assert "A11-provenance-content" not in notes
 
 
@@ -171,12 +172,14 @@ def test_a04_missing_and_zero_are_told_apart() -> None:
     assert "filled zero" in evidence, evidence
 
 
-def test_a06_a_persistent_failure_refuses_the_run_instead_of_degrading() -> None:
-    """★ A06：不会无限重试（fail_if 不触发），但出口是「前置门拒跑」而不是降级。"""
+def test_a06_a_dead_source_degrades_and_a_dead_run_still_refuses() -> None:
+    """★ A06 修后：缺席的是【一个输入】就降级并标记；一个源都没有才拒跑。"""
     outcome = _outcome("A06")
-    assert outcome.found == HIT  # 停下来了，没有无限重试
-    assert outcome.action_step == MISS, outcome.evidence
-    assert "refusal" in " ".join(outcome.evidence)
+    assert outcome.found == HIT and outcome.action_step == HIT, outcome.evidence
+    evidence = " ".join(outcome.evidence)
+    assert "degrade_or_mark_unavailable" not in evidence  # the action string lives in the table
+    assert "unavailable: panel-b" in evidence or "sources unavailable" in evidence, evidence
+    assert "该拒的还是要拒" in evidence
 
 
 def test_a08_the_global_invariant_cannot_see_a_multi_piece_assembly() -> None:

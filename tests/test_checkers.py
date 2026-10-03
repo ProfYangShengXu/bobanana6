@@ -487,6 +487,31 @@ def test_unit_consistency_rejects_a_column_declaring_another_unit() -> None:
     assert not outcome.ok and "column 'credit.amount' declares unit 'USD'" in outcome.facts[0], outcome.facts
 
 
+def test_a_plain_decimal_string_is_not_read_as_a_quantity() -> None:
+    """★ 真模型跑测抓到的：`"1200000.0"` 被读成「数值 1200000，单位 '.0'」。
+
+    没有这条规则时，一个普普通通的小数会被判成「单位是 .0」→ 合法值被误拒
+    （实测：合并块 `value '1200000.0' declares unit '.0', but 'amount' is declared as 'CNY'`）。
+    """
+    from bobanana6.core.ontology import split_quantity
+
+    assert split_quantity("1200000.0") is None
+    assert split_quantity("0.011") is None
+    assert split_quantity("1200000") is None
+    # 单位符号必须以字母开头：紧挨着写（Quantity 形态）仍然要认出来
+    assert split_quantity("100元") == (100.0, "元")
+    assert split_quantity("12m") == (12.0, "m")
+    assert split_quantity("1.5e3 千元") == (1500.0, "千元")
+
+
+def test_unit_consistency_does_not_reject_a_plain_decimal() -> None:
+    """★ 同一个真模型读数的另一半：小数**没有**单位，它是「没标」，不是「标错了」。"""
+    art = artifact("out.csv", ({"credit.amount": "1200000.0"},), columns=(Column("credit.amount", "str"),))
+    outcome = run("unit_consistency", {"concept": "credit.amount", "unit": "CNY"}, cand=candidate(artifacts=(art,)))
+    assert outcome.ok, outcome.facts
+    assert "assumption, not a declaration" in outcome.facts[0], outcome.facts
+
+
 def test_unit_consistency_detects_peer_conflict() -> None:
     outcome = run(
         "unit_consistency",

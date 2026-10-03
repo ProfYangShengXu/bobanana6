@@ -122,6 +122,9 @@ class RunResult:
     metrics: Mapping[str, Any]
     outcome: AssemblyOutcome
     exit_reason: str
+    #: ★ A06: sources that could not be fetched. The run continued without them and
+    #: this is where that is written down -- a degraded run has to say so.
+    fetch_failures: Mapping[str, str] = field(default_factory=dict)
     reports: ReportBundle | None = None
 
     @property
@@ -339,20 +342,42 @@ class Runner:
             metrics=metrics,
             outcome=outcome,
             exit_reason=self.exit_reason,
+            fetch_failures=dict(self.fetch_failures),
             reports=reports,
         )
 
     # -- helpers ----------------------------------------------------------- #
 
     def _fetch_sources(self, contract: TaskContract) -> dict[str, Snapshot]:
+        """Freeze every source we can, and refuse only when there is nothing left.
+
+        ★ A06: one dead source used to refuse the whole run -- which throws away the
+        sources that *did* answer. The rule is drawn where it belongs:
+
+        * **nothing** could be fetched (or the only source is down) -> refuse at the
+          ``sources`` gate. There is no task left to run.
+        * **some** sources are unavailable -> continue with the rest and *mark* the
+          missing ones (``fetch_failures`` -> ``SOURCES.md`` + the survey evidence).
+          Refusing here would be the wrong exit: the defect is one input, not the run.
+
+        An empty snapshot is still never manufactured -- "no data" must not read as
+        "the data is empty".
+        """
         snapshots: dict[str, Snapshot] = {}
         for source in contract.sources:
             try:
                 snapshots[source.ref] = self.fetcher.fetch(SourceRef(ref=source.ref, locator=source.locator))
             except SourceError as exc:
-                # ★ Named, and fatal. An empty snapshot would read as "the data is empty".
                 self.fetch_failures[source.ref] = str(exc)
-                raise RunRefused("sources", f"source {source.ref!r} could not be fetched: {exc}", ("fetch_failed",)) from exc
+        if not snapshots:
+            # ★ The *why* travels with the refusal: "src-1 failed" sends the operator
+            #   to the logs, "src-1: cannot read .../missing.csv" sends them to the file.
+            detail = "; ".join(f"{ref}: {reason[:120]}" for ref, reason in sorted(self.fetch_failures.items()))
+            raise RunRefused(
+                "sources",
+                f"no source could be fetched -- {detail or '<none declared>'}; there is no task left to run",
+                ("fetch_failed",),
+            )
         return snapshots
 
     def _custom_checks(self) -> Mapping[str, Callable[..., Any]]:

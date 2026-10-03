@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from acceptance import EXIT_KINDS, AcceptanceReport, load_baseline, run_task, smoke_gate
-from bobanana6.adapters import ScriptedClient
+from bobanana6.adapters import EchoToolResultClient, ScriptedClient
 from bobanana6.contract import compile_bundle, parse_contract_file
 from bobanana6.core.model import ModelResponse, Recon
 from bobanana6.core.split import check_split
@@ -236,7 +236,9 @@ class _ScriptedBlocks:
         break_one_read: bool = False,
         invent_rows: int = 0,
         decline_one_read: bool = False,
+        normalise_units: bool = True,
     ) -> None:
+        self.normalise_units = normalise_units
         self.break_one_read = break_one_read
         #: ★ ② 的 context 场景：上游读块拒答（它没拿到需要的信息），
         #: 于是下游合并块的声明输入**从来没有被生产出来**。
@@ -269,7 +271,9 @@ class _ScriptedBlocks:
             for row in rows:
                 deduped.setdefault(str(row.get("obligor")), row)
             columns = _columns_of(fetched)
-            if not all(_values_carry_a_unit(payload.get("rows", []), "amount") for payload in fetched.values()):
+            if not self.normalise_units or not all(
+                _values_carry_a_unit(payload.get("rows", []), "amount") for payload in fetched.values()
+            ):
                 # 合并块只能声明它收到的：有一个输入没标单位，这一列的 unit 就不能成立
                 columns = [{key: value for key, value in column.items() if key != "unit"} for column in columns]
             merged = {"ref": "panel-a", "rows": list(deduped.values()), "columns": columns}
@@ -283,7 +287,7 @@ class _ScriptedBlocks:
             ref = part[len("part-") : -len(".csv")] if part.startswith("part-") else "panel-a"
             tool = "sources.snapshot" if "sources.snapshot" in offered else offered[0]
             return ModelResponse(tool_calls=(_tool_call(f"s{len(self.calls)}", tool, {"ref": ref}),))
-        rows = _amounts_normalised(snapshot.get("rows", []))
+        rows = _amounts_normalised(snapshot.get("rows", [])) if self.normalise_units else snapshot.get("rows", [])
         if self.break_one_read and block == "T-01":
             rows = []
         if self.invent_rows and block == "T-01":
@@ -293,7 +297,9 @@ class _ScriptedBlocks:
                 {
                     "ref": snapshot.get("ref", ""),
                     "rows": rows,
-                    "columns": _declared_columns(snapshot.get("columns", []), snapshot.get("rows", [])),
+                    "columns": _declared_columns(snapshot.get("columns", []), snapshot.get("rows", []))
+                    if self.normalise_units
+                    else snapshot.get("columns", []),
                 }
             )
         )
@@ -502,6 +508,44 @@ def test_an_unreadable_frozen_carrier_is_a_named_gate(monkeypatch) -> None:
     assert run.report.block_pass_rate == 0.0
 
 
+def _copied_task(tmp_path: Path, name: str = "panel") -> Path:
+    import shutil
+
+    target = tmp_path / name / "panel-three-sources"
+    shutil.copytree(
+        ACCEPTANCE / "main" / "panel-three-sources",
+        target,
+        ignore=shutil.ignore_patterns("_run", "__pycache__", "generate.py"),
+    )
+    return target
+
+
+def test_a_dead_source_degrades_the_run_instead_of_killing_it(tmp_path: Path) -> None:
+    """★ A06：一个源整体下线 → 用剩下的源继续，并把缺席的源【标出来】。
+
+    修前：`_fetch_sources` 见一个源取不到就 `RunRefused('sources')`，
+    可用的那两份也一起丢了 —— 那是"一个输入坏了"被当成"整个 run 坏了"。
+    """
+    task = _copied_task(tmp_path, "partial")
+    (task / "input" / "panel-b.csv").unlink()
+    run = run_task(task, client=EchoToolResultClient(), env={})
+
+    assert run.refused is None, run.report.notes
+    # ★ 计划只覆盖还拿得到的源：给一个取不到的源切块，那个块只能失败
+    assert run.blocks == ("T-01", "T-02", "T-03"), run.blocks
+    assert any("sources unavailable: panel-b (1 of 3)" == note for note in run.report.notes), run.report.notes
+
+
+def test_a_run_whose_only_source_is_dead_is_still_refused(tmp_path: Path) -> None:
+    """★ 边界：一个源都没取到 → 还是在 sources 那关拒跑（没有任务可跑了）。"""
+    task = _copied_task(tmp_path, "total")
+    for ref in ("panel-a", "panel-b", "panel-c"):
+        (task / "input" / f"{ref}.csv").unlink()
+    run = run_task(task, client=EchoToolResultClient(), env={})
+    assert run.refused == "sources", run.report.notes
+    assert "sources" in run.report.notes[-1]
+
+
 def _task_with_a_unit_constraint(tmp_path: Path, *, explicit: bool) -> Path:
     """A copy of the panel task that *requires* the panel's unit to be judged."""
     import shutil
@@ -512,6 +556,8 @@ def _task_with_a_unit_constraint(tmp_path: Path, *, explicit: bool) -> Path:
     target = tmp_path / ("strict" if explicit else "lenient") / source.name
     shutil.copytree(source, target, ignore=shutil.ignore_patterns("_run", "__pycache__", "generate.py"))
     document = yaml.safe_load((target / "task.yaml").read_text(encoding="utf-8"))
+    # the shipped task already declares C-units: replace its spec, do not add a second
+    document["constraints"]["hard"] = [c for c in document["constraints"]["hard"] if c["id"] != "C-units"]
     spec: dict[str, object] = {"concept": "amount", "unit": "CNY"}
     if explicit:
         spec["unit_source"] = "explicit"
@@ -526,6 +572,34 @@ def _task_with_a_unit_constraint(tmp_path: Path, *, explicit: bool) -> Path:
     )
     (target / "task.yaml").write_text(yaml.safe_dump(document, allow_unicode=True), encoding="utf-8")
     return target
+
+
+def test_a_mixed_unit_panel_is_caught_only_once_the_task_judges_units(tmp_path: Path) -> None:
+    """★★ 真模型跑测（#19）暴露的洞：面板里混着「千元」原值也能过三口径。
+
+    A 客户端的读块**照抄**源里的值（不归一）→ 面板带着 `250 千元`：
+      · 把 C-units 摘掉（= #18 之前的主验题）→ 块级/装配/来源全覆盖，加上真值对照
+        「rows 7/7, invented 0」—— **看起来完美，值却是错的**
+      · 任务要求判单位（现在的主验题）→ 合并块被 C-units 拦下，点到具体行列
+    """
+    import yaml
+
+    blind = _copied_task(tmp_path, "no-units")
+    document = yaml.safe_load((blind / "task.yaml").read_text(encoding="utf-8"))
+    document["constraints"]["hard"] = [c for c in document["constraints"]["hard"] if c["id"] != "C-units"]
+    (blind / "task.yaml").write_text(yaml.safe_dump(document, allow_unicode=True), encoding="utf-8")
+
+    silent = run_task(blind, client=_ScriptedBlocks(normalise_units=False), env={})
+    assert silent.report.block_pass_rate == 1.0, silent.report.render()
+    assert silent.report.assembly_passed is True, silent.assembly_codes
+    assert silent.truth is not None and silent.truth.matched is True, silent.truth.render()  # ★ 真值只比主体号
+    panel = silent.candidates["T-04"].artifact("panel.csv")
+    assert any("千元" in str(row.get("amount")) for row in panel.rows), "the panel kept the source unit"
+
+    judged = run_task(ACCEPTANCE / "main" / "panel-three-sources", client=_ScriptedBlocks(normalise_units=False), env={})
+    assert judged.report.block_pass_rate < 1.0, judged.report.render()
+    fact = judged.verdicts["T-04"].evidence.get("C-units", "")
+    assert "declares unit '千元'" in fact, judged.verdicts["T-04"].evidence
 
 
 def test_a_source_that_does_not_label_its_unit_is_not_silently_assumed(tmp_path: Path) -> None:

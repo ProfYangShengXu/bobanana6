@@ -83,6 +83,14 @@ def _exits_from_run(result: Any) -> set[str]:
     return seen
 
 
+def _contract_sources(task_dir: Path) -> tuple[str, ...]:
+    """The declared source refs of the task, read for the degradation note only."""
+    import yaml
+
+    document = yaml.safe_load((task_dir / "task.yaml").read_text(encoding="utf-8"))
+    return tuple(str(row.get("ref", "")) for row in (document.get("sources", ()) or ()) if isinstance(row, dict))
+
+
 def run_task(
     task_dir: str | Path,
     *,
@@ -156,6 +164,7 @@ def run_task(
         )
 
     exits = _exits_from_run(result)
+    base_sources = _contract_sources(base)
     total = len(result.verdicts)
     passed = sum(1 for verdict in result.verdicts.values() if verdict.ok)
     accuracy = 0.0
@@ -172,6 +181,12 @@ def run_task(
     coverage = coverage_from_exits(exits)
     if "taint" not in exits:
         notes.append("taint: no tool failed repeatedly in this task")
+
+    # ★ A06: a degraded run has to say so -- "we ran without source X" must not be
+    #   something the reader only discovers by diffing the panel against the truth.
+    if result.fetch_failures:
+        missing = ", ".join(sorted(result.fetch_failures))
+        notes.append(f"sources unavailable: {missing} ({len(result.fetch_failures)} of {len(base_sources)})")
 
     # ★ 第四条读数：与真值对照。它不进那三个维度（§15.6 禁单一总分），单独报。
     verdict_truth: TruthVerdict | None = None

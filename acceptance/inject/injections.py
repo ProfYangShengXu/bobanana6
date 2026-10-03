@@ -282,30 +282,43 @@ def a05_transient() -> Observation:
 
 
 def a06_persistent() -> Observation:
-    """A06：一个源整体下线 → 不能无限重试，要走「降级 / 标记不可得」。"""
-    from bobanana6.agentloop.errors import classify_error
-    from bobanana6.core.model import SourceRef
-    from bobanana6.sources import FileFetcher, SnapshotStore, SourceError
+    """A06：一个源整体下线 → 【不是】无限重试，也不是把可用的结果一起丢掉。
 
-    store = SnapshotStore(root=Path("/nonexistent-bobanana6-store"))
-    message = ""
-    try:
-        FileFetcher(store=store, captured_at="2026-10-03T00:00:00+08:00").fetch(
-            SourceRef(ref="dead", locator="/nonexistent/dead.csv")
-        )
-    except SourceError as exc:
-        message = str(exc)[:90]
-    classified = classify_error(SourceError(message or "cannot read"))
+    ★ 修后：`_fetch_sources` 只在**一个源都没取到**时拒跑；部分失败时用剩下的源继续，
+    并把缺席的源标出来（`SOURCES.md` + 验收 note）。跑的是【真 pipeline】：把面板题
+    复制一份、删掉一个源的文件 —— 不是把判决写死在注入里。
+    """
+    import shutil
+    import tempfile
+
+    from bobanana6.adapters import EchoToolResultClient
+
+    def _run(*, dead: tuple[str, ...]) -> Any:
+        from acceptance.harness import run_task
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "panel-three-sources"
+            shutil.copytree(
+                ACCEPTANCE / "main" / "panel-three-sources",
+                task,
+                ignore=shutil.ignore_patterns("_run", "__pycache__", "generate.py"),
+            )
+            for ref in dead:
+                (task / "input" / f"{ref}.csv").unlink(missing_ok=True)
+            return run_task(task, client=EchoToolResultClient(), env={})
+
+    partial = _run(dead=("panel-b",))
+    total = _run(dead=("panel-a", "panel-b", "panel-c"))
+    marked = next((note for note in partial.report.notes if "unavailable" in note), "")
+    degraded = partial.refused is None and bool(marked)
+    still_refuses = total.refused == "sources"
     return Observation(
-        found=bool(message),
-        action="refuse_run",
+        found=degraded,  # 停下来了：没有无限重试，也没有把 run 整个丢掉
+        action="degrade_or_mark_unavailable" if degraded and still_refuses else "refuse_run",
         evidence=(
-            f"SourceError: {message!r}",
-            f"classification reason={classified.reason} action={classified.action.value} (no infinite retry)",
-            (
-                "★ the run-level exit is Runner's pre-cluster refusal (RunRefused('sources')), "
-                "not §14.2's degrade-or-mark-unavailable"
-            ),
+            f"one source down -> refused={partial.refused!r}, blocks={partial.blocks!r}, note={marked!r}",
+            f"all sources down -> refused={total.refused!r} (该拒的还是要拒)",
+            "★ 降级与拒跑的界线：缺席的是【一个输入】就降级并标记；一个源都没有才拒跑",
         ),
     )
 
