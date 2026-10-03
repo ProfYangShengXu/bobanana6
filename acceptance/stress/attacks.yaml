@@ -1,61 +1,103 @@
-# 攻击注入点（`实现规格.md §14.2` 原文照抄）—— ★ 这是【清单】，不是执行器。
+# 攻击注入点（`实现规格.md §14.2` + `#15` 新增的 A11）。
 #
-# 每行一个可独立开关的攻击：`assert` 是它要触到的架构断言，`inject` 是怎么注入，
-# `expect` 是期望行为。执行器（按 id 开关、跑完收集三步判据）留给 inject/ 那一块。
+# ★ 现在这是【执行器读的表】：`acceptance/inject/attacks.py` 按行注入、按行报结果。
+#
+# 每行一个可独立开关的攻击：
+#   enabled        false 就不跑它（逐行开关）
+#   assert/inject/expect/fail_if   §14.2 的原文（人读）
+#   expect_blame   ② 归因这一步期望看到什么（null = 这条攻击不适用②，必须显式声明）
+#   expect_action  ③ 出口这一步期望看到什么（null = 不适用）
+# ★ 合成的「整体通过」会掩盖「发现对了但归因错」与「归因对了但动作错」的差别，
+#   所以三步分开报（§14.5）。
 attacks:
   - id: A01-mesh-dependency
+    enabled: true
     assert: 切分器能切出星形且可独立验证
     inject: 实体 ID 只在源 7 出现，源 12 需要它才能查
     expect: 不是硬切掉这条边，而是【识别为跨块依赖】或在 L1 补一条数据约束
 
   - id: A02-polysemy
+    enabled: true
     assert: 语义层能防住「各立一套」
     inject: 「营收」在 4 个源里 4 种口径（含税/不含税/合并/母公司）
     expect: 语义层在 L-1 阶段就归一，【不是】让各块各自定义
     fail_if: 出现 DefinitionMismatch（说明没在 L-1 拦住）
 
   - id: A03-real-conflict
+    enabled: true
     assert: 判定内核能区分「错」与「冲突」
     inject: 两个权威源对同一年给出不同值，【都不是错的】
     expect: 产出 Conflict + 双方证据都留
     fail_if: 判成 fail（错）或随便挑一个（更错）
 
   - id: A04-missing-not-zero
+    enabled: true
     assert: 「缺失 ≠ 0」不被静默填平
     inject: 源里故意留空缺格，且【不标注】
     expect: 面板里是「缺失」，不是 0
     fail_if: 任何位置出现被填平的 0
 
   - id: A05-transient
+    enabled: true
     assert: 局部重试能救回来
     inject: 两个源前 2 次超时，第 3 次成功
     expect: RETRY_LOCAL 且最终通过
 
   - id: A06-persistent
+    enabled: true
     assert: 救不回来时走对出口
     inject: 一个源整体下线
     expect: 【不是】无限重试 → 走降级或标记不可得
     fail_if: 重试次数超过上限
 
   - id: A07-same-symptom-different-layer
+    enabled: true
     assert: 归因能定位到层
     inject: 三个块都报「算不出来」，根因分别是 工具坏 / 上下文没给到 / 判定器太严
     expect: 三条 blame 各不相同
     fail_if: 三条给同一个 blame
 
   - id: A08-global-invariant
+    enabled: true
     assert: 装配检查能发现拼不上
     inject: 每个块单独看都合格，但合并后某一列跨实体口径不一致
     expect: assemble 拒绝
     fail_if: 装配通过
 
   - id: A09-impossible
+    enabled: true
     assert: 拒答是合法出口
     inject: 某实体的关键字段只存在于那个已下线的源里
     expect: status=declined，【明确报告拿不到】
     fail_if: 编一个值出来（最严重）／一直重试
 
   - id: A10-units
+    enabled: true
     assert: 单位不标也能对齐
     inject: 元/千元/百万元混用，且部分源不标
     expect: 归一后数值正确
+
+# ★ 三步判据的期望值（执行器读这一段；上面的行保持 §14.2 原文不动）。
+expected:
+  A01-mesh-dependency:               {expect_blame: null, expect_action: declare_cross_block_dependency}
+  A02-polysemy:                      {expect_blame: null, expect_action: no_definition_mismatch}
+  A03-real-conflict:                 {expect_blame: null, expect_action: record_conflict}
+  A04-missing-not-zero:              {expect_blame: null, expect_action: reject_filled_zero}
+  A05-transient:                     {expect_blame: null, expect_action: retry_local}
+  A06-persistent:                    {expect_blame: null, expect_action: degrade_or_mark_unavailable}
+  A07-same-symptom-different-layer:  {expect_blame: three_distinct_blames, expect_action: null}
+  A08-global-invariant:              {expect_blame: null, expect_action: assembly_rejects}
+  A09-impossible:                    {expect_blame: null, expect_action: decline}
+  A10-units:                         {expect_blame: null, expect_action: normalized_values}
+
+# ★ #15 新增：溯源引用的【真实性】没人校验（见仓库根 `溯源缺口-引用真实性未校验-20261003.md`）。
+#   它不需要 ground truth —— 快照就在系统手里：3 行的快照 + 30 行的候选，
+#   每行都声称来自它 → row=3..29 引用的行根本不存在。
+attacks_extra:
+  - id: A11-provenance-content
+    enabled: true
+    assert: 溯源链必须能【重放】—— 引用要指到真实存在的行，不只是名字在表里
+    inject: 快照只有 3 行，候选声称 30 行且每行都引用该快照（out.csv:row=0..29）
+    expect: 系统在【没有真值】的情况下抓住「引用的行不存在」
+    fail_if: 放行（coverage=1.0 且装配通过）
+    status: 已知缺口 —— 证据见 tests/test_attacks.py 的 xfail

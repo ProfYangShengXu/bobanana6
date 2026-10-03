@@ -12,11 +12,14 @@ Exit: 0 when every mutation is caught, 1 otherwise.
 
 from __future__ import annotations
 
+import atexit
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +40,36 @@ SOURCE_PACKAGES = (
     "assemble_impl",
     "report",
 )
+
+
+#: Files currently mutated, with the exact bytes to put back.
+#: ★ 进程被 SIGTERM/SIGINT 杀掉时（跑长任务很常见）必须还原，
+#: 否则一个变异会留在源码树里，让别的测试**假红** —— 2026-10-03 吃过一次。
+_RESTORE: dict[Path, bytes] = {}
+
+
+def restore_all() -> None:
+    """Put every mutated file back exactly as it was."""
+    for path, original in list(_RESTORE.items()):
+        try:
+            path.write_bytes(original)
+        finally:
+            _RESTORE.pop(path, None)
+
+
+def _on_signal(signum: int, _frame: object) -> None:
+    restore_all()
+    clear_bytecode_cache()
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)  # die the way we were asked to
+
+
+def install_restore_hooks() -> None:
+    atexit.register(restore_all)
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        handler = getattr(signal, name, None)
+        if handler is not None:
+            signal.signal(handler, _on_signal)
 
 
 def clear_bytecode_cache() -> None:
@@ -919,6 +952,79 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_arch_guard.py::test_core_does_not_import_the_mid_layer",
         "an arrow points from core/ back at the mid layer (AGENTS.md 1.2)",
     ),
+    # -- the attack executor: per-row switches, three steps kept apart -- #
+    Mutation(
+        "T01-per-row-switch-ignored",
+        "acceptance/inject/attacks.py",
+        '                enabled=bool(row.get("enabled", True)),',
+        "                enabled=True,  # mutation: the per-row switch is ignored",
+        "tests/test_attacks.py::test_every_row_can_be_switched_off_individually",
+        "a disabled attack would still run, so the switch means nothing",
+    ),
+    Mutation(
+        "T02-a-missing-injector-looks-like-a-pass",
+        "acceptance/inject/attacks.py",
+        '            outcomes.append(AttackOutcome(attack=attack, error="no injector is registered for this attack"))',
+        "            outcomes.append(AttackOutcome(attack=attack, observation=Observation(found=True)))",
+        "tests/test_attacks.py::test_a_row_with_no_injector_is_a_miss_not_a_pass",
+        "an attack with no implementation is reported as discovered",
+    ),
+    Mutation(
+        "T03-three-steps-folded-into-one",
+        "acceptance/inject/attacks.py",
+        '            f"{outcome.attack.id:34} {outcome.found:9} {outcome.blame_step:9} "',
+        '            f"{outcome.attack.id:34} {\'overall\':9} {outcome.blame_step:9} "',
+        "tests/test_attacks.py::test_the_report_keeps_the_three_steps_apart",
+        "a column called overall appears and the steps stop being readable apart",
+    ),
+    Mutation(
+        "T04-a11-claims-the-gap-is-caught",
+        "acceptance/inject/injections.py",
+        "    return Observation(\n        found=not report.ok,\n        action=\"rejected\" if not report.ok else \"passed\",",
+        "    return Observation(\n        found=True,\n        action=\"rejected\" if not report.ok else \"passed\",",
+        "tests/test_attacks.py::test_a11_the_executor_reports_the_gap_as_a_miss",
+        "the provenance gap is reported as closed when it is not",
+    ),
+    Mutation(
+        "T05-a07-blames-doctored-to-look-distinct",
+        "acceptance/inject/injections.py",
+        '    blames = tuple(attribute(name, events).blame for name, events in cases.items())',
+        '    blames = ("tool", "context", "constraint")  # mutation: pretend attribution works',
+        "tests/test_attacks.py::test_a07_the_three_root_causes_get_the_same_blame_today",
+        "the false-attribution finding is hidden by inventing three different blames",
+    ),
+    Mutation(
+        "T06-a11-gap-claims-to-be-closed",
+        "tests/test_attacks.py",
+        "    assert not report.ok, (",
+        "    assert report.ok, (",
+        "tests/test_attacks.py::test_a11_citing_rows_that_do_not_exist_is_caught",
+        "the red evidence turns green: XPASS under strict xfail is what flags the gap",
+    ),
+    Mutation(
+        "T07-baseline-whitelist-relaxed",
+        "acceptance/judge.py",
+        'ALLOWED_BASELINE_KEYS: frozenset[str] = frozenset({"min_pass_count", "baseline_run"})',
+        'ALLOWED_BASELINE_KEYS: frozenset[str] = frozenset({"min_pass_count", "baseline_run", "reward"})',
+        "tests/test_acceptance.py::test_the_baseline_loader_refuses_a_reward",
+        "a reward field is whitelisted straight back into the baseline",
+    ),
+    Mutation(
+        "T08-harness-does-not-restore-on-kill",
+        "tools/reverse_validation.py",
+        "def restore_all() -> None:\n    \"\"\"Put every mutated file back exactly as it was.\"\"\"\n    for path, original in list(_RESTORE.items()):",
+        'def restore_all() -> None:\n    """Put every mutated file back exactly as it was."""\n    for path, original in []:',
+        "tests/test_acceptance.py::test_the_reverse_validation_harness_restores_what_it_mutated",
+        "a killed harness leaves its mutation behind and other tests go falsely red",
+    ),
+    Mutation(
+        "T09-preflight-blind-to-a-leftover-mutation",
+        "tools/reverse_validation.py",
+        "    problems: list[str] = []\n    for mutation in mutations:\n",
+        "    return []  # mutation: measure whatever tree we find\n    for mutation in mutations:\n",
+        "tests/test_acceptance.py::test_the_harness_refuses_to_measure_a_tree_that_already_carries_a_mutation",
+        "a tree that already carries a mutation is measured as if it were clean",
+    ),
     # -- the acceptance set: the judge's structure and the split mechanism -- #
     Mutation(
         "U01-judge-grows-a-single-score",
@@ -1402,6 +1508,41 @@ MUTATIONS: tuple[Mutation, ...] = (
 )
 
 
+def resolve_path(relative_path: str) -> Path:
+    """Where one mutation's ``relative_path`` lives on disk."""
+    if relative_path.startswith(("tests/", "acceptance/", "tools/")):
+        return (REPO / relative_path).resolve()
+    if relative_path.split("/")[0] in SOURCE_PACKAGES:
+        return (REPO / "src" / "bobanana6" / relative_path).resolve()
+    return (SRC / relative_path).resolve()
+
+
+def preflight(mutations: Sequence[Mutation] = MUTATIONS) -> list[str]:
+    """★ Refuse to measure a tree that already carries a mutation.
+
+    ``restore_all()`` covers clean exits and catchable signals, but a SIGKILL
+    (``kill -9``, a reaped sandbox job) leaves the mutated bytes on disk and no
+    handler ever runs. Measuring on top of that reports garbage, and worse,
+    nothing in the output says the tree was dirty: 2026-10-03 a killed run left
+    ``core/model.py`` mutated and the next full run was silently untrustworthy.
+    So check every anchor before touching anything, and abort if one is gone.
+    """
+    problems: list[str] = []
+    for mutation in mutations:
+        path = resolve_path(mutation.relative_path)
+        if not path.is_file():
+            problems.append(f"{mutation.ident}: no such file {mutation.relative_path}")
+            continue
+        text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        found = text.count(mutation.old)
+        if found != 1:
+            problems.append(
+                f"{mutation.ident}: anchor found {found} time(s) in {mutation.relative_path} "
+                "-- the tree already carries a mutation (a previous run was killed mid-flight?)"
+            )
+    return problems
+
+
 def run_selector(selector: str) -> tuple[bool, str]:
     result = subprocess.run(
         [sys.executable, "-m", "pytest", selector, "-q", "--tb=no", "-rf", "-p", "no:cacheprovider"],
@@ -1427,17 +1568,20 @@ def run_selector(selector: str) -> tuple[bool, str]:
 
 
 def main() -> int:
+    install_restore_hooks()
+    problems = preflight()
+    if problems:
+        print("refusing to measure: the tree does not match the mutation table")
+        for problem in problems:
+            print(f"  ! {problem}")
+        print("put the files back (e.g. `git checkout -- <path>`) and run again")
+        return 2
     failures: list[str] = []
     print(f"{'mutation':44} {'caught':7} red tests")
     print("-" * 120)
     for mutation in MUTATIONS:
         relative = mutation.relative_path
-        if relative.startswith(("tests/", "acceptance/")):
-            path = (REPO / relative).resolve()
-        elif relative.split("/")[0] in SOURCE_PACKAGES:
-            path = (REPO / "src" / "bobanana6" / relative).resolve()
-        else:
-            path = (SRC / relative).resolve()
+        path = resolve_path(relative)
         if not path.is_file():
             failures.append(f"{mutation.ident}: no such file {relative}")
             print(f"{mutation.ident:44} ERROR   no such file {relative}")
@@ -1452,10 +1596,12 @@ def main() -> int:
             continue
         try:
             clear_bytecode_cache()
+            _RESTORE[path] = original_bytes
             path.write_text(original.replace(mutation.old, mutation.new), encoding="utf-8", newline="\n")
             caught, red = run_selector(mutation.selector)
         finally:
             path.write_bytes(original_bytes)
+            _RESTORE.pop(path, None)
             clear_bytecode_cache()
         if caught:
             print(f"{mutation.ident:44} {'yes':7} {red}")

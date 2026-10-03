@@ -47,6 +47,12 @@ EXIT_KINDS: tuple[str, ...] = (
 
 DEFAULT_BASELINE = Path(__file__).resolve().parent / "smoke" / "baseline.json"
 
+#: ★ 白名单，不是黑名单。上一版按精确键名拦 `reward` / `pass`，于是
+#: `reward_rate` / `mean_reward` / `pass_rate` / `overall_score` / 嵌套的
+#: `{"gate": {"reward": 0.9}}` 全都溜过去了（夜报 2026-10-03 探针）。
+#: 白名单不可能被"换个名字"绕过：基线行只有这两个键，别的键一律拒。
+ALLOWED_BASELINE_KEYS: frozenset[str] = frozenset({"min_pass_count", "baseline_run"})
+
 
 @dataclass(frozen=True)
 class AcceptanceReport:
@@ -101,10 +107,16 @@ def load_baseline(path: str | Path | None = None) -> dict[str, dict[str, Any]]:
     if not isinstance(document, dict) or not document:
         raise ValueError(f"{target}: the baseline must be a non-empty object")
     for task, row in document.items():
-        if not isinstance(row, dict) or not isinstance(row.get("min_pass_count"), int):
+        if not isinstance(row, dict):
+            raise TypeError(f"{target}: {task!r} must be an object")
+        unknown = sorted(set(row) - ALLOWED_BASELINE_KEYS)
+        if unknown:
+            raise ValueError(
+                f"{target}: {task!r} has unknown keys {unknown!r}; a baseline row is exactly "
+                f"{sorted(ALLOWED_BASELINE_KEYS)!r} -- a pass *count*, never a reward"
+            )
+        if not isinstance(row.get("min_pass_count"), int):
             raise TypeError(f"{target}: {task!r} needs an integer min_pass_count")
-        if "reward" in row or "pass" in row:
-            raise ValueError(f"{target}: {task!r} declares a reward; the gate compares pass counts")
     return document
 
 

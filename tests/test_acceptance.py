@@ -90,10 +90,82 @@ def test_smoke_uses_count_not_boolean_reward() -> None:
 
 
 def test_the_baseline_loader_refuses_a_reward(tmp_path: Path) -> None:
-    bad = tmp_path / "bad.json"
-    bad.write_text(json.dumps({"t": {"pass": True}}), encoding="utf-8")
+    """★ 白名单：基线行只允许 {min_pass_count, baseline_run}，换个名字也绕不过去。
+
+    上一版按精确键名拦 `reward` / `pass` —— 夜报 2026-10-03 的探针证明
+    `reward_rate` / `mean_reward` / `overall_score` / 嵌套 `{"gate": {...}}`
+    全能溜过去。
+    """
+    bypasses = (
+        {"pass": True},
+        {"reward": 0.9},
+        {"reward_rate": 0.9},
+        {"mean_reward": 0.9},
+        {"pass_rate": 0.9},
+        {"overall_score": 0.9},
+        {"gate": {"reward": 0.9}},
+        {"min_pass_count": 5, "reward": 0.9},
+    )
+    for index, row in enumerate(bypasses):
+        bad = tmp_path / f"bad-{index}.json"
+        bad.write_text(json.dumps({"t": row}), encoding="utf-8")
+        with pytest.raises(ValueError, match="unknown keys"):
+            load_baseline(bad)
+
+    ok = tmp_path / "ok.json"
+    ok.write_text(json.dumps({"t": {"min_pass_count": 5, "baseline_run": "r"}}), encoding="utf-8")
+    assert load_baseline(ok)["t"]["min_pass_count"] == 5
+
+    wrong_type = tmp_path / "wrong.json"
+    wrong_type.write_text(json.dumps({"t": {"min_pass_count": "five"}}), encoding="utf-8")
     with pytest.raises(TypeError, match="min_pass_count"):
-        load_baseline(bad)
+        load_baseline(wrong_type)
+
+
+def test_the_reverse_validation_harness_restores_what_it_mutated(tmp_path: Path) -> None:
+    """★ 反向验证脚本被强杀时必须还原，否则变异留在树里让别的测试**假红**。
+
+    这里验的是还原机制本身（记录 → 写回）；信号到达那一跳由
+    `install_restore_hooks()` 注册，不在单测里发信号。
+    """
+    from tools import reverse_validation
+
+    victim = tmp_path / "victim.py"
+    victim.write_text("mutated()", encoding="utf-8")
+    reverse_validation._RESTORE[victim] = b"original()\n"
+    reverse_validation.restore_all()
+    assert victim.read_bytes() == b"original()\n"
+    assert reverse_validation._RESTORE == {}
+
+    # 没有待还原的东西时也必须安全（进程正常结束时的常见路径）
+    reverse_validation.restore_all()
+    assert victim.read_bytes() == b"original()\n"
+
+
+def test_the_harness_refuses_to_measure_a_tree_that_already_carries_a_mutation() -> None:
+    """★ SIGKILL 落在变异中途时还原钩子根本不跑 —— 脏树必须被【动手之前】挡住。
+
+    实测教训：一次被杀的跑把 `core/model.py` 的变异留在树里，下一次全量跑
+    照样报出「170 捕获 / 1 未捕获」，除了那条自己的锚点没了之外没有任何迹象。
+    """
+    from tools import reverse_validation
+
+    # 干净树（当前表里每个锚点都在）：这条自检不该报出「锚点不见」
+    assert [p for p in reverse_validation.preflight() if "anchor found" in p] == []
+
+    # 锚点已经被上一次跑替换掉的树 = 表里那条变异的【结果】还在文件里
+    poisoned = reverse_validation.Mutation(
+        ident="T-dirty-tree",
+        relative_path="model.py",
+        old="DisagreementTypes: tuple[type, ...] = (BlindSpot, BlindSpot, DefinitionMismatch)",
+        new="DisagreementTypes: tuple[type, ...] = (BlindSpot, Conflict, DefinitionMismatch)",
+        selector="tests/test_model.py::test_three_divergence_types_have_disjoint_shapes",
+        note="measuring a tree that already carries a mutation proves nothing",
+    )
+    problems = reverse_validation.preflight([poisoned])
+    assert len(problems) == 1, problems
+    assert "T-dirty-tree" in problems[0], problems
+    assert "anchor found 0" in problems[0], problems
 
 
 # --------------------------------------------------------------------------- #
