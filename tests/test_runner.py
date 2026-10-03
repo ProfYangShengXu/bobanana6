@@ -513,6 +513,7 @@ def test_loop_io_produce_declines_and_executes_and_verifies(tmp_path: Path) -> N
         registry=__import__("bobanana6.services", fromlist=["build_registry"]).build_registry(tools, store.read),
         judge=judge,
         subtask=block,
+        budget=Budget(max_calls=8, max_wall_s=60, max_output=4096),
         log=EventLog(),
     )
     assert io.produce(LoopState()).declined is True
@@ -546,6 +547,7 @@ def test_loop_io_execute_records_tool_events_and_recovery(tmp_path: Path) -> Non
         registry=__import__("bobanana6.services", fromlist=["build_registry"]).build_registry(tools, store.read),
         judge=judge,
         subtask=block,
+        budget=Budget(max_calls=8, max_wall_s=60, max_output=4096),
         log=log,
         task_id="t-one",
         epoch=lambda: 2.0,
@@ -621,9 +623,10 @@ def test_the_summarizer_releases_the_gate_when_it_sends() -> None:
 def test_a_withheld_candidate_says_which_check_rejected_it(tmp_path: Path) -> None:
     """★ "exit=degrade" is the phenomenon; the report has to name the rule.
 
-    The 4B answers valid JSON but never cites the snapshot, so ``C-prov`` rejects
-    it. Without this the report said only ``{'exit': 'degrade_single_agent'}`` and
-    the next reader had to re-run the model to find out why.
+    The candidate cites its snapshot correctly (so it passes the shape gate) but
+    carries too few rows, so ``C-rows`` rejects it. Without this the report said
+    only ``{'exit': 'degrade_single_agent'}`` and the next reader had to re-run the
+    model to find out why.
     """
     source = _csv(tmp_path, "panel.csv", "obligor,pd,amount\nA-1,0.01,100\n")
     text = """
@@ -635,14 +638,134 @@ sources:
   - {ref: src-1, locator: SOURCE_CSV}
 constraints:
   hard:
-    - {id: C-rows, kind: presence, target: "*", spec: {min_rows: 1}, rationale: "no empty panels"}
-    - {id: C-prov, kind: provenance, target: out.csv, spec: {min_coverage: 0.95}, rationale: "values must be traceable"}
+    - {id: C-rows, kind: presence, target: "*", spec: {min_rows: 5}, rationale: "the panel needs five rows"}
 """.replace("SOURCE_CSV", str(source))
-    # valid JSON, rows present, but no "ref": exactly what the 4B produced
-    client = ScriptedClient([{"text": json.dumps({"rows": [{"obligor": "A-1"}]})}])
+    client = ScriptedClient([{"text": json.dumps({"ref": "src-1", "rows": [{"obligor": "A-1"}]})}])
     result = _runner(tmp_path, text, client).run()
 
     evidence = result.verdicts["T-01"].evidence
-    assert evidence["rejected_by"] == "C-prov"
-    assert "coverage 0.0000" in evidence["C-prov"]
-    assert "unknown snapshots" in evidence["C-prov"]
+    assert evidence["rejected_by"] == "C-rows"
+    assert "needs >= 5" in evidence["C-rows"]
+
+
+def test_an_answer_that_cites_no_snapshot_fails_at_the_shape_gate(tmp_path: Path) -> None:
+    """★ Missing ``ref`` must not be papered over with the block id.
+
+    It used to fall back to the block id, which passes every shape check and then
+    fails as "unknown snapshot 'T-01'" -- a report pointing at the wrong place. Now
+    it is refused where it happened, and the fix names the refs that were valid.
+    """
+    source = _csv(tmp_path, "panel.csv", "obligor,pd,amount\nA-1,0.01,100\n")
+    client = ScriptedClient([{"text": json.dumps({"rows": [{"obligor": "A-1"}]})}])  # no "ref"
+    result = _runner(tmp_path, ONE_SOURCE.replace("SOURCE_CSV", str(source)), client).run()
+
+    assert result.candidates == {}
+    evidence = result.verdicts["T-01"].evidence
+    assert evidence["exit"] == "fix_constraint"
+    assert "does not say which snapshot" in evidence["errors"]
+    assert "'T-01'" not in evidence["errors"]  # the block id is no longer invented as a ref
+
+
+def test_the_shape_gate_names_the_snapshots_that_would_have_been_valid() -> None:
+    """② (b): the fix tells the model *which* ref to use, not just that one is missing."""
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate('{"rows": []}', subtask=block, source_id="T-01", authorized_sources=("panel-2026q1",))
+    feedback = error.value.feedback()
+    assert feedback["code"] == "missing_ref"
+    assert "does not say which snapshot" in feedback["problem"]
+    assert '"panel-2026q1"' in feedback["expected"]
+
+    with pytest.raises(CandidateFormatError) as unknown:
+        parse_candidate(
+            '{"ref": "somewhere-else", "rows": []}',
+            subtask=block,
+            source_id="T-01",
+            authorized_sources=("panel-2026q1",),
+        )
+    assert unknown.value.feedback()["code"] == "unknown_ref"
+    assert '"panel-2026q1"' in unknown.value.feedback()["expected"]
+
+
+def test_a_cited_snapshot_is_accepted_and_becomes_the_source_id() -> None:
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
+    candidate = parse_candidate(
+        '{"ref": "panel-2026q1", "rows": [{"a": 1}]}',
+        subtask=block,
+        source_id="T-01",
+        authorized_sources=("panel-2026q1",),
+    )
+    assert candidate.source_id == "panel-2026q1"
+
+
+def test_a_block_without_authorized_sources_keeps_the_documented_fallback() -> None:
+    """A merge block has no snapshot to cite -- reported as a gap, not solved here."""
+    block = Subtask(id="T-03", goal="g", inputs=("part.csv",), output="out.csv", contract_ref="t", axis="source", mode="write")
+    candidate = parse_candidate('{"rows": [{"a": 1}]}', subtask=block, source_id="T-03")
+    assert candidate.source_id == "T-03"
+
+
+def test_a_truncated_answer_is_reported_as_truncation_not_as_the_first_character() -> None:
+    """★ Our own output cap cutting the answer is not the model's shape error."""
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
+    text = '{"ref": "src-1", "columns": [{"name": "obligor"}], "rows": [{"obligor": "A-1'
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate(text, subtask=block, source_id="T-01", output_cap=512)
+    feedback = error.value.feedback()
+    assert feedback["code"] == "truncated_answer"
+    assert "cut off" in feedback["problem"]
+    assert "512" in feedback["problem"]  # the cap that did it
+    assert "first character" not in feedback["problem"]
+
+
+def test_the_three_json_breakages_read_differently() -> None:
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
+
+    with pytest.raises(CandidateFormatError) as empty:
+        parse_candidate("   ", subtask=block, source_id="T-01")
+    assert empty.value.feedback()["code"] == "empty"
+    assert empty.value.feedback()["problem"] == "the answer is empty"
+
+    with pytest.raises(CandidateFormatError) as not_json:
+        parse_candidate("I think it is fine", subtask=block, source_id="T-01")
+    assert not_json.value.feedback()["code"] == "not_json"
+    assert "first character is 'I'" in not_json.value.feedback()["problem"]
+
+    with pytest.raises(CandidateFormatError) as malformed:
+        parse_candidate('{"rows": [1,]}', subtask=block, source_id="T-01")
+    assert malformed.value.feedback()["code"] == "malformed_json"
+    assert "not valid" in malformed.value.feedback()["problem"]
+
+
+def test_the_block_runtime_hands_the_ports_budget_to_the_producer(tmp_path: Path) -> None:
+    """★ The budget arrives as a *port argument*; it must not be replaced by a field."""
+    from fakes import bundle as make_bundle
+    from fakes import mini_ontology, plan, subtask
+
+    from bobanana6.assemble_impl import BlockRuntime
+    from bobanana6.services import BoundChecks, build_toolset
+
+    class _Client:
+        def __init__(self) -> None:
+            self.max_tokens: list[int] = []
+
+        def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+            self.max_tokens.append(max_tokens)
+            return ModelResponse(text='{"rows": [{"a": 1}]}')
+
+    client = _Client()
+    document = parse_contract(ONE_SOURCE.replace("SOURCE_CSV", "x.csv"))
+    runtime = BlockRuntime(client=client, store=SnapshotStore(root=tmp_path / "s3"), contract=document.contract)
+    block = subtask("T-01", output="out.csv", mode="write", axis="field")
+    tools = build_toolset(
+        plan=plan(subtasks=(block,), interfaces={"out.csv": "s"}),
+        subtask=block,
+        contract=document.contract,
+        ontology=mini_ontology(),
+        authorized=(),
+        fetched={},
+        upstream={},
+        checks=BoundChecks(block="T-01"),
+    )
+    runtime.run(block, make_bundle(), mini_ontology(), tools, Budget(max_calls=4, max_wall_s=30, max_output=1234))
+    assert client.max_tokens == [1234]

@@ -35,6 +35,7 @@ from ..agentloop.loop import LoopIO, LoopState, TurnProposal
 from ..agentloop.tools import ToolCall, ToolResult
 from ..core.model import (
     Artifact,
+    Budget,
     Candidate,
     Claim,
     Column,
@@ -52,8 +53,11 @@ __all__ = [
     "EXPECTED_SHAPE",
     "CandidateFormatError",
     "LoopIOImpl",
+    "OutputLimitUnitError",
     "ResponseFormatSupport",
     "candidate_response_format",
+    "expected_shape",
+    "model_output_cap",
     "parse_candidate",
     "rejects_response_format",
     "tool_schemas",
@@ -170,6 +174,40 @@ class ResponseFormatSupport:
     refused: bool = False
 
 
+#: The one unit a model call's output cap can be counted in.
+TOKEN_UNIT = "tokens"
+
+
+class OutputLimitUnitError(ValueError):
+    """The declared output allowance cannot cap a model call.
+
+    ``Budget.max_output`` is a declaration and a declaration has to have
+    consequences (``架构设计 §6.9``): declaring 8192 and spending 512 means nobody
+    honours it. ``max_tokens`` is counted in tokens and in nothing else -- a
+    byte-denominated allowance has no defined conversion -- so a non-token unit is
+    refused instead of being silently reinterpreted.
+
+    The request's shape is what has to change, so it declares ``format_error``
+    (which the loop routes to ``fix_constraint``) and carries no answer-shape
+    feedback: there is nothing to tell the model, the operator has to fix the
+    budget.
+    """
+
+    reason = "format_error"
+
+
+def model_output_cap(budget: Budget) -> int:
+    """The token cap this model call may use, read off the declared allowance."""
+    if budget.max_output_unit != TOKEN_UNIT:
+        raise OutputLimitUnitError(
+            f"the output allowance is declared in {budget.max_output_unit!r}, and a model call "
+            f"can only be capped in {TOKEN_UNIT!r}; declare the unit or the cap it produces"
+        )
+    if budget.max_output <= 0:
+        raise OutputLimitUnitError(f"Budget.max_output is {budget.max_output}; a model call needs a positive cap")
+    return budget.max_output
+
+
 class CandidateFormatError(ValueError):
     """The model's answer could not be read as a candidate.
 
@@ -276,11 +314,38 @@ def _claims(raw: Any, *, snapshot_ref: str, locator: str, reject: Reject) -> tup
     return tuple(claims)
 
 
+def _describe_json_failure(text: str, exc: Exception, *, output_cap: int | None) -> tuple[str, str]:
+    """Say which of the three breakages happened: empty, not JSON, or cut off."""
+    head = text.lstrip()
+    if not head:
+        return "empty", "the answer is empty"
+    if head[0] != "{":
+        return "not_json", f"the first character is {head[0]!r}, not '{{' (JSON parse failed: {exc})"
+    if not head.rstrip().endswith("}"):
+        cap = f"; the output allowance is {output_cap} tokens" if output_cap else ""
+        problem = (
+            "the answer was cut off before the JSON object closed "
+            f"(it starts with '{{' but does not end with '}}'){cap} (JSON parse failed: {exc})"
+        )
+        return "truncated_answer", problem
+    return "malformed_json", f"the answer starts and ends like JSON but is not valid: {exc}"
+
+
+def expected_shape(authorized_sources: Sequence[str]) -> str:
+    """The required shape, plus *which* snapshots may be cited when we know them."""
+    if not authorized_sources:
+        return EXPECTED_SHAPE
+    listed = ", ".join(f'"{ref}"' for ref in authorized_sources)
+    return f'{EXPECTED_SHAPE} -- "ref" must be one of: {listed}'
+
+
 def parse_candidate(
     text: str,
     *,
     subtask: Subtask,
     source_id: str,
+    authorized_sources: Sequence[str] = (),
+    output_cap: int | None = None,
 ) -> Candidate:
     """Read one answer into a ``Candidate``, or fail loudly.
 
@@ -290,15 +355,16 @@ def parse_candidate(
     """
     # ★ One place builds the fix, and every rejection carries it: what the model
     #   sent, which rule it broke, and the shape that would be accepted.
-    def reject(code: str, problem: str) -> NoReturn:
-        raise CandidateFormatError(problem, code=code, got=text)
+    def reject(code: str, problem: str, *, expected: str = EXPECTED_SHAPE) -> NoReturn:
+        raise CandidateFormatError(problem, code=code, got=text, expected=expected)
 
     try:
         document = json.loads(text)
     except (json.JSONDecodeError, TypeError) as exc:
-        head = text.lstrip()
-        where = "the answer is empty" if not head else f"the first character is {head[0]!r}, not '{{'"
-        reject("not_json", f"{where} (JSON parse failed: {exc})")
+        # ★ Three different breakages, three different fixes. Saying "the first
+        #   character is not '{'" when it *is* '{' sends the reader to the wrong
+        #   place: a truncated answer is our own output cap, not the model's shape.
+        reject(*_describe_json_failure(text, exc, output_cap=output_cap))
     if not isinstance(document, Mapping):
         reject("not_an_object", f"the answer is a JSON {type(document).__name__}, not an object")
     rows = document.get("rows", [])
@@ -310,9 +376,29 @@ def parse_candidate(
             reject("row_not_an_object", f"a row is {type(row).__name__}, not an object of column: value")
         clean_rows.append(dict(row))
 
+    # ★ ``ref`` is not optional: it is what makes the chain walkable. Filling it
+    #   with the block id would look legal (a non-empty string) and then fail
+    #   downstream as "unknown snapshot 'T-01'" -- a wrong place to point at.
+    shape_with_refs = expected_shape(authorized_sources)
     snapshot_ref = document.get("ref")
     if not isinstance(snapshot_ref, str) or not snapshot_ref:
+        if authorized_sources:
+            keys = sorted(str(key) for key in document)
+            reject(
+                "missing_ref",
+                f"the answer does not say which snapshot it came from: 'ref' is missing "
+                f"(top-level keys it did send: {keys})",
+                expected=shape_with_refs,
+            )
+        # No authorized source to cite (a block that only merges upstream parts):
+        # there is nothing better to put here, and the gap is reported.
         snapshot_ref = source_id
+    elif authorized_sources and snapshot_ref not in authorized_sources:
+        reject(
+            "unknown_ref",
+            f"'ref' names {snapshot_ref!r}, which is not a snapshot this block was given",
+            expected=shape_with_refs,
+        )
     locator = str(document.get("body_path") or "")
     artifact_text = document.get("text")
     artifact = Artifact(
@@ -361,8 +447,10 @@ class LoopIOImpl(LoopIO):
     registry: ToolRegistry
     judge: BlockJudge
     subtask: Subtask
+    #: ★ The declared allowance, not a private constant: the cap of every model call
+    #: is read off it (``model_output_cap``), so declaring 8192 really spends 8192.
+    budget: Budget
     source_id: str = "runtime"
-    max_tokens: int = 512
     #: Structured-output support, shared with the rest of the run so a refusal is
     #: learned once instead of once per block.
     response_format: ResponseFormatSupport = field(default_factory=ResponseFormatSupport)
@@ -391,7 +479,8 @@ class LoopIOImpl(LoopIO):
                 "role": "system",
                 "content": (
                     "You are one worker in a split plan. Answer with a single JSON object "
-                    'shaped {"ref": <source id>, "columns": [...], "rows": [...]}. '
+                    'shaped {"ref": <one of the authorized source ids below>, "columns": [...], "rows": [...]}. '
+                    "The \"ref\" is not optional: it is how every value is traced back to a snapshot. "
                     "Use the tools you were given; you may only read what they expose."
                 ),
             },
@@ -401,7 +490,8 @@ class LoopIOImpl(LoopIO):
 
     def produce(self, state: LoopState) -> TurnProposal:
         self.calls += 1
-        response = self._complete(state)
+        cap = model_output_cap(self.budget)
+        response = self._complete(state, cap)
         calls = self.registry.calls(response.tool_calls)
         if calls:
             return TurnProposal(tool_calls=calls, text=response.text)
@@ -411,8 +501,19 @@ class LoopIOImpl(LoopIO):
             # ★ The third legal exit: the worker says it cannot get this
             #   information. It is not a failure and the loop must not retry it.
             return TurnProposal(declined=True, detail=_decline_reason(response.text))
-        candidate = parse_candidate(response.text, subtask=self.subtask, source_id=self.source_id)
+        candidate = parse_candidate(
+            response.text,
+            subtask=self.subtask,
+            source_id=self.source_id,
+            authorized_sources=self.authorized_sources(),
+            output_cap=cap,
+        )
         return TurnProposal(candidate=candidate, text=response.text)
+
+    def authorized_sources(self) -> tuple[str, ...]:
+        """The snapshots this block may cite -- the same list the prompt carries."""
+        sources = getattr(self.toolset, "sources", None)
+        return tuple(sources.refs()) if sources is not None and hasattr(sources, "refs") else ()
 
     def wants_structured_output(self) -> bool:
         """Whether this call should ask for the answer shape.
@@ -425,7 +526,7 @@ class LoopIOImpl(LoopIO):
         """
         return self.response_format.enabled and self.calls > 1
 
-    def _complete(self, state: LoopState) -> ModelResponse:
+    def _complete(self, state: LoopState, max_tokens: int) -> ModelResponse:
         """One model call, with capability negotiation around the answer schema.
 
         ★ A service that does not understand ``response_format`` must not turn into
@@ -436,17 +537,15 @@ class LoopIOImpl(LoopIO):
         prompt = self.prompt(state)
         schemas = tool_schemas(self.toolset)
         if not self.wants_structured_output():
-            return self.client.complete(prompt, schemas, self.max_tokens)
+            return self.client.complete(prompt, schemas, max_tokens)
         try:
-            return self.client.complete(
-                prompt, schemas, self.max_tokens, response_format=candidate_response_format()
-            )
+            return self.client.complete(prompt, schemas, max_tokens, response_format=candidate_response_format())
         except Exception as exc:
             if not rejects_response_format(exc):
                 raise
             self.response_format.enabled = False
             self.response_format.refused = True
-            return self.client.complete(prompt, schemas, self.max_tokens)
+            return self.client.complete(prompt, schemas, max_tokens)
 
     def execute(self, calls: tuple[ToolCall, ...]) -> tuple[ToolResult, ...]:
         results = self.registry.execute(calls)

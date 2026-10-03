@@ -181,7 +181,6 @@ class BlockRuntime:
     required_scope: str = "full"
     compression: Any = None
     summarize: Callable[[tuple[Mapping[str, Any], ...]], str] | None = None
-    max_tokens: int = 512
     #: ``subtask -> newest edit time of its outputs`` (0.0 when nothing is on disk).
     edit_clock: Callable[[Subtask], float] = lambda _subtask: 0.0
     #: Monotonic seconds for tool evidence timestamps; injected, never read here.
@@ -215,8 +214,10 @@ class BlockRuntime:
             registry=registry,
             judge=judge,
             subtask=subtask,
+            # ★ The port handed us the budget; that declaration is what caps the
+            #   model call -- not a number this adapter keeps for itself.
+            budget=budget,
             source_id=subtask.id,
-            max_tokens=self.max_tokens,
             log=self.event_log,
             task_id=self.contract.task_id,
             epoch=self.epoch,

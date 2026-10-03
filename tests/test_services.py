@@ -20,7 +20,7 @@ from fakes import (
 
 from bobanana6.agentloop.tools import plan_tool_segments
 from bobanana6.core.checkers.base import CheckContext
-from bobanana6.core.model import ModelResponse, SourceRef, Subtask
+from bobanana6.core.model import Budget, ModelResponse, SourceRef, Subtask
 from bobanana6.services import (
     SHELL_COMMAND_CHECK,
     BlockJudge,
@@ -455,6 +455,7 @@ def _produce_io(tmp_path: Path, client: object) -> object:
         registry=build_registry(tools, store.read),
         judge=BlockJudge(bundle=bundle(), subtask=block, context=CheckContext(ontology=mini_ontology())),
         subtask=block,
+        budget=Budget(max_calls=8, max_wall_s=60, max_output=4096),
         response_format=ResponseFormatSupport(),
     )
 
@@ -553,3 +554,54 @@ class _StatusError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status_code = status
+
+
+# --------------------------------------------------------------------------- #
+# ★ the declared output allowance is what caps the model call
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingComplete:
+    def __init__(self) -> None:
+        self.max_tokens: list[int] = []
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        self.max_tokens.append(max_tokens)
+        return ModelResponse(text='{"rows": [{"a": 1}]}')
+
+
+def test_the_model_call_uses_the_declared_output_allowance(tmp_path: Path) -> None:
+    """★ Declaring 8192 and spending 512 means the declaration has no consequence."""
+    client = _RecordingComplete()
+    io = _produce_io(tmp_path, client)
+    io.budget = Budget(max_calls=8, max_wall_s=60, max_output=777)
+    io.produce(_state())
+    assert client.max_tokens == [777]
+
+    io.budget = Budget(max_calls=8, max_wall_s=60, max_output=99)  # the declaration moved
+    io.produce(_state())
+    assert client.max_tokens == [777, 99]
+
+
+def test_an_allowance_in_another_unit_is_refused_not_reinterpreted(tmp_path: Path) -> None:
+    """★ ``max_tokens`` is counted in tokens; a byte allowance has no conversion."""
+    from bobanana6.assemble_impl import OutputLimitUnitError
+
+    client = _RecordingComplete()
+    io = _produce_io(tmp_path, client)
+    io.budget = Budget(max_calls=8, max_wall_s=60, max_output=4096, max_output_unit="bytes")
+    with pytest.raises(OutputLimitUnitError, match="declared in 'bytes'"):
+        io.produce(_state())
+    assert client.max_tokens == []  # nothing was sent
+
+    from bobanana6.agentloop.errors import BobananaAction, classify_error
+
+    # declared, so the loop can route it: the request shape has to change
+    assert classify_error(OutputLimitUnitError("x")).action is BobananaAction.FIX_CONSTRAINT
+
+
+def test_a_zero_allowance_is_refused(tmp_path: Path) -> None:
+    from bobanana6.assemble_impl import OutputLimitUnitError, model_output_cap
+
+    with pytest.raises(OutputLimitUnitError, match="positive cap"):
+        model_output_cap(Budget(max_calls=1, max_wall_s=1, max_output=0))
