@@ -99,6 +99,7 @@ def run_task(
     strategy: str = "source",
     expected_blame: str | None = None,
     offline: bool = False,
+    concurrency: int | None = None,
 ) -> TaskRun:
     """Run one acceptance task through the real assembly point.
 
@@ -127,6 +128,11 @@ def run_task(
     ]
     if offline:
         argv.append("--offline")
+    if concurrency is not None:
+        # ★ The declared worker pool is a *deployment* fact, not a task property:
+        #   a 20–40 block plan legitimately needs the deployment to say it can serve
+        #   that concurrency, or the capability check reports ``capability_short``.
+        argv.extend(["--concurrency", str(concurrency)])
     previous = Path.cwd()
     if client is not None:
         original = cli.build_client

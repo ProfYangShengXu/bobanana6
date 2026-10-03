@@ -1,0 +1,45 @@
+# 压力任务的共享语义（由 generate.py 产出）。
+domain: entity-exposure
+version: "2026.10"
+
+concepts:
+  obligor: {label: 主体, kind: entity, aliases: [债务人, 取引先, entity, internal_code, alias, 别名]}
+  year: {label: 年度, kind: attribute, aliases: [year, 会計年度, fiscal_year, period, 报告期]}
+  revenue: {label: 营业收入, kind: measure, unit: CNY, aliases: [売上高, 营收, sales, turnover]}
+  exposure: {label: 敞口金额, kind: measure, unit: CNY, aliases: [敞口, 与信額, exposure, amount]}
+
+units:
+  revenue: {symbol: CNY, scale: 1.0, base: CNY}
+  exposure: {symbol: CNY, scale: 1.0, base: CNY}
+  # ★ 源里出现的两个换算单位（声明过的，不靠"千=1000"的世界知识）
+  exposure_千元: {concept_id: exposure, symbol: 千元, scale: 1000.0, base: CNY}
+  exposure_百万元: {concept_id: exposure, symbol: 百万元, scale: 1000000.0, base: CNY}
+
+definitions:
+  # ★ ② 四个口径版本都在本体里；交付物钉在 v1-group-consolidated
+  revenue:
+    version: v1-group-consolidated
+    text: 合并口径营业收入，含全部子公司，按元计
+  revenue_parent:
+    concept_id: revenue
+    version: v2-parent-only
+    text: 母公司口径营业收入，不含子公司
+  revenue_incl:
+    concept_id: revenue
+    version: v3-incl-tax
+    text: 含税营业收入
+  revenue_excl:
+    concept_id: revenue
+    version: v4-excl-tax
+    text: 不含税营业收入
+  obligor:
+    version: "2026.10"
+    text: 主体号一律用规范形式 ENT-xx（其余写法见 s19 对照表）
+  year:
+    version: "2026.10"
+    text: 日历年；财年与报告期都要归到日历年
+  exposure:
+    version: "2026.10"
+    text: 敞口金额，统一到元
+
+calendar: {timezone: Asia/Shanghai}

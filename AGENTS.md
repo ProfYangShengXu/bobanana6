@@ -28,6 +28,12 @@
 - ✅ `#16` 已收口的四条判定缺口：缺失成为一等状态 `MISSING`（A04）· 单位检查读**值里的单位**（A10）·
   归因读**自带病因**、两层互相指认则 `unknown`（A07）· 溯源经 `SnapshotReader` 端口逐点重放
   —— 引用的行要在、值要对得上（A11）。四条都有修前/修后对照读数。
+- ✅ `#20` 压力任务 A（信息类）建好并用真模型考了 4 轮：24 个异构源（五格式 × 三语言 ×
+  单位/结构/缺失异构）→ 实体×时间面板；九条攻击面逐条见 `acceptance/stress/README.md`。
+  真值 `input/` 与 `truth/` 物理隔离（有测试守着）。★ 真模型：块级 0.92–0.96、装配 4/4 失败
+  （合并块交不出面板）、归因 4/4 `constraint`、真值 `rows 0/44` 且 `invented 0`、
+  成本 ≈ 52–55 调用/轮。压力题抓到：多版本口径的 pin 靠字典序（题侧改名已修）、
+  跨源真冲突仍没判（#63）、读块授权是全部源（容易乱指）。★ 本阶段不做调优：缺口只报不改。
 - ✅ `#19` 用真模型（`Qwen/Qwen3.5-4B`）把 `#15–#18` 的修复复跑了一遍：A11、具名门**一致**；
   单位归一**不一致**（模型只会照抄，不会换算）；A07 的 context 根因**没走到**（模型不回取就答）。
   据此修了三处真缺陷：单位解析器把小数的小数部分当单位（合法值被误拒）· 部件载荷丢了列的单位 ·
@@ -44,7 +50,7 @@
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 750 passed（不再有 xfail） |
+| `pytest tests/ -q` | ✅ 753 passed（不再有 xfail） |
 | `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |

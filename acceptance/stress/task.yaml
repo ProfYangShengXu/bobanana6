@@ -1,0 +1,80 @@
+# 压力任务 A（信息类，`架构设计.md §15.4`）：24 个异构源 → 实体 × 时间面板。
+#
+# ★ 这份 task.yaml 由 `generate.py` 产出（源清单与 SOURCE_SPECS 同源，不许手改）。
+# ★ 真值在 ../truth/truth.json：运行期只挂 input/，真值只给判分器读。
+task_id: stress-panel-many-sources
+goal: >
+  把 20 多个异构来源里的「主体 × 年度」敞口与收入，重建为一张统一口径的面板
+  （panel.csv：obligor, year, revenue, exposure）。
+  主体号一律写成 s19 对照表里的规范形式（ENT-xx）；revenue 一律用合并口径
+  （v1-group-consolidated）；exposure 一律换算成【元】。
+version: 1
+
+deliverables:
+  - name: panel.csv
+    schema: {obligor: str, year: int, revenue: float, exposure: float}
+
+sources:
+  - {ref: s01, locator: input/s01.csv}
+  - {ref: s02, locator: input/s02.csv}
+  - {ref: s03, locator: input/s03.html}
+  - {ref: s04, locator: input/s04.json}
+  - {ref: s05, locator: input/s05.txt}
+  - {ref: s06, locator: input/s06.csv}
+  - {ref: s07, locator: input/s07.html}
+  - {ref: s08, locator: input/s08.json}
+  - {ref: s09, locator: input/s09.txt}
+  - {ref: s10, locator: input/s10.csv}
+  - {ref: s11, locator: input/s11.json}
+  - {ref: s12, locator: input/s12.pdf}
+  - {ref: s13, locator: input/s13.csv}
+  - {ref: s14, locator: input/s14.json}
+  - {ref: s15, locator: input/s15.html}
+  - {ref: s16, locator: input/s16.csv}
+  - {ref: s17, locator: input/s17.json}
+  - {ref: s18, locator: input/s18.txt}
+  - {ref: s19, locator: input/s19.csv}
+  - {ref: s20, locator: input/s20.csv}
+  - {ref: s21, locator: input/s21.csv}
+  - {ref: s22, locator: input/s22.csv}
+  - {ref: s23, locator: input/s23.csv}
+  - {ref: s24, locator: input/s24.pdf}
+
+constraints:
+  hard:
+    - id: C-rows
+      kind: presence
+      target: panel.csv
+      spec: {min_rows: 1}
+      rationale: "面板不允许为空"
+    - id: C-fields
+      kind: schema
+      target: panel.csv
+      spec: {columns: [{name: obligor, dtype: str, nullable: false}, {name: year, dtype: int, nullable: false}, {name: revenue, dtype: float}, {name: exposure, dtype: float, nullable: false}]}
+      rationale: "主体×年度的面板，四个字段一个都不能少；exposure 不许空（缺了要说拿不到，不许填 0）"
+    - id: C-prov
+      kind: provenance
+      target: panel.csv
+      spec: {min_coverage: 0.95}
+      rationale: "每个值都要能指回一份快照，否则无法复核"
+    # ★ ⑧ 全局不变量（点名交付物表达；`target="*"` 在多块装配下必然 not found，见 A08）
+    - id: C-units
+      kind: unit_consistency
+      target: panel.csv
+      spec: {concept: exposure, unit: CNY}
+      rationale: "整列必须是一个单位（元）——源里千元/百万元混用，跨实体口径必须一致"
+    # ★ ② 多义概念：revenue 四个口径版本，交付物必须钉在合并口径
+    - id: C-revenue-def
+      kind: definition_pin
+      target: panel.csv
+      spec: {concept: revenue, version: v1-group-consolidated}
+      rationale: "营收在四个源里四种口径；面板必须钉在合并口径，不许混"
+  soft: []
+
+blind:
+  - ★ ⑤ 瞬时故障：压力题本身没有假故障通道（可复现的假超时由注入集 A05 覆盖）
+  - ★ 有的源不标单位：系统只能说「靠本体假设」，证明不了它真是元（A10 的物理边界）
+  - ★ 跨源真冲突（③）：跨块候选今天不互相比较，冲突只能在报告里如实记「没判」
+
+limits: {max_rounds: 2}
+notes: 压力任务 A：五条异构 × 九条攻击面，详见 acceptance/stress/README.md 的逐条表。

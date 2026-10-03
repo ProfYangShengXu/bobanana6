@@ -1122,6 +1122,39 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_sources.py::test_the_reader_hands_the_frozen_rows_over_as_data",
         "the reader hands over an empty body and the content check sees nothing",
     ),
+    # -- block 20: the pressure task (heterogeneity, degradation, truth isolation) -- #
+    Mutation(
+        "B32-truth-reported-as-given-to-the-run",
+        "acceptance/harness.py",
+        '    given = tuple(sorted(str(path.relative_to(base)) for path in (base / "input").glob("*")))\n',
+        '    given = tuple(sorted(str(path.relative_to(base)) for path in base.glob("*/*")))\n',
+        "tests/test_stress_task.py::test_the_run_is_never_handed_the_truth",
+        "the truth directory shows up as if it had been handed to the run",
+    ),
+    Mutation(
+        "B33-the-deliberately-dead-source-is-generated",
+        "acceptance/stress/generate.py",
+        '    if cover == "dead":\n',
+        '    if False:  # mutation: the offline source is written after all\n',
+        "tests/test_stress_task.py::test_the_pressure_task_is_a_pipeline_of_blocks_with_one_source_offline",
+        "the persistent-failure attack surface disappears from the pressure task",
+    ),
+    Mutation(
+        "B34-pressure-task-shrunk-to-half-the-sources",
+        "acceptance/stress/generate.py",
+        "    for spec in SOURCE_SPECS:\n        _write_source(given, spec)\n",
+        "    for spec in SOURCE_SPECS[:12]:  # mutation: half the sources vanish\n        _write_source(given, spec)\n",
+        "tests/test_stress_task.py::test_the_pressure_task_is_a_pipeline_of_blocks_with_one_source_offline",
+        "the task shrinks below the 20-source floor and keeps its shape claim",
+    ),
+    Mutation(
+        "B35-html-sources-serve-as-csv",
+        "acceptance/stress/generate.py",
+        '    elif fmt == "html":\n        _html(path, names, entity, unit, labeled, lang)\n',
+        '    elif fmt == "html":  # mutation: the format dimension collapses\n        _csv(path, names, _rows_for(entity, unit, labeled, lang))\n',
+        "tests/test_stress_task.py::test_the_five_heterogeneity_dimensions_are_really_in_the_data",
+        "an HTML source becomes plain CSV and the format claim is no longer backed by data",
+    ),
     # -- block 19: real-model findings (unit parser, unit hand-off, A06 exits) -- #
     Mutation(
         "B26-partial-fetch-failure-still-refuses-the-run",
@@ -1902,7 +1935,11 @@ def preflight(mutations: Sequence[Mutation] = MUTATIONS) -> list[str]:
 
 def run_selector(selector: str) -> tuple[bool, str]:
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", selector, "-q", "--tb=no", "-rf", "-p", "no:cacheprovider"],
+        # ★ `-rE` as well as `-rf`: a selector that dies in a *fixture* (before the
+        #   test body) is a real catch, and with only `-rf` it is not reported at all
+        #   -- the harness then reads it as "no test ran" and calls the mutation a
+        #   false red (measured 2026-10-03 on a pressure-task mutation).
+        [sys.executable, "-m", "pytest", selector, "-q", "--tb=no", "-rfE", "-p", "no:cacheprovider"],
         cwd=REPO,
         capture_output=True,
         text=True,

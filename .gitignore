@@ -49,7 +49,9 @@ desktop.ini
 .bobanana6/
 # 验收集：合成数据的输入由生成器产出、真值只在评测时物化 —— 都不入库
 # （truth/ 尤其不能入库：它就是要跟 input/ 物理隔离的那一半）
-acceptance/**/input/*.csv
+# 生成物：input/ 是【运行期唯一挂载】的东西，truth/ 只给判分器读；
+# 压力题的源有五种格式，所以这里按整个 input/ 目录忽略（不只 csv）。
+acceptance/**/input/*
 acceptance/**/truth/*.json
 # 验收跑的产物（报告与快照）也不入库
 acceptance/**/_run/
