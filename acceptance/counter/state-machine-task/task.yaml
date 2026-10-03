@@ -1,0 +1,38 @@
+# ★ 反例集主题：应当【拒绝切分】。
+#
+# 三方（party-a/b/c）在同一份状态机上做增量式互相依赖的推理：
+# 每一步的 state 由「前一步的 state + 当前事件」决定，三方频繁共享中间状态。
+# 这类任务拆开就是 fake parallelism（§15.8）。
+#
+# 现在的形状：状态机是【一份】来源 —— 切分策略在没有第二个来源时不会扇出，
+# 于是它自然留在单块（= 单 agent 兜底）。
+task_id: counter-state-machine
+goal: 顺着同一份状态机一步步推出最终状态
+version: 1
+
+deliverables:
+  - name: final-state.csv
+    schema: {step: str, actor: str, event: str, state: str}
+
+sources:
+  - {ref: machine-events, locator: input/machine-events.csv}
+
+constraints:
+  hard:
+    - id: C-rows
+      kind: presence
+      target: "*"
+      spec: {min_rows: 5}
+      rationale: "五个步骤一步都不能少——少一步后面全错"
+    - id: C-prov
+      kind: provenance
+      target: final-state.csv
+      spec: {min_coverage: 0.95}
+      rationale: "每一步都要能指回事件日志"
+
+blind:
+  - "每一步依赖上一步的 state，单独看一步无法判对错"
+
+limits: {max_rounds: 3}
+
+notes: 反例：三方共享同一份状态机；应当拒绝切分、降级单 agent。

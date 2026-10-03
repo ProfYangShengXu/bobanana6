@@ -47,6 +47,12 @@ desktop.ini
 .chen/
 # 运行时自动起草的本体（每个项目一份，不该跟着仓库走）
 .bobanana6/
+# 验收集：合成数据的输入由生成器产出、真值只在评测时物化 —— 都不入库
+# （truth/ 尤其不能入库：它就是要跟 input/ 物理隔离的那一半）
+acceptance/**/input/*.csv
+acceptance/**/truth/*.json
+# 验收跑的产物（报告与快照）也不入库
+acceptance/**/_run/
 out/
 result.csv
 *.log

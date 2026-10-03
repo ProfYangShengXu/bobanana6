@@ -1,0 +1,16 @@
+# 反例题的本体：状态机只有一个概念域，没有可切分的维度。
+domain: order-state-machine
+version: "2026.1"
+
+concepts:
+  step: {label: 步骤号, kind: attribute}
+  actor: {label: 参与方, kind: entity}
+  event: {label: 事件, kind: event}
+  state: {label: 状态, kind: attribute}
+
+definitions:
+  state:
+    version: "2026.1"
+    text: 每一步之后的机器状态；由前一步的状态与当前事件决定，不能从单一步骤独立推出
+
+calendar: {timezone: Asia/Shanghai}

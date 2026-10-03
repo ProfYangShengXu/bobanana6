@@ -1,0 +1,5 @@
+{
+  "smoke-panel-one-source": {"min_pass_count": 5, "baseline_run": "offline-5x-deterministic"},
+  "smoke-panel-two-deliverables": {"min_pass_count": 5, "baseline_run": "offline-5x-deterministic"},
+  "smoke-panel-tighter-bound": {"min_pass_count": 5, "baseline_run": "offline-5x-deterministic"}
+}

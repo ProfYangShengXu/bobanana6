@@ -1,0 +1,46 @@
+# 主验题：三个来源 → 一份合并面板。★ 会切出多块（3 读 + 1 写）。
+#
+# 为什么这个形状：
+#   · 三个 source → split_by_source 切出 3 个 read 块 + 1 个 write（合并）块，
+#     write 块的 inputs 就是三个 part —— 跨块依赖被【声明】出来（§14.2 A01）
+#     ，而不是被硬切掉；
+#   · 每条约束都点名具体目标：多块装配时 target="*" 的检查在装配那关会因
+#     「artifact_for 只在候选恰好只有一个产物时解析 *」而必然报 not found，
+#     所以全局不变量这题用「点名交付物」表达（这一条已作为发现报出）。
+task_id: main-panel-three-sources
+goal: 把三份来源里同一批债务人的敞口整理成一份可复核的面板
+version: 1
+
+deliverables:
+  - name: panel.csv
+    schema: {obligor: str, pd: float, amount: float}
+
+sources:
+  - {ref: panel-a, locator: input/panel-a.csv}
+  - {ref: panel-b, locator: input/panel-b.csv}
+  - {ref: panel-c, locator: input/panel-c.csv}
+
+constraints:
+  hard:
+    - id: C-rows
+      kind: presence
+      target: panel.csv
+      spec: {min_rows: 1}
+      rationale: "面板不允许为空——空表会被下游当成「这些债务人不存在」"
+    - id: C-prov
+      kind: provenance
+      target: panel.csv
+      spec: {min_coverage: 0.95}
+      rationale: "每个值都要能指回一份快照，否则无法复核"
+    - id: C-fields
+      kind: schema
+      target: panel.csv
+      spec: {columns: [{name: obligor, dtype: str}, {name: pd, dtype: str}, {name: amount, dtype: str}]}
+      rationale: "三份来源合并后列名与类型必须仍然一致"
+
+blind:
+  - "来源若以千元记账且不标注，单看一列无法判定单位"
+
+limits: {max_rounds: 3}
+
+notes: 主验题：多块 pipeline，跨块依赖必须被识别。

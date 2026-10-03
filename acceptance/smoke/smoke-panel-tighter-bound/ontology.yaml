@@ -1,0 +1,10 @@
+
+domain: credit-risk
+version: "2026.1"
+concepts:
+  obligor: {label: 债务人主体号, kind: entity}
+  pd: {label: 违约概率, kind: measure, unit: ratio}
+  amount: {label: 敞口金额, kind: measure, unit: CNY}
+units:
+  pd: {symbol: ratio, scale: 1.0, base: ratio}
+  amount: {symbol: CNY, scale: 1.0, base: CNY}

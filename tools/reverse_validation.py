@@ -46,6 +46,7 @@ def clear_bytecode_cache() -> None:
     stamp, which would make the mutation invisible to the test subprocess.
     """
     shutil.rmtree(REPO / "tests" / "__pycache__", ignore_errors=True)
+    shutil.rmtree(REPO / "acceptance" / "__pycache__", ignore_errors=True)
     for package in SOURCE_PACKAGES:
         shutil.rmtree(REPO / "src" / "bobanana6" / package / "__pycache__", ignore_errors=True)
 
@@ -918,6 +919,79 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_arch_guard.py::test_core_does_not_import_the_mid_layer",
         "an arrow points from core/ back at the mid layer (AGENTS.md 1.2)",
     ),
+    # -- the acceptance set: the judge's structure and the split mechanism -- #
+    Mutation(
+        "U01-judge-grows-a-single-score",
+        "acceptance/judge.py",
+        "    attribution_accuracy: float\n",
+        "    attribution_accuracy: float\n    overall_score: float = 0.0\n",
+        "tests/test_acceptance.py::test_report_has_no_single_score",
+        "a single total appears and the three axes stop being readable apart",
+    ),
+    Mutation(
+        "U02-render-drops-the-uncovered-exits",
+        "acceptance/judge.py",
+        '            "  ★ not hit (未验证) : " + (", ".join(self.uncovered()) or "<none>"),',
+        '            "  ★ not hit (未验证) : " + "<none>",',
+        "tests/test_acceptance.py::test_report_declares_uncovered_exits",
+        "a report stops saying which exits were never reached",
+    ),
+    Mutation(
+        "U03-coverage-may-be-partial",
+        "acceptance/judge.py",
+        "        missing = sorted(set(EXIT_KINDS) - set(self.coverage))\n        if missing:\n            raise ValueError(f\"coverage must declare every exit, missing {missing!r}\")",
+        "        missing = []\n        if missing:\n            raise ValueError(f\"coverage must declare every exit, missing {missing!r}\")",
+        "tests/test_acceptance.py::test_a_report_without_coverage_is_refused",
+        "an incomplete coverage map is accepted, so silence looks like success",
+    ),
+    Mutation(
+        "U04-smoke-gate-uses-a-boolean",
+        "acceptance/judge.py",
+        "    return observed_pass_count >= minimum_pass_count",
+        "    return bool(observed_pass_count)",
+        "tests/test_acceptance.py::test_smoke_uses_count_not_boolean_reward",
+        "the smoke gate stops comparing counts and becomes a boolean reward",
+    ),
+    Mutation(
+        "U05-cross-block-dependency-not-declared",
+        "decompose/strategies.py",
+        "                expects=tuple((name, interfaces[name]) for name in parts),",
+        "                expects=(),",
+        "tests/test_acceptance.py::test_the_cross_block_dependency_is_declared_not_cut",
+        "the merge block stops declaring what it consumes (A01: the edge is cut, not named)",
+    ),
+    Mutation(
+        "U06-multi-block-plan-collapses-to-one-block",
+        "decompose/strategies.py",
+        "    if len(keys) < 2:\n        return split_single(contract, ontology, round=round, version=version)",
+        "    if True:\n        return split_single(contract, ontology, round=round, version=version)",
+        "tests/test_acceptance.py::test_the_multi_block_task_really_cuts_into_several_blocks",
+        "a multi-source task silently stops being cut into several blocks",
+    ),
+    Mutation(
+        "U07-truth-is-handed-to-the-run",
+        "acceptance/harness.py",
+        '    given = tuple(sorted(str(path.relative_to(base)) for path in (base / "input").glob("*")))',
+        '    given = tuple(sorted(str(path.relative_to(base)) for path in base.glob("*/*")))',
+        "tests/test_acceptance.py::test_the_isolation_rule_holds_the_run_only_gets_input",
+        "the harness starts reporting truth paths among the run's inputs",
+    ),
+    Mutation(
+        "U08-truth-is-never-compared",
+        "acceptance/harness.py",
+        "        verdict_truth = compare_rows(rows, document)",
+        "        verdict_truth = None  # mutation: the answer is never judged against the truth",
+        "tests/test_acceptance.py::test_the_scripted_multi_block_run_matches_the_truth_keys",
+        "a wrong answer passes every system check and nobody notices",
+    ),
+    Mutation(
+        "U09-truth-comparison-ignores-invented-keys",
+        "acceptance/truth.py",
+        "    invented = tuple(sorted(actual_keys - expected_keys))",
+        "    invented = ()  # mutation: invented keys are forgiven",
+        "tests/test_acceptance.py::test_a_wrong_answer_passes_every_system_check_but_fails_the_truth",
+        "an answer made of invented entities is judged as acceptable",
+    ),
     # -- the three defects the real model exposed in the shell itself -- #
     Mutation(
         "V01-output-cap-is-a-private-constant",
@@ -1358,7 +1432,7 @@ def main() -> int:
     print("-" * 120)
     for mutation in MUTATIONS:
         relative = mutation.relative_path
-        if relative.startswith("tests/"):
+        if relative.startswith(("tests/", "acceptance/")):
             path = (REPO / relative).resolve()
         elif relative.split("/")[0] in SOURCE_PACKAGES:
             path = (REPO / "src" / "bobanana6" / relative).resolve()

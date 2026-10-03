@@ -1,0 +1,37 @@
+# ★ 同一道题的「看起来可切」版本：三方的局部视图各算一份来源。
+#
+# 判分器要的是「切分器拒绝它」。今天的切分器会把这三份来源切成 3 读 + 1 合并，
+# 而 11 条合法性检查【一条都看不出共享状态】—— 于是门禁会放行。
+# 这一份专门用来把那个缺口钉在测试里（见 counter/README.md）。
+task_id: counter-state-machine-parties
+goal: 顺着同一份状态机一步步推出最终状态（三方各持局部视图）
+version: 1
+
+deliverables:
+  - name: final-state.csv
+    schema: {step: str, actor: str, event: str, state: str}
+
+sources:
+  - {ref: party-a, locator: input/party-a.csv}
+  - {ref: party-b, locator: input/party-b.csv}
+  - {ref: party-c, locator: input/party-c.csv}
+
+constraints:
+  hard:
+    - id: C-rows
+      kind: presence
+      target: final-state.csv
+      spec: {min_rows: 5}
+      rationale: "五个步骤一步都不能少"
+    - id: C-prov
+      kind: provenance
+      target: final-state.csv
+      spec: {min_coverage: 0.95}
+      rationale: "每一步都要能指回事件日志"
+
+blind:
+  - "每一步依赖上一步的 state，三方各自只看得见自己那几步"
+
+limits: {max_rounds: 3}
+
+notes: 反例的「看起来可切」版本：共享状态被拆开就是 fake parallelism。

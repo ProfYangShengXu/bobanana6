@@ -1,0 +1,22 @@
+# 主验题的本体：只声明这题真正用到的概念。
+domain: credit-risk
+version: "2026.1"
+
+concepts:
+  obligor: {label: 债务人主体号, kind: entity}
+  pd: {label: 违约概率, kind: measure, unit: ratio}
+  amount: {label: 敞口金额, kind: measure, unit: CNY}
+
+units:
+  pd: {symbol: ratio, scale: 1.0, base: ratio}
+  amount: {symbol: CNY, scale: 1.0, base: CNY}
+
+definitions:
+  pd:
+    version: "2026.1"
+    text: 未来 12 个月内发生违约的概率，按债务人主体计，不按账户计
+  amount:
+    version: "2026.1"
+    text: 敞口金额，按人民币元计；来源若以千元记账需先归一到元
+
+calendar: {timezone: Asia/Shanghai}

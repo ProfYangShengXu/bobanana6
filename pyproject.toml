@@ -33,7 +33,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 # Tests import `bobanana6` straight from src/ so the kernel is verifiable
 # without installing anything and without a build step.
-pythonpath = ["src"]
+# `src` for the package; `.` so the acceptance set (spec §14) is importable as a package.
+pythonpath = [".", "src"]
 testpaths = ["tests"]
 markers = [
   "arch_guard: architecture purity guards (deterministic, no model, no network)",

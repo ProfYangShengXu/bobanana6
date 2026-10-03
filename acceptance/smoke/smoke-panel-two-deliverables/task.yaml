@@ -1,0 +1,33 @@
+task_id: smoke-panel-two-deliverables
+goal: 把一份来源整理成可复核的面板
+version: 1
+
+deliverables:
+  - {name: out.csv, schema: {obligor: str, pd: float, amount: float}}
+  - {name: summary.csv, schema: {obligor: str, pd: float}}
+
+sources:
+  - {ref: src-1, locator: input/panel.csv}
+
+constraints:
+  hard:
+    - id: C-rows
+      kind: presence
+      target: out.csv
+      spec: {min_rows: 1}
+      rationale: "面板不允许为空"
+    # ★ 刻意不用 target="*"：装配关把所有 piece 拼成一个候选，
+    #   而 artifact_for 只在候选恰好一个产物时解析 `*` —— 多块时 `*` 检查
+    #   必然报「artifact not found」。这一条已作为发现上报。
+    - id: C-prov
+      kind: provenance
+      target: out.csv
+      spec: {min_coverage: 0.95}
+      rationale: "每个值都要能指回一份快照"
+    - id: C-shape
+      kind: schema
+      target: out.csv
+      spec: {columns: [{name: obligor, dtype: str}, {name: pd, dtype: str}, {name: amount, dtype: str}]}
+      rationale: "合并后列名与类型必须仍然一致"
+
+notes: 冒烟题（单源、分钟级）
