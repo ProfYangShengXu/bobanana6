@@ -406,7 +406,10 @@ def test_candidate_response_format_carries_the_answer_schema() -> None:
     fmt = candidate_response_format()
     assert fmt["type"] == "json_schema"
     schema = fmt["json_schema"]["schema"]
-    assert schema["required"] == ["columns", "rows"]
+    # ★ the schema must say exactly what the parser enforces: `ref` is not optional,
+    #   and there is no alternative spelling it could pick instead
+    assert schema["required"] == ["ref", "columns", "rows"]
+    assert "source_id" not in schema["properties"]
     assert schema["additionalProperties"] is False
     assert schema["properties"]["rows"]["items"]["type"] == "object"
     # the text fed back on a rejection describes the same contract

@@ -968,6 +968,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         "the ref rules cannot fire because the gate never learns the authorized set",
     ),
     Mutation(
+        "V08-schema-makes-ref-optional-again",
+        "assemble_impl/produce.py",
+        '    "required": ["ref", "columns", "rows"],',
+        '    "required": ["columns", "rows"],',
+        "tests/test_services.py::test_candidate_response_format_carries_the_answer_schema",
+        "the request describes the answer differently from the way it is judged",
+    ),
+    Mutation(
         "V07-runtime-invents-its-own-output-cap",
         "assemble_impl/runtime.py",
         "            budget=budget,",

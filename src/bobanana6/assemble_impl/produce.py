@@ -100,13 +100,19 @@ EXPECTED_SHAPE = (
 #: every property to be required, which would force the model to invent ``hint`` /
 #: ``text`` / ``claims`` on every answer. The tightening that matters here is the
 #: shape of ``columns`` and ``rows``.
+#:
+#: ★ ``ref`` **is** required here, because the parser requires it: the real run
+#: showed the model sending ``columns``/``rows`` and sometimes ``source_id`` --
+#: it was following this schema, which offered ``ref`` as optional and
+#: ``source_id`` as an alternative. A request that describes the answer
+#: differently from the way the answer is judged is the shell eating its own
+#: contract, so the two now say the same thing.
 CANDIDATE_SCHEMA: Mapping[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["columns", "rows"],
+    "required": ["ref", "columns", "rows"],
     "properties": {
         "ref": {"type": "string"},
-        "source_id": {"type": "string"},
         "hint": {"type": "string"},
         "text": {"type": "string"},
         "definition_versions": {"type": "object", "additionalProperties": {"type": "string"}},
