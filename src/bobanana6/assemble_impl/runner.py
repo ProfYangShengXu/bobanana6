@@ -237,11 +237,18 @@ class Runner:
                 verdicts[subtask.id] = Verdict(ok=False, failed=("declined",), evidence={"exit": declined.exit_reason})
                 continue
             except BlockRuntimeError as failed:
-                self._note_gate(subtask, False, {"exit": failed.exit_reason})
+                # ★ §7⑫: a withheld candidate was rejected by the *judge*, and the
+                #   judge still holds which constraints did it -- that is the
+                #   declaration, recorded here on the real event stream.
+                failure_evidence = self._failure_evidence(failed)
+                failure_detail: dict[str, Any] = {"exit": failed.exit_reason}
+                if failure_evidence.get("rejected_by"):
+                    failure_detail["constraint_rejected"] = True
+                self._note_gate(subtask, False, failure_detail)
                 verdicts[subtask.id] = Verdict(
                     ok=False,
                     failed=("runtime",),
-                    evidence=self._failure_evidence(failed),
+                    evidence=failure_evidence,
                 )
                 continue
             candidates[subtask.id] = candidate
@@ -254,7 +261,14 @@ class Runner:
             artifact = candidate.artifact(subtask.output)
             if artifact is not None:
                 pieces[subtask.output] = artifact
-            self._note_gate(subtask, verdict.ok, {"failed": list(verdict.failed)})
+            # ★ §7⑫: this verdict comes from the judge, so its ``failed`` names the
+            #   constraints that rejected the block -- the judge is the party that
+            #   declares it. Written here (not inferred downstream) so attribution
+            #   reads a declaration in a *real* run, not only in a hand-made trace.
+            gate_detail: dict[str, Any] = {"failed": list(verdict.failed)}
+            if not verdict.ok:
+                gate_detail["constraint_rejected"] = True
+            self._note_gate(subtask, verdict.ok, gate_detail)
 
         convergence = self._aggregate(decisions)
         assembly = check_assembly(
@@ -380,7 +394,11 @@ class Runner:
         for name in subtask.inputs:
             artifact = pieces.get(name)
             if artifact is None:
-                upstream[name] = {"schema": plan.interfaces.get(name, ""), "missing": True}
+                # ★ It names itself: "missing: true" without a name tells the caller
+                #   that *something* is absent, not which input, and a consumer that
+                #   cannot tell will keep asking for it (observed: the merge block
+                #   burned its whole budget re-requesting an input nobody produced).
+                upstream[name] = {"name": name, "schema": plan.interfaces.get(name, ""), "missing": True}
             else:
                 upstream[name] = {
                     "schema": plan.interfaces.get(name, ""),

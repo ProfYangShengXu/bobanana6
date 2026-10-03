@@ -34,6 +34,11 @@ class SourceError(RuntimeError):
     #: answer is to read a different source rather than to re-ask the worker.
     reason = "switch_source"
 
+    #: ★ The layer that owns this failure, declared here so attribution does not
+    #: have to infer it (``AGENTS.md §7⑫``). ``switch_source`` is in the tool
+    #: layer's action table (``attribution.BLAME_ACTIONS``), so the two agree.
+    blame = "tool"
+
 
 @dataclass(frozen=True)
 class SnapshotStore:

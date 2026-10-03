@@ -10,26 +10,11 @@ never silently treated as consistent.
 
 from __future__ import annotations
 
-import re
-
 from ..model import Candidate, Constraint, is_missing
-from ..ontology import resolve_unit
+from ..ontology import resolve_unit, split_quantity
 from .base import CheckContext, CheckOutcome, artifact_for, fail, ok
 
 KIND = "unit_consistency"
-
-#: ``<number><separator><unit symbol>`` -- the shape the Kubernetes ``Quantity``
-#: pattern puts on the value itself. A bare number carries no unit and is not
-#: judged here.
-_VALUE_WITH_UNIT = re.compile(r"^(?P<number>[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(?P<symbol>[^\s\d].*)$")
-
-
-def _split_value_unit(value: str) -> tuple[str, str] | None:
-    match = _VALUE_WITH_UNIT.match(value.strip())
-    if match is None:
-        return None
-    return match.group("number"), match.group("symbol").strip()
-
 
 def _concept_columns(constraint: Constraint, candidate: Candidate, context: CheckContext) -> tuple[str, ...]:
     """The artifact columns that carry the concept this constraint is about."""
@@ -80,7 +65,7 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
             value = row.get(column)
             if is_missing(value) or not isinstance(value, str):
                 continue  # a number carries no unit here; absence is A04's business
-            split = _split_value_unit(value)
+            split = split_quantity(value)
             if split is None:
                 continue  # no unit on the value -- still unjudgeable, reported below
             _, symbol = split

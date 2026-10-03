@@ -292,6 +292,54 @@ def test_a11_a_citation_whose_value_does_not_match_is_caught() -> None:
     assert value_mismatches(matching, ok_candidate, {"panel-a": body}) == ()
 
 
+def test_a11_a_converted_quantity_still_replays_and_a_dropped_unit_does_not() -> None:
+    """★ ①：换过单位的同一个量不算「引用不真实」；**把单位丢掉没换算**仍然算。
+
+    换算系数与基准来自本体声明的单位表（`实现规格 §5.0.1` 判据②③），
+    不是世界知识、也不是「只要数值能扯上关系就算过」。
+    """
+    from bobanana6.core.checkers.provenance import value_mismatches
+    from bobanana6.core.model import (
+        Artifact,
+        Candidate,
+        Column,
+        Concept,
+        Ontology,
+        Provenance,
+        SnapshotBody,
+        Unit,
+    )
+
+    ontology = Ontology(
+        domain="d",
+        version="1",
+        concepts={"amount": Concept(id="amount", label="Amount", kind="measure", domain="d")},
+        definitions={},
+        units={
+            "amount:CNY": Unit(concept_id="amount", symbol="CNY", scale=1.0, base="CNY"),
+            "amount:千元": Unit(concept_id="amount", symbol="千元", scale=1000.0, base="CNY"),
+        },
+    ).freeze()
+    body = SnapshotBody(ref="panel-c", rows=({"obligor": "C-002", "amount": "3000 千元"},))
+    columns = (Column(name="obligor", dtype="str"), Column(name="amount", dtype="float"))
+
+    def candidate(amount: object) -> Candidate:
+        artifact = Artifact(name="panel.csv", columns=columns, rows=({"obligor": "C-002", "amount": amount},))
+        return Candidate(
+            subtask_id="T-04",
+            source_id="panel-c",
+            artifacts=(artifact,),
+            provenance=(Provenance(value_ref="panel.csv:row=0", snapshot_ref="panel-c", source_row=0),),
+        )
+
+    converted = candidate(3_000_000.0)  # 3000 千元 归一到元
+    assert value_mismatches(converted.artifacts[0], converted, {"panel-c": body}, ontology) == ()
+
+    dropped = candidate(3000.0)  # ★ 只把单位扔掉、没有换算
+    facts = value_mismatches(dropped.artifacts[0], dropped, {"panel-c": body}, ontology)
+    assert facts and "does not match snapshot" in facts[0], facts
+
+
 def test_a11_the_executor_reports_the_gap_as_found() -> None:
     """★ 执行器那一侧：A11 修后必须是 hit（与上面那条是同一件事的两个读数）。"""
     outcome = _outcome("A11")

@@ -68,6 +68,12 @@ class ToolResult:
     content: str
     blocked: bool = False
     error_type: str | None = None
+    #: ★ The layer that owns this failure, declared by whoever produced it --
+    #: ``AGENTS.md §7⑫`` ("谁来「说」自己的错") applied to tool results: a tool that
+    #: blew up says ``tool``, unusable arguments say ``model``. Attribution reads
+    #: it (``agentloop/attribution.py::_trace_declarations``) instead of guessing
+    #: from "some tool returned ok=False". Empty means nobody declared one.
+    cause: str = ""
 
 
 class ToolCallError(ValueError):
@@ -90,9 +96,13 @@ def parse_tool_arguments(raw_arguments: Any) -> Mapping[str, Any]:
 
 
 def invalid_arguments_result(call_id: str, message: str = "") -> ToolResult:
-    """The error result a mis-parsed call returns, so the model can self-correct."""
+    """The error result a mis-parsed call returns, so the model can self-correct.
+
+    The caller's input was unusable -- the tool never ran -- so the declaring
+    layer is the model, not the tool.
+    """
     detail = message or "Tool arguments must be a valid JSON object; the tool was not executed."
-    return ToolResult(call_id=call_id, ok=False, content=detail, error_type="invalid_tool_arguments")
+    return ToolResult(call_id=call_id, ok=False, content=detail, error_type="invalid_tool_arguments", cause="model")
 
 
 def blocked_tool_result(call_id: str, reason: str, *, error_type: str = "guardrail_block") -> ToolResult:

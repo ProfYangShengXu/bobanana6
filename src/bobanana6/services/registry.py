@@ -159,6 +159,8 @@ class ToolRegistry:
                         ok=False,
                         content=f"unknown tool {call.name!r}; available: {list(self.names())!r}",
                         error_type="unknown_tool",
+                        # ★ the caller named a tool it does not have (AGENTS §7⑫)
+                        cause="model",
                     )
                 )
                 continue
@@ -176,6 +178,11 @@ class ToolRegistry:
                         ok=False,
                         content=f"{type(exc).__name__}: {exc}",
                         error_type=type(exc).__name__,
+                        # ★ §7⑫: read the layer off the exception when it declares
+                        #   one (``SourceError.blame = "tool"``). An unlabelled
+                        #   third-party exception declares nothing, and attribution
+                        #   falls back to its own order rather than guessing here.
+                        cause=str(getattr(exc, "blame", "") or ""),
                     )
                 )
                 continue

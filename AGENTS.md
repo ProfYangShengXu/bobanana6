@@ -28,10 +28,14 @@
 - ✅ `#16` 已收口的四条判定缺口：缺失成为一等状态 `MISSING`（A04）· 单位检查读**值里的单位**（A10）·
   归因读**自带病因**、两层互相指认则 `unknown`（A07）· 溯源经 `SnapshotReader` 端口逐点重放
   —— 引用的行要在、值要对得上（A11）。四条都有修前/修后对照读数。
+- ✅ `#17` 收掉 `#16` 暴露的两个真问题：**单位归一放在读取块**（合并块仍只搬运，
+  `untraceable_row` 不放宽；A11 改成比【量】，换过单位的同一个量算真、丢掉单位没换算算假）·
+  A07 的声明通道**补上了生产者**（工具/参数/缺输入/判定器各自在事件上标 `cause`），
+  真实 run 里三条根因拿到三个不同 blame。
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 729 passed（`#16` 修完 A11 后那条 xfail 已升级成正式断言，不再有 xfail） |
+| `pytest tests/ -q` | ✅ 737 passed（不再有 xfail） |
 | `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |

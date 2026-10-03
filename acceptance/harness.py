@@ -47,6 +47,9 @@ class TaskRun:
     plan_shape: str = ""
     blocks: tuple[str, ...] = ()
     verdicts: Mapping[str, Any] = field(default_factory=dict)
+    #: ★ What each block actually produced -- kept so a test can read the artifact
+    #: (e.g. prove a value was normalised) instead of inferring it from a verdict.
+    candidates: Mapping[str, Any] = field(default_factory=dict)
     assembly_codes: tuple[str, ...] = ()
     snapshot_refs: tuple[str, ...] = ()
     #: ★ The paths handed to the system -- so a test can prove `truth/` was not among them.
@@ -200,6 +203,7 @@ def run_task(
         plan_shape=result.plan.shape,
         blocks=result.plan.subtask_ids,
         verdicts=dict(result.verdicts),
+        candidates=dict(result.candidates),
         assembly_codes=result.assembly.codes(),
         snapshot_refs=tuple(sorted(result.snapshots)),
         inputs_given=given,

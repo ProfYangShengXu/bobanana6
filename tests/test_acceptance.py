@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from acceptance import EXIT_KINDS, AcceptanceReport, load_baseline, run_task, smoke_gate
+from bobanana6.adapters import ScriptedClient
 from bobanana6.contract import compile_bundle, parse_contract_file
 from bobanana6.core.model import ModelResponse, Recon
 from bobanana6.core.split import check_split
@@ -229,8 +230,17 @@ class _ScriptedBlocks:
     真模型那一侧见交付报告。
     """
 
-    def __init__(self, *, break_one_read: bool = False, invent_rows: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        break_one_read: bool = False,
+        invent_rows: int = 0,
+        decline_one_read: bool = False,
+    ) -> None:
         self.break_one_read = break_one_read
+        #: ★ ② 的 context 场景：上游读块拒答（它没拿到需要的信息），
+        #: 于是下游合并块的声明输入**从来没有被生产出来**。
+        self.decline_one_read = decline_one_read
         #: ★ A11 的对照开关：读块"编"出这么多行（真值只有 3 行），全部引用自己的快照。
         self.invent_rows = invent_rows
         self.calls: list[str] = []
@@ -248,6 +258,11 @@ class _ScriptedBlocks:
                 return ModelResponse(
                     tool_calls=(_tool_call(f"u{len(fetched)}", "task.upstream", {"name": pending[0]}),)
                 )
+            missing = [name for name, payload in fetched.items() if payload.get("missing") is True]
+            if missing:
+                return ModelResponse(
+                    text=json.dumps({"declined": True, "reason": f"input {missing[0]} was never produced"})
+                )
             rows = [row for payload in fetched.values() for row in payload.get("rows", []) if isinstance(row, dict)]
             # 一个称职的合并按主体去重（真值就是这么定的：A-003 与 B-002 各出现两次）
             deduped: dict[str, dict] = {}
@@ -256,12 +271,15 @@ class _ScriptedBlocks:
             merged = {"ref": "panel-a", "rows": list(deduped.values()), "columns": _columns_of(fetched)}
             return ModelResponse(text=json.dumps(merged))
 
+        if self.decline_one_read and block == "T-01":
+            return ModelResponse(text=json.dumps({"declined": True, "reason": "the source did not carry the field"}))
+
         snapshot = _snapshot_payload(messages)
         if snapshot is None:  # nothing fetched yet: read this block's own source
             ref = part[len("part-") : -len(".csv")] if part.startswith("part-") else "panel-a"
             tool = "sources.snapshot" if "sources.snapshot" in offered else offered[0]
             return ModelResponse(tool_calls=(_tool_call(f"s{len(self.calls)}", tool, {"ref": ref}),))
-        rows = snapshot.get("rows", [])
+        rows = _amounts_normalised(snapshot.get("rows", []))
         if self.break_one_read and block == "T-01":
             rows = []
         if self.invent_rows and block == "T-01":
@@ -326,14 +344,45 @@ def _snapshot_payload(messages):  # type: ignore[no-untyped-def]
 
 
 def _upstream_payloads(messages) -> dict[str, dict]:  # type: ignore[no-untyped-def]
-    """The parts the merge block has already pulled, keyed by input name."""
+    """The parts the merge block has already pulled, keyed by input name.
+
+    Every payload names itself -- including an input that was never produced
+    (``{"name": ..., "missing": true}``), so the caller can tell "not yet asked
+    for" from "asked for and absent".
+    """
     fetched: dict[str, dict] = {}
-    for index, payload in enumerate(_tool_payloads(messages)):
+    for payload in _tool_payloads(messages):
         if isinstance(payload.get("inputs"), dict):
             fetched.update({str(k): v for k, v in payload["inputs"].items() if isinstance(v, dict)})
-        elif "rows" in payload and index < len(_expected_inputs()):
-            fetched[_expected_inputs()[index]] = payload
+        elif isinstance(payload.get("name"), str) and payload["name"] in _expected_inputs():
+            fetched[payload["name"]] = payload
     return fetched
+
+
+def _amount_in_cny(value):  # type: ignore[no-untyped-def]
+    """A worker reading a source understands its unit: ``"250 千元"`` -> ``250000.0`` (元).
+
+    ★ ① 的落点：归一发生在【读取块】，不在合并块。单位来自值本身
+    （`实现规格 §5.0.1`②），换算系数来自本体声明的单位表。
+    """
+    if not isinstance(value, str):
+        return value
+    number, _, unit = value.partition(" ")
+    try:
+        amount = float(number)
+    except ValueError:
+        return value
+    return amount * 1000.0 if unit.strip() == "千元" else amount
+
+
+def _amounts_normalised(rows):  # type: ignore[no-untyped-def]
+    normalised = []
+    for row in rows:
+        row = dict(row)
+        if "amount" in row:
+            row["amount"] = _amount_in_cny(row["amount"])
+        normalised.append(row)
+    return normalised
 
 
 def _columns_of(fetched) -> list[dict]:  # type: ignore[no-untyped-def]
@@ -352,6 +401,110 @@ def test_the_scripted_multi_block_run_reaches_assembly() -> None:
     assert run.report.assembly_passed is True, run.assembly_codes
     assert run.plan_shape == "pipeline" and len(run.blocks) == 4
     assert run.report.coverage["deliver"] == "hit"
+
+
+# --------------------------------------------------------------------------- #
+# ★ ② A07 的声明通道：真实 run 里由【产生失败的那一层】自己声明
+# --------------------------------------------------------------------------- #
+
+
+def test_a_real_run_attributes_a_missing_input_to_context() -> None:
+    """★ ②：读块拒答 → 合并块的声明输入从来没被生产出来 → 声明的是 context。
+
+    走的全是真代码：`task.upstream` 的载荷说 `missing`，`produce.execute` 落事件，
+    runner 的 `_attribute` 读事件流。测试一行 `cause` 都没写。
+    """
+    run = run_task(
+        ACCEPTANCE / "main" / "panel-three-sources",
+        client=_ScriptedBlocks(decline_one_read=True),
+        env={},
+        expected_blame="context",
+    )
+    assert run.report.attribution_accuracy == 1.0, run.report.notes
+    assert any("got 'context'" in note for note in run.report.notes), run.report.notes
+    # ★ 而且要【问得出是哪一个输入缺席】才停得下来：载荷不报名字的话，调用方只会
+    #   一遍遍再要同一个输入，最后死在预算上（那是另一种失败，不是 context）。
+    assert run.verdicts["T-04"].evidence.get("exit") == "declined", run.verdicts["T-04"].evidence
+
+
+def test_a_real_run_attributes_a_rejected_block_to_the_constraint() -> None:
+    """★ ②：候选被具名约束拒了 → 判定器自己声明 → 归因到 constraint。"""
+    shallow = ScriptedClient(
+        [
+            {"tool_calls": (_tool_call("c1", "sources.snapshot", {"ref": "src-1"}),)},
+            {"text": json.dumps({"ref": "src-1", "rows": []})},
+        ]
+    )
+    run = run_task(ACCEPTANCE / "smoke" / "smoke-panel-one-source", client=shallow, env={}, expected_blame="constraint")
+    assert run.report.attribution_accuracy == 1.0, run.report.notes
+    assert any("got" in note and "constraint" in note for note in run.report.notes), run.report.notes
+
+
+def test_a_real_run_attributes_an_unknown_tool_to_the_model() -> None:
+    """★ ②：模型叫了一个不存在的工具 → 是调用方的错，声明的是 model（不是 tool）。"""
+    shallow = ScriptedClient([{"tool_calls": (_tool_call("c1", "semantics.nope", {}),)}])
+    run = run_task(ACCEPTANCE / "smoke" / "smoke-panel-one-source", client=shallow, env={}, expected_blame="model")
+    assert run.report.attribution_accuracy == 1.0, run.report.notes
+    assert any("got 'model'" in note for note in run.report.notes), run.report.notes
+
+
+def test_a_unit_heterogeneous_source_is_normalised_at_read_time() -> None:
+    """★★ ①：单位异构的端到端 —— 归一在【读取块】，合并块仍然只搬运。
+
+    panel-c 的值自带单位（`实现规格 §5.0.1`②），读取块归一到元；合并块照抄收到的
+    行，于是**既不被 `untraceable_row` 拒收**（它确实只是搬运），
+    **又不违反 A11**（引用仍指向自己读到的快照行，换算系数来自本体声明的单位表）。
+    """
+    task_dir = ACCEPTANCE / "main" / "panel-three-sources"
+    run = run_task(task_dir, client=_ScriptedBlocks(), env={})
+    assert run.report.block_pass_rate == 1.0, (run.report.render(), {k: (v.failed, dict(v.evidence)) for k, v in run.verdicts.items()})
+    assert run.report.assembly_passed is True, run.assembly_codes
+
+    panel = run.candidates["T-04"].artifact("panel.csv")
+    amounts = {row["obligor"]: row["amount"] for row in panel.rows}
+    # ★ 合并产物是【元】：3000 千元 -> 3_000_000 元
+    assert amounts["C-002"] == 3_000_000.0, amounts
+    assert amounts["B-002"] == 250_000.0, amounts
+    # 三个读块自己的溯源引用仍然立得住（换算不是把引用改掉，而是把量换算过去）
+    assert run.verdicts["T-04"].evidence["C-prov"].startswith("coverage 1.0000")
+    assert run.truth is not None and run.truth.matched is True, run.truth.render()
+
+
+def test_a_merge_that_transforms_is_still_refused() -> None:
+    """★ ① 的边界：不许为了让单位题过而放宽 `untraceable_row`。
+
+    合并块【自己】改值（不是搬运）仍然当场拒收 —— 归一该发生在读取块。
+    """
+    from bobanana6.assemble_impl.produce import CandidateFormatError, parse_candidate
+    from bobanana6.core.model import Subtask
+
+    merge = Subtask(
+        id="T-04",
+        goal="merge the parts",
+        inputs=("part-panel-c.csv",),
+        output="panel.csv",
+        contract_ref="panel",
+        axis="field",
+        mode="write",
+    )
+    parts = {
+        "part-panel-c.csv": {
+            "rows": [{"obligor": "C-001", "amount": 90_000.0}],
+            "provenance": [
+                {"value_ref": "part-panel-c.csv:row=0", "snapshot_ref": "panel-c", "source_row": 0, "locator": "L"}
+            ],
+        }
+    }
+    # 合并块把 90_000 又乘了一次 —— 它改了自己收到的东西
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate(
+            '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000000.0}]}',
+            subtask=merge,
+            source_id="T-04",
+            authorized_sources=("panel-c",),
+            parts=parts,
+        )
+    assert error.value.feedback()["code"] == "untraceable_row", error.value.feedback()
 
 
 def test_a_fabricated_answer_is_only_caught_once_the_chain_reads_the_snapshot(monkeypatch) -> None:

@@ -28,11 +28,14 @@ PANEL_B = (
     ("B-001", 0.019, 1_500_000.0),
     ("B-002", 0.033, 250_000.0),
 )
-#: ★ C 的金额单位是【千元】，且不标注 —— 单位攻击（§14.2 A10）。
+#: ★ C 的金额单位是【千元】，而且**值里自带单位**（单位攻击 §14.2 A10）：
+#: `实现规格.md §5.0.1` 判据② —— 单位绑进值里（Kubernetes `Quantity` 形态），
+#: 于是「值 250、单位忘了声明」不可能发生；读取块归一到元（判据①：单位声明在
+#: 字段自己的定义处，读的时候正是那个地方）。
 PANEL_C = (
-    ("B-002", 0.033, 250.0),  # 250 千元 = 250_000 元，与 B 一致
-    ("C-001", 0.058, 90.0),  # 90 千元 = 90_000 元
-    ("C-002", 0.002, 3_000.0),  # 3_000 千元 = 3_000_000 元
+    ("B-002", 0.033, "250 千元"),  # 250 千元 = 250_000 元，与 B 一致
+    ("C-001", 0.058, "90 千元"),  # 90 千元 = 90_000 元
+    ("C-002", 0.002, "3000 千元"),  # 3_000 千元 = 3_000_000 元
 )
 
 #: ★ 真值：去重后的合并面板（金额统一到【元】）。生成器持有，系统看不到。
@@ -47,7 +50,7 @@ TRUTH_ROWS = (
 )
 
 
-def _write_csv(path: Path, rows: tuple[tuple[str, float, float], ...]) -> None:
+def _write_csv(path: Path, rows: tuple[tuple[str, float, float | str], ...]) -> None:
     lines = ["obligor,pd,amount"]
     lines.extend(f"{name},{pd},{amount}" for name, pd, amount in rows)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -72,7 +75,7 @@ def generate(*, root: Path | None = None) -> dict[str, Path]:
                 "rows": list(TRUTH_ROWS),
                 "injected": {
                     "A01-mesh-dependency": "A-003 同时出现在 panel-a 与 panel-b",
-                    "A10-units": "panel-c 的 amount 是千元且未标注",
+                    "A10-units": "panel-c 的 amount 是千元，值里自带单位（读取块负责归一到元）",
                 },
                 "expected_obligors": sorted(row["obligor"] for row in TRUTH_ROWS),
             },

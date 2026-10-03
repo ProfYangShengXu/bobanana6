@@ -135,6 +135,81 @@ A08 期望的「装配拒绝」不在 `EXIT_KINDS` 里（它是装配口径，�
 ★ `#16` 的补充：四条修的都是**判定**，不新增出口 —— 上面「没走到的六条」在 `#16` 之后
 仍然没被走到（`#16` 的离线端到端对照走的是 `deliver` + 块级 `C-prov` 拒收）。
 
+## ★★★ #17 收掉 #16 暴露的两个真问题
+
+### ① 合并块的「引用 + 变换」表达不了 → 改成【读取时归一】
+
+**问题**：合并块若把值 ×1000（千元→元），输出行就不再精确匹配它收到的行 →
+被 `untraceable_row` 拒收 —— **正确的答案被判死**。
+
+**判断（三条依据，都是项目自己的）**：
+```
+· 合并块的语义就是【搬运】（代码注释自己写着 "a merge may only carry values it received"）
+· 读取块的语义是【读取 + 理解】—— 它读某个源的时候就知道那个源用什么单位
+· `实现规格 §5.0.1` 判据①：单位必须声明在【字段自己的定义处】；读取时正是那个地方
+```
+→ **归一放在读取块**；合并块不改，`untraceable_row` 不放宽。
+
+**修前 / 修后（同一道题、同一个脚本化客户端，离线确定性）**：
+
+| 读数 | 结果 |
+|---|---|
+| 修前 | `block_pass_rate=0.75 assembly=False`；T-04 `rejected_by=C-prov`：`coverage 1.0000 reaches 0.95, but the citations do not replay; row=4 col=amount value 250000.0 does not match snapshot 'panel-c' row 0: '250 千元'` |
+| 修后 | `block_pass_rate=1.0 assembly=True`；面板金额全是元（`C-002=3000000.0`、`B-002=250000.0`），`C-prov coverage 1.0000 >= required 0.95` |
+
+**做法**：
+```
+· 载体把单位写在值里（`250 千元`）—— §5.0.1② 的 Kubernetes `Quantity` 形态
+· 本体把换算声明出来（`amount_千元: {concept_id: amount, symbol: 千元, scale: 1000, base: CNY}`）
+· 读取块归一（脚本化客户端 =「读取 + 理解」那一步）
+· A11 的引用校验改成【比量】：值里带单位就换算到基准单位再比
+  → 换过单位的同一个量算「引用为真」；**把单位丢掉没换算（3000 而不是 3000000）仍然算假**
+```
+
+**边界（不许放宽）**：合并块自己改值仍然拒收 —— 见
+`tests/test_acceptance.py::test_a_merge_that_transforms_is_still_refused`。
+
+**★ 残留**：源里既不带单位、也没有别处声明 → 仍然无从归一（A10 攻击面最难的那一半）。
+值里带单位这条走通了，没标的还是判不了，如实留着。
+
+### ② A07 的声明通道：补上生产者
+
+**问题**：`_trace_declarations` 读 `detail["cause"]` / `deterministic` / `constraint_rejected`，
+**全仓没有任何地方写它们** → 真实 run 里 `declared` 为空 → 假归因照旧。
+
+**做法（§7⑫ 的手法从【错误】推广到【失败事件】）**：
+
+| 层 | 谁声明 | 怎么声明 |
+|---|---|---|
+| tool | 工具自己 | `SourceError.blame = "tool"`（与它的 `reason="switch_source"` 同层）；registry 抛出时读它写进 `ToolResult.cause` |
+| model | 调用方 | 不存在的工具名 / 不可用的参数 → `ToolResult.cause="model"`（工具没跑，是调用方给的） |
+| context | 委派层 | `task.upstream` 的载荷说 `missing` → `produce.execute` 在事件上标 `cause="context"` |
+| constraint | 判定器 | 被具名约束拒了 → runner 的 `gate_check` 标 `constraint_rejected=True` |
+
+**真实 run 的对照读数**（测试一行 `cause` 都没写，全是生产者发的）：
+
+| 场景 | 修前归因 | 修后归因 |
+|---|---|---|
+| 读块拒答 → 合并块的声明输入从没被生产出来 | `None`（没声明可读） | **`context`**（`attribution_accuracy=1.0`） |
+| 候选被 `C-rows/C-prov` 拒 | `None` | **`constraint`** |
+| 模型叫了不存在的工具 | `tool`（旧启发式，动作还是 `repair_tool`） | **`model`**（动作 `switch_worker`） |
+| 载体读坏（handler 抛 `SourceError`） | `tool`（靠启发式） | `tool`（**声明的**，走真 registry + 真 `LoopIOImpl.execute`） |
+
+**★ 判断（「模型自身问题该由谁标？」）**：
+```
+· 结构性的模型错误（叫了不存在的工具、参数不是 JSON）→ 由【调用/工具层】标：
+  那两件事是工具表与参数解析当场就能判定的，不需要分离实验。
+· 语义性的模型错误（上下文够但模型答错）→ 只能由【分离实验】标
+  （`Experiment.HUMAN_CAN_ANSWER/DIFFERS`）—— 在进程内无法与「上下文不够」区分，
+  归因层不许硬猜。本块没有为此新增任何启发式。
+```
+
+**★ 真实 run 里到不了的第四格**：工具坏（载体读不回来）在**完整 run** 里到不了块级工具路径 ——
+`#16` 把快照内容读在**块开始之前**（`Runner._snapshot_bodies`，读不回来就整个 run 失败，
+这是有意的：判定器不许退化成只查名字）。所以那条声明由
+`tests/test_agentloop_attribution.py::test_a_broken_carrier_declares_the_tool_layer_on_the_real_event_stream`
+用**真 registry + 真 `LoopIOImpl.execute`** 验证（事件是生产者写的，不是测试手写的 `cause`）。
+
 ## ★ 反向验证（`tools/reverse_validation.py`）
 
 全绿树上 **197 变体 / 197 被抓住 / 0 漏网**，每条变体一个见证测试，跑完原样还原。

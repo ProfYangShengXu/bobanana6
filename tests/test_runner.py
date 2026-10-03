@@ -303,18 +303,25 @@ def test_a_declined_block_is_reported_as_declined_not_failed(tmp_path: Path) -> 
     assert result.verdicts["T-01"].evidence == {"exit": "declined"}
 
 
-def test_a_broken_tool_reaches_the_attribution_as_a_tool_blame(tmp_path: Path) -> None:
+def test_an_unknown_tool_is_the_callers_error_not_a_broken_tool(tmp_path: Path) -> None:
+    """★ ②：`semantics.nope` 不是「工具坏了」——工具表就在模型的上下文里，它挑了个不存在的。
+
+    这一条原来断言 `tool`/`repair_tool`：那是旧启发式「有工具失败就归 tool」的产物，
+    而 `repair_tool` 对一个根本不存在的工具毫无意义。声明的层是**模型**，
+    动作表也跟着换了（`switch_worker`）。
+    """
     source = _csv(tmp_path, "panel.csv", "obligor,pd,amount\nA-1,0.01,100\n")
     client = ScriptedClient([{"tool_calls": (_tool_call("semantics.nope", {}, "c1"),)}])
     result = _runner(tmp_path, ONE_SOURCE.replace("SOURCE_CSV", str(source)), client).run()
 
     assert result.ok is False
     assert result.attribution is not None
-    assert result.attribution.blame == "tool"
-    assert "repair_tool" in result.attribution_actions
+    assert result.attribution.blame == "model"
+    assert "switch_worker" in result.attribution_actions
+    assert "repair_tool" not in result.attribution_actions
     summary = json.loads((tmp_path / "reports" / "summary.json").read_text(encoding="utf-8"))
-    assert summary["attribution"]["blame"] == "tool"
-    assert "repair_tool" in summary["attribution"]["actions"]
+    assert summary["attribution"]["blame"] == "model"
+    assert "switch_worker" in summary["attribution"]["actions"]
 
 
 def test_a_malformed_answer_fails_the_block_without_building_a_candidate(tmp_path: Path) -> None:

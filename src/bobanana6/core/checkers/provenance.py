@@ -12,7 +12,8 @@ snapshot) passes the name check with coverage 1.0.
 
 from __future__ import annotations
 
-from ..model import Artifact, Candidate, Constraint, SnapshotBody, is_missing
+from ..model import Artifact, Candidate, Constraint, Ontology, SnapshotBody, is_missing
+from ..ontology import base_unit, convert_value, map_field, split_quantity
 from ..provenance import row_of, same_value, validate_points
 from .base import CheckContext, CheckOutcome, artifact_for, fail, ok
 
@@ -27,10 +28,49 @@ def required_refs(artifact: Artifact) -> tuple[str, ...]:
     return tuple(refs)
 
 
+def same_quantity(left: object, right: object, concept: str, ontology: Ontology | None) -> bool:
+    """Whether two values are the same *quantity*, allowing a declared conversion.
+
+    ★ ①: a worker that understood its source may hand back the same quantity in
+    the field's own unit (``"250 千元"`` read, ``250000.0`` 元 answered). The
+    conversion is not a guess -- the factor and the base come from the ontology's
+    declared ``Unit`` table (``实现规格 §5.0.1`` 判据②③), and a value that is not
+    the same quantity is still a mismatch: dropping the unit without converting
+    (250 instead of 250000) stays caught.
+    """
+    if same_value(left, right):
+        return True
+    if ontology is None:
+        return False
+    target = base_unit(concept, ontology)
+    if target is None:
+        return False
+    left_quantity = split_quantity(left) if isinstance(left, str) else None
+    right_quantity = split_quantity(right) if isinstance(right, str) else None
+
+    def in_base(value: object, quantity: tuple[float, str] | None) -> float | None:
+        if quantity is not None:
+            number, symbol = quantity
+        else:
+            try:
+                number, symbol = float(str(value)), target.symbol
+            except (TypeError, ValueError):
+                return None
+        try:
+            return convert_value(number, symbol, target.symbol, ontology)
+        except (KeyError, ValueError):
+            return None
+
+    left_base = in_base(left, left_quantity)
+    right_base = in_base(right, right_quantity)
+    return left_base is not None and left_base == right_base
+
+
 def value_mismatches(
     artifact: Artifact,
     candidate: Candidate,
     bodies: dict[str, SnapshotBody] | None = None,
+    ontology: Ontology | None = None,
 ) -> tuple[str, ...]:
     """Values that do not match the row they claim to come from."""
     facts: list[str] = []
@@ -48,7 +88,7 @@ def value_mismatches(
             value = row[column]
             if is_missing(value):
                 continue
-            if not same_value(value, snapshot_row[column]):
+            if not same_quantity(value, snapshot_row[column], map_field(column, ontology) if ontology else column, ontology):
                 facts.append(
                     f"row={index} col={column} value {value!r} does not match snapshot "
                     f"{provenance.snapshot_ref!r} row {source_row}: {snapshot_row[column]!r}"
@@ -73,7 +113,7 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
     coverage = report.coverage
 
     content = tuple(break_.detail for break_ in report.breaks if break_.detail)
-    mismatches = value_mismatches(artifact, candidate, bodies)
+    mismatches = value_mismatches(artifact, candidate, bodies, context.ontology)
 
     if coverage < minimum or content or mismatches:
         detail = f"coverage {coverage:.4f} < required {minimum}"

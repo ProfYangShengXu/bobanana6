@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from bobanana6.agentloop.attribution import (
@@ -14,7 +17,7 @@ from bobanana6.agentloop.attribution import (
     attribute,
 )
 from bobanana6.agentloop.errors import ClassifiedError
-from bobanana6.agentloop.events import Event
+from bobanana6.agentloop.events import Event, EventLog
 
 
 def event(kind: str = "call", *, ok: bool = True, detail: dict | None = None, seq: int = 1) -> Event:
@@ -137,3 +140,68 @@ def test_blame_to_action_mapping_matches_the_spec_table() -> None:
 
 def test_actions_for_an_unknown_blame_is_empty() -> None:
     assert actions_for("vibes") == ()
+
+
+# --------------------------------------------------------------------------- #
+# ★ ②: the declarations have real producers (not hand-written in tests)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_broken_carrier_declares_the_tool_layer_on_the_real_event_stream() -> None:
+    """工具坏 → 工具层自己在 ToolResult 上标 `cause="tool"`，事件流带着它。
+
+    这里走的是真代码：真的 registry 抓到 handler 抛出的异常、真的
+    `LoopIOImpl.execute` 落事件 —— 没有一行是测试手写的 `cause`。
+    """
+    from dataclasses import replace
+
+    from fakes import toolset_for
+
+    from bobanana6.agentloop.tools import ToolCall
+    from bobanana6.assemble_impl.produce import LoopIOImpl
+    from bobanana6.core.model import Budget, Snapshot, Subtask
+    from bobanana6.services.registry import build_registry
+    from bobanana6.sources import SourceError
+
+    class _OneSource:
+        def refs(self) -> tuple[str, ...]:
+            return ("snap-1",)
+
+        def snapshot(self, ref: str) -> Snapshot:
+            return Snapshot(ref="snap-1", body_path=Path("gone.csv"), captured_at="T0")
+
+    def broken_carrier(_snapshot: Snapshot) -> bytes:
+        raise SourceError("the frozen carrier is gone")
+
+    toolset = replace(toolset_for(subtask_id="T-01", sources=True), sources=_OneSource())
+    log = EventLog()
+    io = LoopIOImpl(
+        client=None,
+        toolset=toolset,
+        registry=build_registry(toolset, broken_carrier),
+        judge=None,
+        subtask=Subtask(id="T-01", goal="read", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="read"),
+        budget=Budget(max_calls=4, max_wall_s=10, max_output=128),
+        log=log,
+        task_id="t",
+    )
+    # ★ `raw_arguments` is what the parser reads (the registry always fills it from
+    #   the model's JSON); a bare `arguments` mapping is refused as bad JSON.
+    call = ToolCall(
+        call_id="c1", name="sources.snapshot", arguments={"ref": "snap-1"}, raw_arguments=json.dumps({"ref": "snap-1"})
+    )
+    results = io.execute((call,))
+
+    assert results[0].ok is False
+    assert results[0].cause == "tool", results[0]
+    assert log.events[0].detail["cause"] == "tool"
+    blamed = attribute("no deliverable", log.events)
+    assert blamed.blame == "tool"
+    assert [item.kind for item in blamed.evidence] == ["tool_result"]
+
+
+def test_unusable_arguments_declare_the_model_not_the_tool() -> None:
+    """★ §7⑫：参数是【调用方】给的 —— 工具没跑，声明的是模型层。"""
+    from bobanana6.agentloop.tools import invalid_arguments_result
+
+    assert invalid_arguments_result("c1", "not json").cause == "model"

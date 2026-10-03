@@ -678,21 +678,49 @@ class LoopIOImpl(LoopIO):
             #   exactly the pollution tool_metrics splits out.
             recovered = result.ok and name in self.failed_tools
             if self.log is not None:
+                # ★ §7⑫: the event carries the layer that owns the failure, so
+                #   attribution reads a declaration instead of guessing from
+                #   "some tool returned ok=False".
+                detail: dict[str, Any] = {
+                    "args_ok": result.error_type != "invalid_tool_arguments",
+                    "recovered": recovered,
+                    "tool": name,
+                }
+                cause = self._declared_cause(name, result, calls)
+                if cause:
+                    detail["cause"] = cause
                 self.log.record(
                     kind="tool_result",
                     task_id=self.task_id or self.subtask.id,
                     worker_id=self.subtask.id,
                     at=now,
                     ok=result.ok,
-                    detail={
-                        "args_ok": result.error_type != "invalid_tool_arguments",
-                        "recovered": recovered,
-                        "tool": name,
-                    },
+                    detail=detail,
                 )
             if name and not result.ok:
                 self.failed_tools.add(name)
         return results
+
+    def _declared_cause(self, name: str, result: Any, calls: Sequence[Any]) -> str:
+        """Which layer owns this tool outcome, as declared (``AGENTS.md §7⑫``).
+
+        The tool result may carry its own declaration (a broken carrier says
+        ``tool``, unusable arguments say ``model``). One case has no result-level
+        owner: ``task.upstream`` succeeded but its declared input has no payload --
+        the delegation layer promised the block something it never produced, which
+        is a *context* failure, and the toolset is where that fact is known.
+        """
+        declared = str(getattr(result, "cause", "") or "")
+        if declared or name != "task.upstream":
+            return declared
+        # ★ This call *succeeded* -- the payload is what says the input is absent,
+        #   so `result.ok` is not the test here.
+        arguments = next((call.arguments for call in calls if call.call_id == result.call_id), {})
+        requested = str(arguments.get("name", "")) if isinstance(arguments, Mapping) else ""
+        if not requested or requested not in self.subtask.inputs:
+            return ""
+        payload = self.toolset.task.upstream(requested)
+        return "context" if isinstance(payload, Mapping) and payload.get("missing") is True else ""
 
     def verify(self, candidate: Candidate) -> GateVerdict:
         return self.judge.verify(candidate)

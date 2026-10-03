@@ -10,6 +10,9 @@ concepts:
 units:
   pd: {symbol: ratio, scale: 1.0, base: ratio}
   amount: {symbol: CNY, scale: 1.0, base: CNY}
+  # ★ 千元是【声明过的】单位，不是靠"千=1000"的世界知识：
+  #   换算系数与基准都写在单位表里（`实现规格.md §5.0.1` 判据③ 受控白名单）。
+  amount_千元: {concept_id: amount, symbol: 千元, scale: 1000.0, base: CNY}
 
 definitions:
   pd:
