@@ -429,3 +429,30 @@ def test_a_merge_row_inherits_the_citation_of_the_row_it_was_handed() -> None:
             parts=parts,
         )
     assert error.value.feedback()["code"] == "untraceable_row", error.value.feedback()
+
+
+def test_the_executor_can_be_pointed_at_the_pressure_task() -> None:
+    """★ §15.3：注入集该打在【压力集】上 —— 同一个执行器，换一道题，读数跟着变。
+
+    只有真的读题的那几行会变；夹具注入器在两题上读数一样，那是事实而不是省略。
+    """
+    from acceptance.inject.injections import injectors_for
+
+    table_ids = {attack.id for attack in load_attacks()}
+    assert set(injectors_for("stress")) == table_ids  # 换题不掉行
+
+    stress = {o.attack.id: o for o in run_attacks(target="stress", only=["A01-mesh-dependency", "A03-real-conflict"])}
+    a01 = stress["A01-mesh-dependency"]
+    evidence = " ".join(a01.evidence)
+    assert a01.found == HIT and a01.action_step == HIT
+    # 压力题的规模真的进了读数：25 块 / 合并块声明 24 个输入（主验题是 4 块 / 3 个）
+    assert "25 block(s)" in evidence and "declares 24 input(s)" in evidence
+    # ★ 压力题里真的有冲突（题面自己声明的），但跑的那条路把两个块放在一起了吗
+    a03 = stress["A03-real-conflict"]
+    assert a03.found == MISS and a03.action_step == MISS
+    assert "declares a real conflict" in " ".join(a03.evidence)
+
+    # 夹具注入器不读题 → 两题上读数相同（这条【相同】本身也是读数）
+    main_fixture = next(o for o in run_attacks(only=["A05-transient"]))
+    stress_fixture = next(o for o in run_attacks(target="stress", only=["A05-transient"]))
+    assert (main_fixture.found, main_fixture.action_step) == (stress_fixture.found, stress_fixture.action_step)

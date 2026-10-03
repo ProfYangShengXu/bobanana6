@@ -334,3 +334,55 @@ A11 的五条 + 离线端到端对照）都各有一条见证变体 —— 没�
   （2026-10-03 实测发生过一次）。所以开跑之前有 `preflight()`：任何一个锚点不在、或不止一处，
   就**拒绝开跑**并打印是哪个文件，而不是在脏树上继续量。
 
+
+---
+
+## ★ 打在【压力任务 A】上（`架构设计.md §15.3`：注入集该打压力集 + 已知缺陷）
+
+执行器现在有两个底座（`run_attacks(target=...)`）：
+
+```python
+run_attacks()                     # 主验题 main/panel-three-sources（原来的底座）
+run_attacks(target="stress")      # ★ 压力任务 A：acceptance/stress/
+```
+
+**只有真的【读题】的 5 条有压力题变体**（`acceptance/inject/injections.py` 末尾）：
+`A01 / A03 / A06 / A08 / A09`。其余 6 条是**构造夹具**（自己造候选/快照/事件），
+换底座读数**必然相同** —— 这是事实，不是省略。
+
+### 三层读数（压力题），括号里是主验题旧读数
+
+| 攻击 | ① 发现 | ② 归因 | ③ 出口 | 在压力题上的证据（摘） |
+|---|---|---|---|---|
+| A01 跨块依赖 | hit（hit） | n/a | hit（hit） | 25 块 = 24 读 + 1 合并；合并声明 **24** 个输入、接口逐条对得上；★ 只有 23 个源真有输入文件（s24 是题面故意下线的），**静态计划不摘它** |
+| A02 多义 | hit（hit） | n/a | miss（miss） | 夹具（不读题）—— 口径不一致仍在 compare 期才发现 |
+| A03 真冲突 | **miss**（hit） | n/a | **miss**（hit） | ★ 题里真的声明了冲突（`s02` vs `s20` 的 `ENT-03\|2022`）；交给内核会记 `Conflict x1`，但**装配关只拿 pieces（Artifact）**，两个块的候选永远不会被放在一起 |
+| A04 缺 ≠ 0 | hit（hit） | n/a | hit（hit） | 夹具（不读题） |
+| A05 瞬时 | hit（hit） | n/a | hit（hit） | 夹具（不读题） |
+| A06 持久 | hit（hit） | n/a | hit（hit） | s24 没输入文件 → `refused=None` + `sources unavailable: s24 (1 of 24)`；23 个输入全删 → `refused='sources'` |
+| A07 同症异层 | hit（hit） | hit（hit） | n/a | 夹具（不读题）；★ 压力题上的**真素材**：支配性失败是"答案不可用"→ `blame=None`（#65） |
+| A08 全局不变量 | **miss**（miss） | n/a | **miss**（miss） | 25 个 piece、面板值与部件不一致，`target="*"` 仍只报 `artifact for target '*' not found` → **缺口与块数无关** |
+| A09 不可能块 | **miss**（hit） | n/a | **miss**（hit） | ★ 下线的源**在切分前就被摘掉**（run 计划 24 块、没有 s24 的块）→ `decline` 这条出口在压力题上**不可达** |
+| A10 单位 | hit（hit） | n/a | hit（hit） | 夹具（不读题） |
+| A11 溯源真实性 | hit（hit） | n/a | n/a | 夹具（不读题） |
+
+汇总：压力题 `found 8hit/3miss · blame 1hit/10n/a · action 5hit/4miss/2n/a`；
+主验题 `found 10hit/1miss · blame 1hit/10n/a · action 7hit/2miss/2n/a`。
+**三层读数变了的只有 A03 与 A09**；A01/A06/A08 三层相同但**证据的规模变了**（3→24 输入 / 1-of-3→1-of-24 / 3→25 个 piece）。
+
+### 九条攻击面里，注入集走到了哪几条
+
+| 形态 | 走到了吗 | 读数 |
+|---|---|---|
+| 真冲突 | ★ 走到了（A03 压力变体） | ①miss ③miss —— 题里有、内核能记、跑的路不比较两个块（#63 的原形） |
+| 同症异层 | 夹具层走到了（A07 ②hit）；真跑层没走到 | 真跑的支配性失败拿不到 blame（#65） |
+| 全局不变量 | 走到了（A08 压力变体） | ①miss ③miss —— `*` 从未真的看过合并结果 |
+| 不可能块 | **没走到**（A09 压力变体） | ①miss ③miss —— 没有"不可能的块"，`decline` 不可达 |
+
+### 出口覆盖（§4.2⑤）
+
+**离线确定性跑**（主验题、压力题各一次）：`EXIT_KINDS` 九条**一条都没走到**（`hit=[]`）——
+两次都是"块级全灭"的退化态。注入集的"出口"是**注入器自己的动作词**
+（`declare_cross_block_dependency` / `retry_local` …），与那九条验收出口是**两套词表**。
+真模型侧的出口读数沿用同一窗口的 `#20`（4 轮：装配 4/4 失败、归因 4/4 constraint）与
+`#22`（18 跑：`fix_constraint` / `degrade_single_agent`）：`deliver` 与 `decline` 都没走到。

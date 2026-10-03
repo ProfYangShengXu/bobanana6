@@ -160,11 +160,18 @@ def run_attacks(
     only: Sequence[str] | None = None,
     path: str | Path | None = None,
     injectors: Mapping[str, Callable[[], Observation]] | None = None,
+    target: str = "main",
 ) -> tuple[AttackOutcome, ...]:
-    """Run the enabled rows (optionally a subset), reporting each row on its own."""
-    from .injections import INJECTORS
+    """Run the enabled rows (optionally a subset), reporting each row on its own.
 
-    table = INJECTORS if injectors is None else injectors
+    ``target`` picks the base the rows are measured on: ``main`` = the panel task
+    (what this executor used to only do), ``stress`` = pressure task A. Only the
+    rows that actually read a task differ; a fixture-only injector measures the
+    same thing on both, and that identity is itself a reading.
+    """
+    from .injections import injectors_for
+
+    table = injectors_for(target) if injectors is None else injectors
     outcomes: list[AttackOutcome] = []
     for attack in load_attacks(path):
         if only is not None and attack.id not in only:

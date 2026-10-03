@@ -1,5 +1,5 @@
 {
-  "smoke-panel-one-source": {"min_pass_count": 5, "baseline_run": "offline-5x-deterministic"},
-  "smoke-panel-two-deliverables": {"min_pass_count": 5, "baseline_run": "offline-5x-deterministic"},
-  "smoke-panel-tighter-bound": {"min_pass_count": 5, "baseline_run": "offline-5x-deterministic"}
+  "smoke-panel-one-source": {"min_pass_count": 2, "baseline_run": "real-qwen3.5-4b-5x-20261004"},
+  "smoke-panel-two-deliverables": {"min_pass_count": 4, "baseline_run": "real-qwen3.5-4b-5x-20261004"},
+  "smoke-panel-tighter-bound": {"min_pass_count": 4, "baseline_run": "real-qwen3.5-4b-5x-20261004"}
 }

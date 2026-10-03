@@ -1904,6 +1904,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_arch_guard.py::test_mid_layer_dependency_guard_detects_a_violation",
         "the dependency scanner can no longer resolve a relative import",
     ),
+    # -- the executor pointed at the pressure task (this block's only new reading) -- #
+    Mutation(
+        "P01-pressure-readings-ignored",
+        "acceptance/inject/injections.py",
+        "    if target == \"stress\":\n        return {**INJECTORS, **PRESSURE_READINGS}",
+        "    if target == \"stress\":\n        return INJECTORS  # mutation: the pressure readings are never used",
+        "tests/test_attacks.py::test_the_executor_can_be_pointed_at_the_pressure_task",
+        "the executor claims to measure the pressure task but runs the main-task fixtures",
+    ),
 )
 
 

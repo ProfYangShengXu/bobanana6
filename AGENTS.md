@@ -99,6 +99,27 @@
 - ✅ `#16` 已收口的四条判定缺口：缺失成为一等状态 `MISSING`（A04）· 单位检查读**值里的单位**（A10）·
   归因读**自带病因**、两层互相指认则 `unknown`（A07）· 溯源经 `SnapshotReader` 端口逐点重放
   —— 引用的行要在、值要对得上（A11）。四条都有修前/修后对照读数。
+- ✅ `#23` 注入集挂到压力题 A 上 + 冒烟真模型基线（数据 `.bobanana6/b23/报告.md`）。
+  · 执行器有了第二个底座 `run_attacks(target="stress")`（压力任务 A）；11 条逐条重跑、
+    三层分开报。**真正读题的只有 5 条**（A01/A03/A06/A08/A09），其余 6 条是构造夹具
+    → 换底座读数必然相同（这是事实，不是省略）。
+  · ★ 三层读数**变了的只有 2 条**：**A03 真冲突**（hit/hit → miss/miss —— 压力题里真的
+    声明了 `s02` vs `s20` 的 `ENT-03|2022`，交给内核会记 `Conflict x1`，但装配关只拿
+    `pieces: Artifact`，两个块的候选永远不会被放在一起，`#63` 的原形）、
+    **A09 不可能块**（hit/hit → miss/miss —— 下线的源在**切分前**就被摘掉，`decline`
+    这条出口在压力题上不可达）。A01/A06/A08 三层相同但**证据的规模变了**
+    （3→24 输入 / 1-of-3→1-of-24 源 / 3→25 个 piece）。A02（时序）与 A08（`target="*"`
+    看不见多块装配）仍然红，如实报、未粉饰。
+  · 四条「只有压力题能走到」的形态：真冲突**走到了**；同症异层只在夹具层走到（真跑的
+    支配性失败 `blame=None`，`#65`）；全局不变量走到了（仍 miss）；不可能块**没走到**。
+  · 九条验收出口：离线确定性跑在主验题与压力题上**一条都没走到**；真模型侧沿用
+    `#20`/`#22` 同窗读数（`deliver` 与 `decline` 都没走到）。
+  · 冒烟换成**真模型基线**（3 题 × 5 次同窗，批次 `real-qwen3.5-4b-5x-20261004`）：
+    通过数 `one-source` **2/5** · `tighter-bound` **4/5** · `two-deliverables` **4/5**；
+    `baseline.json` 按【下界】填 **2 / 4 / 4**（离线档 5/5 是退化分布）。失败两形态：
+    端点超时（~210s 那几跑）+ 判定器抓住错值（`C-prov` 值对不上）—— 后者是机制在正常拦。
+  · 读数：ruff 绿 · **755 passed** · arch_guard 37 · smoke 2 · 见证变体 **222/222/0** ·
+    42 个哈希种子 0 失败。
 - ✅ `#22` **采访小模型**：把「合并块 4/4 失败」钉到 (a)/(b)/(c)/(d)（设计见
   `小模型采访设计-找壳的调优点-20261004.md`，数据 `.bobanana6/b22/报告.md`）。
   E 类反证（18 跑 = 6 变体 × 3 轮，**同窗交替**，只改喂给 T-24 的上下文，壳不动）：
@@ -146,7 +167,7 @@
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 754 passed（不再有 xfail） |
+| `pytest tests/ -q` | ✅ 755 passed（不再有 xfail） |
 | `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |

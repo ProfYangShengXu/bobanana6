@@ -530,3 +530,228 @@ INJECTORS: Mapping[str, Any] = {
     "A10-units": a10_units,
     "A11-provenance-content": a11_provenance_content,
 }
+
+
+# --------------------------------------------------------------------------- #
+# 压力任务 A 上的读数（`架构设计.md §15.3`：注入集该打【压力集 + 已知缺陷】）
+#
+# ★ 只【加读数】：上面主验题那 11 条的代码一行没动。
+# ★ 每条的 evidence 第一行写明这是哪道题上的读数，方便和主验题逐条对照。
+# ★ 只有真的读题的攻击才在这里有变体；不读题的（构造夹具）在两题上读数必然相同。
+# --------------------------------------------------------------------------- #
+
+PRESSURE = ACCEPTANCE / "stress"
+
+
+def _pressure_parts() -> tuple[Any, Any, Any]:
+    """压力任务 A 的 (document, ontology, plan) —— 与 run 用的是同一条装配路径。"""
+    from bobanana6.contract import parse_contract_file
+    from bobanana6.decompose import Decomposer
+    from bobanana6.ontology import load_ontology_file
+
+    document = parse_contract_file(PRESSURE / "task.yaml")
+    ontology = load_ontology_file(PRESSURE / "ontology.yaml").freeze()
+    plan = Decomposer(strategy="source").split(document.contract, ontology, None)
+    return document, ontology, plan
+
+
+def a01_on_pressure() -> Observation:
+    """A01 在压力题上：23 条源边 + 1 个合并块，依赖有没有被【声明】而不是硬切掉。"""
+    _document, _ontology, plan = _pressure_parts()
+    merge = plan.subtasks[-1]
+    declared = tuple(merge.inputs)
+    matched = all(dict(merge.expects).get(name) == plan.interfaces.get(name) for name in declared)
+    reads = sum(1 for block in plan.subtasks if block.mode == "read")
+    fine = len(declared) > 1 and matched
+    return Observation(
+        found=fine,
+        action="declare_cross_block_dependency" if fine else "cut",
+        evidence=(
+            f"[pressure task A] plan: {len(plan.subtasks)} block(s) = {reads} read + 1 merge",
+            f"the merge declares {len(declared)} input(s): {declared[:2]} … {declared[-1:]}",
+            f"every declared input matches its producer's interface: {matched}",
+            (
+                f"only {len({path.stem for path in (PRESSURE / 'input').glob('*')})} declared sources have"
+                " an input file — the run drops the dead one before splitting, the static plan does not"
+            ),
+        ),
+    )
+
+
+def a03_on_pressure() -> Observation:
+    """A03 在压力题上：任务里【真的有】一个真冲突（s02 vs s20 的 ENT-03|2022）。
+
+    问的是：跑的那条路走得到它吗。判定内核会记 Conflict（A03 主验读数已证），
+    但装配关拿到的是 `pieces: Artifact`、不是两个候选的 `claims` —— 所以两个块
+    永远不会被放在一起比。
+    """
+    from bobanana6.core.assemble import check_assembly
+    from bobanana6.core.checkers.base import CheckContext
+    from bobanana6.core.kernel import classify
+    from bobanana6.core.model import Claim, Provenance
+
+    document, ontology, plan = _pressure_parts()
+    conflict = None
+    generate = PRESSURE / "generate.py"
+    if generate.is_file():  # 题面自己声明了这个冲突，别在注入里重写它
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_stress_meta", generate)
+        module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        conflict = dict(module.CONFLICT)
+
+    point = Provenance(value_ref="part-s02.csv:row=2", snapshot_ref="s02", locator="L")
+    # 两个块各读一份源，对同一个 (实体, 年) 给出不同值 —— 都不是错的
+    left = replace(
+        _candidate(sid="T-02", source="s02", artifact=_artifact("panel.csv", ({"revenue": "3010000.0"},), ("revenue",))),
+        claims=(Claim(field="revenue", value=3010000.0, source_id="s02", provenance=point),),
+    )
+    right = replace(
+        _candidate(sid="T-20", source="s20", artifact=_artifact("panel.csv", ({"revenue": "9000000.0"},), ("revenue",))),
+        claims=(Claim(field="revenue", value=9000000.0, source_id="s20", provenance=point),),
+    )
+    bundle = _bundle(_constraint("C-revenue", "range", "panel.csv", {"column": "revenue", "min": 0, "max": 1e12}))
+    kernel = classify(bundle, left, right, CheckContext(ontology=ontology))
+    rows = ({"obligor": "ENT-03", "revenue": "3010000.0"},)
+    wide = ({"obligor": "ENT-03", "revenue": "9000000.0"},)
+    pieces = {
+        block.output: _artifact(block.output, wide if block.output == "panel.csv" else rows, ("obligor", "revenue"))
+        for block in plan.subtasks
+    }
+    report = check_assembly(plan, document.contract, bundle, pieces, CheckContext(ontology=ontology), snapshots={})
+    codes = tuple(report.codes())
+    compared = any("conflict" in code for code in codes)
+    return Observation(
+        found=compared,  # ★ ① 问的是【跑的那条路】有没有注意到它，不是内核有没有这个能力
+        action="record_conflict" if compared else "not_compared",
+        evidence=(
+            f"[pressure task A] the task itself declares a real conflict: {conflict}",
+            (
+                "★ the capability is there: handed both candidates, the kernel records "
+                f"Conflict x{len(kernel.conflicts)}"
+            ),
+            f"the assembly stage only ever gets artifacts; its codes={codes} carry no conflict",
+            "★ 两个块的候选永远不会被放在一起 → 这道题里的真冲突不被记录（跨块不比较，见 #63）",
+        ),
+    )
+
+
+def a06_on_pressure() -> Observation:
+    """A06 在压力题上：题目自带一个永远取不到的源（s24）→ 该降级并标记；全缺才拒跑。"""
+    import shutil
+    import tempfile
+
+    from bobanana6.adapters import EchoToolResultClient
+
+    def _run(*, dead_all: bool) -> Any:
+        from acceptance.harness import run_task
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "stress"
+            shutil.copytree(
+                PRESSURE,
+                task,
+                ignore=shutil.ignore_patterns("_run", "__pycache__", "generate.py", "truth"),
+            )
+            if dead_all:
+                for path in (task / "input").glob("*"):
+                    path.unlink()
+            return run_task(task, client=EchoToolResultClient(), env={}, concurrency=32)
+
+    partial = _run(dead_all=False)  # s24 按题目设计本来就没有输入文件
+    total = _run(dead_all=True)
+    marked = next((note for note in partial.report.notes if "unavailable" in note), "")
+    degraded_by_design = bool(partial.refused is None and marked)
+    still_refuses = total.refused == "sources"
+    return Observation(
+        found=degraded_by_design,
+        action="degrade_or_mark_unavailable" if degraded_by_design and still_refuses else "refuse_run",
+        evidence=(
+            (
+                f"[pressure task A] one dead source by design -> refused={partial.refused!r}, "
+                f"blocks={len(partial.blocks)}, note={marked!r}"
+            ),
+            f"all {len(list((PRESSURE / 'input').glob('*')))} inputs removed -> refused={total.refused!r}",
+            "★ 同一个门：少一个输入就降级并标记，一个源都没有才拒跑",
+        ),
+    )
+
+
+def a08_on_pressure() -> Observation:
+    """A08 在压力题上：块数从 3 涨到 23，`target="*"` 还是不是看不见合并结果。"""
+    from bobanana6.core.assemble import check_assembly
+    from bobanana6.core.checkers.base import CheckContext
+
+    document, ontology, plan = _pressure_parts()
+    names = [block.output for block in plan.subtasks]
+    rows = ({"obligor": "ENT-01", "exposure": "1"},)
+    wide = ({"obligor": "ENT-01", "exposure": "999999"},)
+    pieces = {
+        name: _artifact(name, wide if name == "panel.csv" else rows, ("obligor", "exposure")) for name in names
+    }
+    bundle = _bundle(_constraint("G-1", "presence", "*", {"min_rows": 1}, "assembly-wide bound"))
+    report = check_assembly(plan, document.contract, bundle, pieces, CheckContext(ontology=ontology), snapshots={})
+    detail = " ".join(v.detail for v in report.violations if v.check == "global_invariant")
+    blind = "not found" in detail
+    return Observation(
+        found=bool(not blind and not report.passed),
+        action="artifact_not_found" if blind else ("assembly_rejects" if not report.passed else "passed"),
+        evidence=(
+            f"[pressure task A] {len(pieces)} piece(s), the panel visibly disagrees with the parts",
+            f"global_invariant detail: {detail[:80]!r}",
+            "★ 与主验题同一读数：`*` 在多块装配上永远看不见产物（缺口与块数无关）",
+        ),
+    )
+
+
+def a09_on_pressure() -> Observation:
+    """A09 在压力题上：⑨ 说「关键字段只在已下线的源里」—— 那条出口在这题上走得到吗。"""
+    from acceptance.harness import run_task
+    from bobanana6.adapters import EchoToolResultClient
+
+    document, _ontology, _plan = _pressure_parts()
+    present = {path.stem for path in (PRESSURE / "input").glob("*")}
+    dead = sorted({str(source.ref) for source in document.contract.sources} - present)
+    run = run_task(PRESSURE, client=EchoToolResultClient(), env={}, concurrency=32)
+    exited = {
+        str(run.verdicts[block].evidence.get("exit"))
+        for block in run.blocks
+        if getattr(run.verdicts.get(block), "evidence", None)
+    }
+    declined = sorted(exit_ for exit_ in exited if exit_ and "decline" in exit_)
+    note = next((item for item in run.report.notes if "unavailable" in item), "")
+    return Observation(
+        found=bool(declined),
+        action="decline" if declined else "no_block_to_decline",
+        evidence=(
+            (
+                f"[pressure task A] declared sources={len(document.contract.sources)}, "
+                f"no input file for {dead} (the task's ⑨ design)"
+            ),
+            f"the run plans {len(run.blocks)} block(s) and drops the dead source before splitting: {note!r}",
+            f"exits seen on the blocks: {sorted(exit_ for exit_ in exited if exit_)}",
+            "★ 没有「不可能的块」→ decline 这条出口在压力题上走不到（真值侧只保证不许编 ENT-12）",
+        ),
+    )
+
+
+#: 压力题上【真的读题】的那几条。其余六条是构造夹具，换题读数必然相同。
+PRESSURE_READINGS: Mapping[str, Any] = {
+    "A01-mesh-dependency": a01_on_pressure,
+    "A03-real-conflict": a03_on_pressure,
+    "A06-persistent": a06_on_pressure,
+    "A08-global-invariant": a08_on_pressure,
+    "A09-impossible": a09_on_pressure,
+}
+
+
+def injectors_for(target: str = "main") -> Mapping[str, Any]:
+    """两套读数：`main` = 主验题（`INJECTORS` 原样），`stress` = 压力任务 A 的变体。
+
+    ★ 不读题的六条在 `stress` 下与 `main` 共用同一个注入器 —— 这是【事实】，
+    不是省略：夹具注入器与题无关，读数当然一样。
+    """
+    if target == "stress":
+        return {**INJECTORS, **PRESSURE_READINGS}
+    return INJECTORS
