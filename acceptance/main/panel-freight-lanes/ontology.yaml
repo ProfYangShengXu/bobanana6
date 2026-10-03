@@ -1,0 +1,25 @@
+# 主验题（域 3：货运）的本体：只声明这题真正用到的概念。
+domain: freight
+version: "2026.1"
+
+concepts:
+  shipper: {label: 货主编号, kind: entity}
+  weight_kg: {label: 运输重量, kind: measure, unit: kg}
+  cost_cny: {label: 运费, kind: measure, unit: CNY}
+
+units:
+  weight_kg: {symbol: kg, scale: 1.0, base: kg}
+  cost_cny: {symbol: CNY, scale: 1.0, base: CNY}
+  # ★ 吨是【声明过的】单位，不是靠"吨=1000 千克"的世界知识：
+  #   换算系数与基准都写在单位表里（`实现规格.md §5.0.1` 判据③ 受控白名单）。
+  weight_kg_吨: {concept_id: weight_kg, symbol: 吨, scale: 1000.0, base: kg}
+
+definitions:
+  weight_kg:
+    version: "2026.1"
+    text: 统计期内的运输重量，按千克计；来源若以吨记账需先归一到千克
+  cost_cny:
+    version: "2026.1"
+    text: 统计期内的运费，按人民币元计
+
+calendar: {timezone: Asia/Shanghai}

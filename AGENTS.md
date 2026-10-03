@@ -99,6 +99,32 @@
 - ✅ `#16` 已收口的四条判定缺口：缺失成为一等状态 `MISSING`（A04）· 单位检查读**值里的单位**（A10）·
   归因读**自带病因**、两层互相指认则 `unknown`（A07）· 溯源经 `SnapshotReader` 端口逐点重放
   —— 引用的行要在、值要对得上（A11）。四条都有修前/修后对照读数。
+- ✅ `#24` 反例「假通过」的反证 + 主验补两个域（数据 `.bobanana6/b24/报告.md`）。
+  · ★ 反例：对照题**已经在仓库里**（`counter/state-machine-task/party-task.yaml`，与现题同一个
+    `generate.py`）。逐字对过两版，只有三处不同，其中**只有 sources（1 → 3）是变量**
+    （另一处 `C-rows target` 从 `"*"` 改成点名交付物，是**规避 A08 已知缺口**，不是第二个变量）。
+    **确定性读数**（不接模型）：1 源 → `star`/1 块；3 源 → `pipeline`/4 块。
+    ⇒ **「该不该拆」在壳里不存在**，存在的是「来源数 ≥ 2 就扇出」这个代理判据；现题的"不扇出"
+    来自**数量不足**。这是**壳的账 (a)**，也是第三条验证过的调优点。
+  · 真模型同窗各 2 次：单源那版一跑做对（5 行）、一跑挂；**3 源那版两次都是"三个读块各自
+    全过、只有合并块挂"**（逐字：`row 0 of 'final-state.csv' matches no row this block was handed`）
+    —— `fake parallelism` 活体样本，判据一条都没事前拦。
+  · 主验补齐 **同形状 × 3 域**：`panel-three-sources`（金融）/ `panel-energy-sites`（能源，kWh）/
+    `panel-freight-lanes`（货运，吨）。每域 3 次、**同窗交替**；四条主验约束逐字相同
+    （`C-rows`/`C-prov`/`C-fields`/`C-units`），真值由各自的 `generate.py` 持有、`input`/`truth` 隔离。
+    ★ 真值现在**自己声明键列**（`"key": "site"`）：3 个域实体列名不同，不按它比两边的键集都是
+    空的、只剩行数在比 —— 第四口径会静默失效。复合键（压力题声明的 `["obligor","year"]`）**今天
+    还不支持**，`acceptance/truth.py::declared_key` 刻意回落并把这个缺口报出来。
+  · 三域读数（分开报、禁总分）：块级 1.0/0.75/0.5、1.0/0.75/0.75、0.75/0.75/0.75；
+    装配只在 c1 的金融/能源过；真值 **3/7 · 0/7 · 0/7**（`invented 0` 全部）。
+    ★ 两次"交付了"的跑：**块级 1.0 + 装配 passed + 出口 `deliver`，而真值 3/7（只搬了第一份来源）**
+    —— 三口径齐绿而答案是错的，正是第四口径的意义。★ 新域的单位攻击被抓住（逐字：
+    `C-units: value '60000 kWh' declares unit 'kWh', but 'output_mwh' is declared as 'MWh'`）；
+    货运的合并块撞继承守卫（把吨换算成 kg 后与收到的行不再逐字相同，「引用+变换」今天表达不了）。
+  · 出口覆盖（9 次主验跑）：`deliver` 2/9 · `degrade_single` 2/9；**没走到** `refuse_split` /
+    `single_agent` / `decline` / `reshard` / `retry_local` / `taint` / `abort`。
+  · 读数：ruff 绿 · **757 passed** · arch_guard 37 · smoke 2 · 见证变体 **224/224/0** ·
+    42 个哈希种子 0 失败。
 - ✅ `#23` 注入集挂到压力题 A 上 + 冒烟真模型基线（数据 `.bobanana6/b23/报告.md`）。
   · 执行器有了第二个底座 `run_attacks(target="stress")`（压力任务 A）；11 条逐条重跑、
     三层分开报。**真正读题的只有 5 条**（A01/A03/A06/A08/A09），其余 6 条是构造夹具
@@ -167,7 +193,7 @@
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 755 passed（不再有 xfail） |
+| `pytest tests/ -q` | ✅ 757 passed（不再有 xfail） |
 | `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |

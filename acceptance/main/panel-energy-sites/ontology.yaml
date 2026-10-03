@@ -1,0 +1,25 @@
+# 主验题（域 2：能源）的本体：只声明这题真正用到的概念。
+domain: wind-power
+version: "2026.1"
+
+concepts:
+  site: {label: 场站编号, kind: entity}
+  capacity_mw: {label: 装机容量, kind: measure, unit: MW}
+  output_mwh: {label: 发电量, kind: measure, unit: MWh}
+
+units:
+  capacity_mw: {symbol: MW, scale: 1.0, base: MW}
+  output_mwh: {symbol: MWh, scale: 1.0, base: MWh}
+  # ★ 千瓦时是【声明过的】单位，不是靠"千=1000"的世界知识：
+  #   换算系数与基准都写在单位表里（`实现规格.md §5.0.1` 判据③ 受控白名单）。
+  output_mwh_kWh: {concept_id: output_mwh, symbol: kWh, scale: 0.001, base: MWh}
+
+definitions:
+  capacity_mw:
+    version: "2026.1"
+    text: 场站装机容量，按兆瓦计
+  output_mwh:
+    version: "2026.1"
+    text: 统计期内的发电量，按兆瓦时计；来源若以千瓦时记账需先归一到兆瓦时
+
+calendar: {timezone: Asia/Shanghai}

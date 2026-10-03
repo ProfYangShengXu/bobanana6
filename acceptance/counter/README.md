@@ -77,3 +77,51 @@ party-views（3 源）        plan = pipeline ['T-01','T-02','T-03','T-04']
 **块之间有没有状态依赖**这个信息，而今天的 `Subtask` 只有 `inputs`（数据依赖）
 与 `partition`（同级写互斥）—— 描述不了「共享可变状态」。
 先有那个字段/判据，才谈得上 `refuse_split`；否则补出来的出口只会是摆设。
+
+---
+
+## ★★ 本块把它做成了【反证实验】：唯一变量 = **来源数**
+
+上面那一节说的是「`refuse_split` 出口在代码里不存在」，所以这条要验的不是
+"那个出口有没有被走到"，而是更前面的一件事：
+
+> **「该不该拆」这个判断，在壳里到底存不存在？**
+
+★ 好消息是**对照题不需要新建**：`party-task.yaml`（3 份局部视图）就是为这件事建的
+（`#14` 那轮），它与 `task.yaml` 出自**同一个 `generate.py`**：
+
+| 题 | 来源 | 计划（不接模型，确定性） |
+|---|---|---|
+| `task.yaml` | 1 份事件日志 | `shape=star`，**1 块**（`T-01`）—— 没有第二个来源就不扇出 |
+| `party-task.yaml` | 3 份局部视图 | `shape=pipeline`，**4 块**（3 读 + 1 写）—— ★ **切了** |
+
+★ **逐字对过两版，差三处，只有第一处是变量**：
+
+```
+① sources            machine-events → party-a/b/c      ★ 这就是要验的变量
+② C-rows 的 target   "*"            → final-state.csv   不是变量：多块装配下
+   `target="*"` 必然报「artifact for target '*' not found」（A08 的已知缺口），
+   留着它会把「切没切」和「* 看不见合并结果」两件事混在一起 —— 这一处是【规避已知缺口】，
+   不是第二个变量
+③ task_id / notes / blind 的文案（元数据，不参与判定）
+```
+
+共用：同一份 `generate.py` / `ontology.yaml` / 交付物 `final-state.csv` /
+`C-prov` 一字不差 / `limits` 一字不差。
+
+这条读数是**确定性**的（切分器不接模型）：把它单独量出来，就不必靠"跑一次看看"。
+
+真模型侧的同窗读数（它切了之后走不走得通、判据拦不拦）见 `.bobanana6/b24/报告.md`。
+
+### 本块复跑（真模型，同窗各 2 次；`.bobanana6/b24/run.log`）
+
+| 跑 | 题（来源数） | 块级 | 装配 | 出口 | 最终答案 |
+|---|---|---|---|---|---|
+| c1 | `task.yaml`（1） | `T-01` ✓ | passed | passed | 5 行 ✓（这次把状态机推对了） |
+| c2 | `task.yaml`（1） | `T-01` ✗（`C-rows` 1<5；`C-prov` 编了 `actor 'WorkerA'`） | ✗ | failed | 1 行（编的） |
+| c1 | `party-task.yaml`（3） | `T-01`✓`T-02`✓`T-03`✓ **`T-04` ✗** | ✗ `cut_complete` | failed | 0 行 |
+| c2 | `party-task.yaml`（3） | 同上（T-04 逐字：`row 0 of 'final-state.csv' matches no row this block was handed`） | ✗ `cut_complete` | failed | 0 行 |
+
+★ 与上面 `2026-10-03` 那组旧读数的差别只有一处：**单源那版这次有一跑做对了**（5 行）。
+它不改变结论 —— 「不扇出」这次救得了单源，但那是**碰巧**；判据仍然是"来源数 < 2 才不切"，
+对 `party-task.yaml` 那种"看起来可切"的题一点作用都没有（切了、门禁一条没拦、只有事后 `cut_complete`）。

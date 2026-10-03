@@ -12,8 +12,16 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
-from acceptance import EXIT_KINDS, AcceptanceReport, load_baseline, run_task, smoke_gate
+from acceptance import (
+    EXIT_KINDS,
+    AcceptanceReport,
+    load_baseline,
+    load_truth,
+    run_task,
+    smoke_gate,
+)
 from bobanana6.adapters import EchoToolResultClient, ScriptedClient
 from bobanana6.contract import compile_bundle, parse_contract_file
 from bobanana6.core.model import ModelResponse, Recon
@@ -856,3 +864,59 @@ def test_the_truth_is_never_part_of_what_the_run_is_given() -> None:
     run = run_task(task_dir, client=_ScriptedBlocks(), env={})
     assert run.truth is not None
     assert not any("truth" in path for path in run.inputs_given)
+
+
+# --------------------------------------------------------------------------- #
+# §15.3 同形状 × 3 域：新域的实体列不叫 obligor —— 真值自己声明键列
+# --------------------------------------------------------------------------- #
+
+
+def test_the_truth_comparison_uses_the_key_the_task_declares() -> None:
+    """★ 域 2/3 的实体列叫 `site` / `shipper`：对照必须按【真值声明的键列】比。
+
+    不按它比的话，两边的键集都是空的、只剩行数在比 —— 第四口径会静默失效，
+    而表面上还是"matched"。
+    """
+    from acceptance import compare_rows, declared_key
+
+    assert declared_key({"key": "site"}) == "site"
+    assert declared_key({}) == "obligor"
+    # 复合键今天还不支持：回落按一列比，绝不假装按两列比（缺口已上报）
+    assert declared_key({"key": ["obligor", "year"]}) == "obligor"
+
+    document = {"key": "site", "rows": [{"site": "WF-01"}, {"site": "WF-02"}]}
+    dropped = compare_rows([{"site": "WF-01"}], document)
+    assert dropped.row_count_actual == 1 and dropped.missing_keys == ("WF-02",)
+    invented = compare_rows([{"site": "WF-01"}, {"site": "XX-99"}], document)
+    assert invented.invented_keys == ("XX-99",)
+
+
+def test_the_other_two_main_domains_are_the_same_shape() -> None:
+    """★ §15.3 同形状 × 3 域：域 2/3 与域 1 只差【实体/字段/单位】，形状一模一样。
+
+    同形状换领域验的是**泛化**：切分/装配/溯源/单位四条机制在别的实体名、别的业务
+    含义下也得成立。这里钉住的是形状（4 块 pipeline / 四条主验约束 / 三条来源 /
+    真值隔离），不是某一次的输出质量。
+    """
+    from acceptance import declared_key
+
+    for name, entity_key, unit_concept, unit_symbol in (
+        ("panel-energy-sites", "site", "output_mwh", "MWh"),
+        ("panel-freight-lanes", "shipper", "weight_kg", "kg"),
+    ):
+        task_dir = ACCEPTANCE / "main" / name
+        run = run_task(task_dir, client=EchoToolResultClient(), env={})
+        assert run.refused is None, run.report.notes
+        assert run.plan_shape == "pipeline" and len(run.blocks) == 4, (name, run.plan_shape, run.blocks)
+        assert run.truth is not None and run.truth.row_count_expected == 7, name
+        # ★ 真值自己声明键列 → 对照按它比；键集不空（不然第四口径会静默失效）
+        assert declared_key(load_truth(task_dir)) == entity_key
+        assert len(run.truth.missing_keys) == 7, (name, run.truth.render())
+        assert not any("truth" in path for path in run.inputs_given)
+
+        document = yaml.safe_load((task_dir / "task.yaml").read_text(encoding="utf-8"))
+        constraints = {row["id"]: row for row in document["constraints"]["hard"]}
+        assert {"C-rows", "C-prov", "C-fields", "C-units"} <= set(constraints), (name, sorted(constraints))
+        assert constraints["C-units"]["spec"] == {"concept": unit_concept, "unit": unit_symbol}
+        locators = [source["locator"] for source in document["sources"]]
+        assert len(locators) == 3 and all(locator.startswith("input/") for locator in locators)

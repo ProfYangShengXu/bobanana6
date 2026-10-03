@@ -1913,6 +1913,23 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_attacks.py::test_the_executor_can_be_pointed_at_the_pressure_task",
         "the executor claims to measure the pressure task but runs the main-task fixtures",
     ),
+    # -- the truth side must use the key the task declares (domains 2/3) -- #
+    Mutation(
+        "Q01-truth-key-ignored",
+        "acceptance/truth.py",
+        '    declared = truth.get("key")\n',
+        '    declared = None  # mutation: the key column the task declares is ignored\n',
+        "tests/test_acceptance.py::test_the_truth_comparison_uses_the_key_the_task_declares",
+        "every domain is compared on 'obligor' again, so a differently-shaped task passes vacuously",
+    ),
+    Mutation(
+        "Q02-third-domain-drops-the-unit-constraint",
+        "acceptance/main/panel-energy-sites/task.yaml",
+        "    - id: C-units\n",
+        "    - id: C-units-disabled\n",
+        "tests/test_acceptance.py::test_the_other_two_main_domains_are_the_same_shape",
+        "a new domain silently loses its unit constraint, so mixed units can pass again",
+    ),
 )
 
 

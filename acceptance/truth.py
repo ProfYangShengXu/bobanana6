@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-__all__ = ["TruthVerdict", "compare_rows", "load_truth"]
+__all__ = ["TruthVerdict", "compare_rows", "declared_key", "load_truth"]
 
 
 @dataclass(frozen=True)
@@ -58,17 +58,35 @@ def load_truth(task_dir: str | Path) -> dict[str, Any]:
     return document
 
 
+def declared_key(truth: Mapping[str, Any]) -> str:
+    """The key column the task itself names, when it names exactly one.
+
+    ★ 3 个域同形状、不同字段：主验题自己声明键列（`"key": "site"`），
+    对照就必须按它比 —— 否则每个新域都拿 `obligor` 去比，两边的键集都是空的，
+    只剩行数在比，第四口径【静默失效】。
+
+    ★ 复合键（list，例如压力题声明的 `["obligor", "year"]`）今天**还不支持**：
+    只按一列比的对照假装成按两列比，比不按还糟。这里刻意回落并把这个缺口报出来，
+    不静默取第一列。
+    """
+    declared = truth.get("key")
+    if isinstance(declared, str) and declared:
+        return declared
+    return "obligor"
+
+
 def compare_rows(
     rows: Iterable[Mapping[str, Any]],
     truth: Mapping[str, Any],
     *,
-    key: str = "obligor",
+    key: str | None = None,
 ) -> TruthVerdict:
     """Compare an answer's key set and row count with the truth's."""
+    field = key or declared_key(truth)
     expected_rows = list(truth.get("rows", ()))
-    expected_keys = {str(row.get(key)) for row in expected_rows if isinstance(row, Mapping) and key in row}
+    expected_keys = {str(row.get(field)) for row in expected_rows if isinstance(row, Mapping) and field in row}
     actual = [dict(row) for row in rows]
-    actual_keys = {str(row.get(key)) for row in actual if key in row}
+    actual_keys = {str(row.get(field)) for row in actual if field in row}
     missing = tuple(sorted(expected_keys - actual_keys))
     invented = tuple(sorted(actual_keys - expected_keys))
     detail = ""

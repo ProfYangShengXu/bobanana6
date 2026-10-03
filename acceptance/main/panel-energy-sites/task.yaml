@@ -1,0 +1,46 @@
+# 主验题（域 2：能源）：三个来源 → 一份风电场站出力面板。★ 会切出多块（3 读 + 1 写）。
+#
+# 与 panel-three-sources 同形状（同一批实体 + 多来源 + 合并成一张表）、不同领域：
+# 实体换成场站号、字段换成容量与出力、单位异构换成 kWh/MWh（§15.3 同形状 × 3 域）。
+task_id: main-panel-energy-sites
+goal: 把三份来源里同一批风电场站的容量与出力整理成一份可复核的面板
+version: 1
+
+deliverables:
+  - name: output.csv
+    schema: {site: str, capacity_mw: float, output_mwh: float}
+
+sources:
+  - {ref: site-north, locator: input/site-north.csv}
+  - {ref: site-south, locator: input/site-south.csv}
+  - {ref: site-coast, locator: input/site-coast.csv}
+
+constraints:
+  hard:
+    - id: C-rows
+      kind: presence
+      target: output.csv
+      spec: {min_rows: 1}
+      rationale: "面板不允许为空——空表会被下游当成「这些场站不存在」"
+    - id: C-prov
+      kind: provenance
+      target: output.csv
+      spec: {min_coverage: 0.95}
+      rationale: "每个值都要能指回一份快照，否则无法复核"
+    - id: C-fields
+      kind: schema
+      target: output.csv
+      spec: {columns: [{name: site, dtype: str}, {name: capacity_mw, dtype: str}, {name: output_mwh, dtype: str}]}
+      rationale: "三份来源合并后列名与类型必须仍然一致"
+    - id: C-units
+      kind: unit_consistency
+      target: output.csv
+      spec: {concept: output_mwh, unit: MWh}
+      rationale: "出力必须可判单位：源里带单位就归一，没标就要说出来是假设，不许静默当 MWh"
+
+blind:
+  - "来源若以千瓦时记账且不标注，单看一列无法判定单位"
+
+limits: {max_rounds: 3}
+
+notes: 主验题域 2：多块 pipeline，跨源同实体 + 单位异构。

@@ -17,7 +17,7 @@ from .judge import (
     load_baseline,
     smoke_gate,
 )
-from .truth import TruthVerdict, compare_rows, load_truth
+from .truth import TruthVerdict, compare_rows, declared_key, load_truth
 
 __all__ = [
     "EXIT_KINDS",
@@ -28,6 +28,7 @@ __all__ = [
     "TruthVerdict",
     "compare_rows",
     "coverage_from_exits",
+    "declared_key",
     "load_baseline",
     "load_truth",
     "run_task",
