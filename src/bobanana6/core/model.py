@@ -647,6 +647,12 @@ class Column:
     name: str  # core:checkers —— schema/range/relation 按名取列
     dtype: str  # core:checkers —— schema 类型比对读它
     nullable: bool = True  # core:checkers —— schema 可空性比对读它
+    #: ★ A10: the unit the *producer* established for this column, in words
+    #: (``"CNY"`` / ``"千元"``). Empty means **not established** -- neither the
+    #: values nor the answer declared one, so the column's unit would rest on the
+    #: ontology's concept declaration. That is a real state, not a default: a task
+    #: may require an explicit unit (``unit_consistency.spec.unit_source``).
+    unit: str = ""  # core:checkers —— unit_consistency 读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "Column.name must not be empty")

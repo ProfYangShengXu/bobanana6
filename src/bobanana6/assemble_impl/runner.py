@@ -370,11 +370,28 @@ class Runner:
         """Read every fetched snapshot's frozen rows, once, before any judgment.
 
         A snapshot that cannot be read back is an error, not a reason to quietly
-        fall back to the weaker name-only check.
+        fall back to the weaker name-only check. ★ It is raised as the **sources
+        gate** (``RunRefused``), not as a generic failure: "failed" is the
+        phenomenon, "the run was stopped at the sources gate" is the location
+        (``AGENTS.md §5.2``). This is the *form* of the refusal, never its
+        semantics -- without the carrier the content check does not run at all,
+        so A11's hole is not reopened. Which gate stopped the run and which layer
+        owns the failure are two different questions (the latter belongs to A07).
         """
         if self.reader is None:
             return {}
-        return {ref: self.reader.body(snapshot) for ref, snapshot in sorted(snapshots.items())}
+        bodies: dict[str, SnapshotBody] = {}
+        for ref, snapshot in sorted(snapshots.items()):
+            try:
+                bodies[ref] = self.reader.body(snapshot)
+            except (SourceError, OSError, ValueError, TypeError) as exc:
+                raise RunRefused(
+                    "sources",
+                    f"the frozen carrier for {ref!r} cannot be read back "
+                    f"({type(exc).__name__}: {exc}); the provenance check will not silently degrade to names",
+                    (ref,),
+                ) from exc
+        return bodies
 
     def _toolset(
         self,

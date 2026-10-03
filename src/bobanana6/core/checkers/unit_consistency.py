@@ -10,6 +10,8 @@ never silently treated as consistent.
 
 from __future__ import annotations
 
+from typing import Any
+
 from ..model import Candidate, Constraint, is_missing
 from ..ontology import resolve_unit, split_quantity
 from .base import CheckContext, CheckOutcome, artifact_for, fail, ok
@@ -60,14 +62,35 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
     # -- ★ A10: read the unit off the value, not only off the declarations ---- #
     artifact = artifact_for(constraint, candidate)
     symbols = {other.symbol for other in context.ontology.units.values()}
+    #: A value nobody labelled is not "in the declared unit" -- it is a value whose
+    #: unit rests on the ontology's concept declaration. Being explicit about that
+    #: is the whole point: a schema may accept the assumption, a task that needs
+    #: the unit stated must not have it made silently.
+    unlabelled = 0
     for column in _concept_columns(constraint, candidate, context):
+        column_unit = _column_unit(artifact, column)
+        if column_unit:
+            if column_unit == declared:
+                facts.append(f"column {column!r} declares its unit {column_unit!r}")
+            elif constraint.spec.get("conversion") and _shares_base(column_unit, unit.symbol, context):
+                facts.append(f"column {column!r} declares {column_unit!r}, conversion declared")
+            else:
+                return fail(
+                    constraint,
+                    f"column {column!r} declares unit {column_unit!r}, but {concept!r} is declared as {declared!r}",
+                )
         for index, row in enumerate(artifact.rows if artifact is not None else ()):
             value = row.get(column)
-            if is_missing(value) or not isinstance(value, str):
-                continue  # a number carries no unit here; absence is A04's business
-            split = split_quantity(value)
+            if is_missing(value):
+                continue  # absence is A04's business, not a unit question
+            split = split_quantity(value) if isinstance(value, str) else None
             if split is None:
-                continue  # no unit on the value -- still unjudgeable, reported below
+                # ★ A bare number is the common case here: the value carries no unit
+                #   and the column declared none, so this cell's unit would rest on
+                #   the ontology. Counted, never silently accepted.
+                if not column_unit:
+                    unlabelled += 1
+                continue
             _, symbol = split
             if symbol == declared:
                 facts.append(f"row={index} col={column} value {value!r} declares {symbol!r}")
@@ -86,9 +109,34 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
                 f"but {concept!r} is declared as {declared!r}",
             )
 
+    if unlabelled:
+        if constraint.spec.get("unit_source") == "explicit":
+            # ★ The unit may not be *assumed* here: the task demanded it be stated.
+            #   This is (b) -- refuse rather than present an unlabelled number as if
+            #   its unit were known.
+            return fail(
+                constraint,
+                f"{unlabelled} value(s) in {concept!r} carry no unit and the column declares none; "
+                "this constraint requires the unit to be explicit",
+            )
+        # ★ (c): the assumption is *said*, never silent -- and it is deliberately not
+        #   called a declaration, because nobody declared it.
+        facts.append(
+            f"{unlabelled} value(s) in {concept!r} carry no unit; the ontology declaration "
+            f"{declared!r} applies to them (assumption, not a declaration)"
+        )
+
     if facts:
         return ok(constraint, *facts)
     return ok(constraint, f"unit {declared!r} consistent for {concept!r}")
+
+
+def _column_unit(artifact: Any, column: str) -> str:
+    """The unit the producer declared for this column, or ``""``."""
+    if artifact is None:
+        return ""
+    declared_column = artifact.column(column)
+    return declared_column.unit if declared_column is not None else ""
 
 
 def _shares_base(symbol: str, target: str, context: CheckContext) -> bool:

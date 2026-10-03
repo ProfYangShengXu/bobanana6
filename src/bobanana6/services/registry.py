@@ -165,7 +165,19 @@ class ToolRegistry:
                 )
                 continue
             try:
-                arguments = dict(parse_tool_arguments(call.raw_arguments or call.arguments))
+                # ★ The fallback must hand the parser the *same* type the parser
+                #   accepts. `call.raw_arguments or call.arguments` looked safe but
+                #   fed a Mapping into a `json.loads`-only function, so a call built
+                #   with valid `arguments` and no raw text was refused as "not valid
+                #   JSON" -- a wrong message pointing at the wrong party. The fork's
+                #   strict parser contract is untouched (it still refuses to repair
+                #   model-emitted junk); only our own fallback now serializes what
+                #   it already parsed.
+                arguments = dict(
+                    parse_tool_arguments(
+                        call.raw_arguments or json.dumps(dict(call.arguments), ensure_ascii=False)
+                    )
+                )
             except ToolCallError as exc:
                 results.append(invalid_arguments_result(call.call_id, str(exc)))
                 continue

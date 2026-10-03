@@ -210,6 +210,62 @@ A08 期望的「装配拒绝」不在 `EXIT_KINDS` 里（它是装配口径，�
 `tests/test_agentloop_attribution.py::test_a_broken_carrier_declares_the_tool_layer_on_the_real_event_stream`
 用**真 registry + 真 `LoopIOImpl.execute`** 验证（事件是生产者写的，不是测试手写的 `cause`）。
 
+## ★★★ #18 把 #17 报上来的三个口子补严
+
+### ① 单位异构的另一半：不标单位的那一段 → **(c) 说出来 + (b) 可要求**
+
+**先回答那个问题：源里不标单位，单位到底是什么？**
+```
+· 值里标了        → 就是它（#17 已做：换算到基准单位）
+· 本体声明了      → 这是【声明】，不是假设 —— `实现规格 §5.0.1` 判据①
+                    说的"字段自己的定义处"就包含概念在本体里的定义
+· 两者都没有      → 单位**没有确立**：判不了，且不许默认成基准单位
+```
+★ 所以「不标单位」本身不等于「判不了」（本体可以替它说）；真正缺的是
+**「这一段的值靠的是假设」这句话没人说**。本块的判断：
+
+```
+默认   (c) 把假设【说出来】：判定事实里写 "assumption, not a declaration"，
+          并且列上不带单位（`Column.unit == ""` = 没确立），不静默当基准单位
+严格   (b) 任务要求单位必须显式（`unit_consistency.spec.unit_source: "explicit"`）
+          → 这一段【拒】：拿不到就说拿不到，别编
+```
+两者都不猜：**没有任何量级启发式**（1000 倍也可能真是业务差异）。
+
+**端到端对照**（三个源里 panel-c 的值自带单位、panel-a/b 是光秃秃的数）：
+
+| 读数 | 结果 |
+|---|---|
+| 修前（假设无人说） | 判定事实只有 `unit 'CNY' consistent for 'amount'` —— 那一段靠假设，但**一个字都没说**；`unit_source: explicit` 也**被忽略**（照样过） |
+| 修后 默认 | `C-units: 7 value(s) in 'amount' carry no unit; the ontology declaration 'CNY' applies to them (assumption, not a declaration)`，块仍然通过 |
+| 修后 严格 | 同一个块**被拒**：`7 value(s) in 'amount' carry no unit and the column declares none; this constraint requires the unit to be explicit` |
+
+**★ 残留（在原理上就判不了的）**：源不标、本体/任务也没声明差异，而且没有别的源
+覆盖同一实体 → **没有任何系统能看出它其实是千元**。本块做的是「不再静默假设 + 可要求显式」，
+不是「猜对」。另一条**能**发现它的路是跨源比对（同一实体两个源给出不同值 → 真冲突），
+而跨块的候选今天**不互相比较**（`classify` 只在同一块的收敛里比）—— 那是另一台机制，本块不动它。
+
+### ② 载体读不回来 → 报【具名门 sources】
+
+| 读数 | 结果 |
+|---|---|
+| 修前 | `SourceError` 直接穿出 `Runner.run()`：验收 harness 报错，CLI 兜底成 `failed: …` + exit 1（现象层） |
+| 修后 | `refused = "sources"`，note：`the run was refused at the 'sources' gate before any worker started`，**一个块都没跑** |
+
+换的只是**报错的形式**，不是判定的语义：读不回来仍然是失败，判定器**不许**退化成只查名字
+（A11 的洞不重开）。与 A07 的声明通道不打架：**「哪个门挡的」与「谁的责任」是两个层的问题**。
+
+### ③ fork 边的静默陷阱：回退把 Mapping 喂给 `json.loads`
+
+| 读数 | 结果 |
+|---|---|
+| 修前 | 只给 `arguments`（合法 JSON 对象）→ `ok=False error_type=invalid_tool_arguments`，内容 `tool arguments are not valid JSON` |
+| 修后 | 同一个调用 `ok=True`，handler 收到 `{'path': 'a'}`；而**真正的坏 JSON 字符串仍然被拒**（fork 的严格解析契约没动） |
+
+修的是**回退与解析器的类型不匹配**（`raw_arguments or arguments` 把 Mapping 交给只吃字符串的
+解析器），不是给它加特判：现在回退会把自己已经有的 mapping 序列化再交给解析器。
+没有改 `agentloop/`，所以不涉及上游同步；这是本项目自己的回退逻辑写错了类型。
+
 ## ★ 反向验证（`tools/reverse_validation.py`）
 
 全绿树上 **197 变体 / 197 被抓住 / 0 漏网**，每条变体一个见证测试，跑完原样还原。

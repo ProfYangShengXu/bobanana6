@@ -284,6 +284,21 @@ def test_malformed_call_still_gets_a_result() -> None:
     assert len(results) == 1 and results[0].ok is False  # ★ never a dangling tool call
 
 
+def test_a_call_carrying_only_parsed_arguments_is_not_mistaken_for_bad_json() -> None:
+    """★ ③：只给 `arguments`（一个合法的 JSON 对象）也必须被正确解析。
+
+    旧回退 `raw_arguments or arguments` 把 Mapping 喂给只做 `json.loads` 的解析器，
+    于是一个完全合法的调用被报成「参数不是合法 JSON」—— 错误信息把人指向错的方向。
+    """
+    from bobanana6.agentloop.tools import ToolCall
+
+    registry = _registry()
+    call = ToolCall(call_id="c1", name="store.read", arguments={"path": "a"})
+    results = registry.execute((call,))
+    assert results[0].ok is True, results[0]
+    assert "a" in results[0].content
+
+
 def test_unknown_tool_gets_a_named_failure() -> None:
     registry = _registry()
     results = registry.execute(registry.calls([_raw("c1", "nope", "{}")]))

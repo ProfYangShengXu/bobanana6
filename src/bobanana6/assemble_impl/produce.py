@@ -291,6 +291,9 @@ def _columns(raw: Any, rows: Sequence[Mapping[str, Any]], reject: Reject) -> tup
                     name=str(item["name"]),
                     dtype=str(item.get("dtype") or "str"),
                     nullable=bool(item.get("nullable", True)),
+                    # ★ A10: a block that knows the unit of what it produced says so
+                    #   here; leaving it out is recorded as "not established".
+                    unit=str(item.get("unit") or ""),
                 )
             )
         else:

@@ -447,6 +447,46 @@ def test_unit_consistency_accepts_a_convertible_unit_when_declared() -> None:
     assert outcome.ok, outcome.facts
 
 
+def test_unit_consistency_says_when_the_unit_is_only_assumed() -> None:
+    """★ ①(c)：值不带单位、列也没声明 → 单位【靠本体声明】，必须说出来，不许默认成它。"""
+    art = artifact("out.csv", ({"credit.amount": 1},), columns=(Column("credit.amount", "float"),))
+    outcome = run("unit_consistency", {"concept": "credit.amount", "unit": "CNY"}, cand=candidate(artifacts=(art,)))
+    assert outcome.ok
+    assert "assumption, not a declaration" in outcome.facts[0], outcome.facts
+
+
+def test_unit_consistency_refuses_an_assumed_unit_when_the_task_demands_explicit() -> None:
+    """★ ①(b)：任务要求单位必须显式给出 → 猜不出来就拒，不把没标的数当成已知单位。"""
+    art = artifact("out.csv", ({"credit.amount": 1},), columns=(Column("credit.amount", "float"),))
+    outcome = run(
+        "unit_consistency",
+        {"concept": "credit.amount", "unit": "CNY", "unit_source": "explicit"},
+        cand=candidate(artifacts=(art,)),
+    )
+    assert not outcome.ok
+    assert "requires the unit to be explicit" in outcome.facts[0], outcome.facts
+
+
+def test_unit_consistency_accepts_a_column_that_declares_its_unit() -> None:
+    """列自己声明了单位 —— 那是【声明】，不是假设。"""
+    art = artifact(
+        "out.csv", ({"credit.amount": 1},), columns=(Column("credit.amount", "float", unit="CNY"),)
+    )
+    outcome = run(
+        "unit_consistency",
+        {"concept": "credit.amount", "unit": "CNY", "unit_source": "explicit"},
+        cand=candidate(artifacts=(art,)),
+    )
+    assert outcome.ok, outcome.facts
+    assert "declares its unit 'CNY'" in outcome.facts[0], outcome.facts
+
+
+def test_unit_consistency_rejects_a_column_declaring_another_unit() -> None:
+    art = artifact("out.csv", ({"credit.amount": 1},), columns=(Column("credit.amount", "float", unit="USD"),))
+    outcome = run("unit_consistency", {"concept": "credit.amount", "unit": "CNY"}, cand=candidate(artifacts=(art,)))
+    assert not outcome.ok and "column 'credit.amount' declares unit 'USD'" in outcome.facts[0], outcome.facts
+
+
 def test_unit_consistency_detects_peer_conflict() -> None:
     outcome = run(
         "unit_consistency",

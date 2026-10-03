@@ -268,7 +268,11 @@ class _ScriptedBlocks:
             deduped: dict[str, dict] = {}
             for row in rows:
                 deduped.setdefault(str(row.get("obligor")), row)
-            merged = {"ref": "panel-a", "rows": list(deduped.values()), "columns": _columns_of(fetched)}
+            columns = _columns_of(fetched)
+            if not all(_values_carry_a_unit(payload.get("rows", []), "amount") for payload in fetched.values()):
+                # 合并块只能声明它收到的：有一个输入没标单位，这一列的 unit 就不能成立
+                columns = [{key: value for key, value in column.items() if key != "unit"} for column in columns]
+            merged = {"ref": "panel-a", "rows": list(deduped.values()), "columns": columns}
             return ModelResponse(text=json.dumps(merged))
 
         if self.decline_one_read and block == "T-01":
@@ -285,7 +289,13 @@ class _ScriptedBlocks:
         if self.invent_rows and block == "T-01":
             rows = [{"obligor": f"X{i}", "pd": "0.1", "amount": "1"} for i in range(self.invent_rows)]
         return ModelResponse(
-            text=json.dumps({"ref": snapshot.get("ref", ""), "rows": rows, "columns": snapshot.get("columns", [])})
+            text=json.dumps(
+                {
+                    "ref": snapshot.get("ref", ""),
+                    "rows": rows,
+                    "columns": _declared_columns(snapshot.get("columns", []), snapshot.get("rows", [])),
+                }
+            )
         )
 
 
@@ -385,6 +395,29 @@ def _amounts_normalised(rows):  # type: ignore[no-untyped-def]
     return normalised
 
 
+def _values_carry_a_unit(rows, name: str) -> bool:
+    from bobanana6.core.ontology import split_quantity
+
+    return bool(rows) and all(
+        isinstance(row.get(name), str) and split_quantity(row[name]) is not None for row in rows
+    )
+
+
+def _declared_columns(columns, rows):  # type: ignore[no-untyped-def]
+    """Add ``unit: CNY`` to a column only when every value it read carried a unit.
+
+    ★ ①：能【确立】单位才声明它；源里没标就不声明 —— 那一段的单位只能是假设，
+    由判定层说出来，而不是由生产者硬安一个。
+    """
+    declared = []
+    for column in columns or []:
+        name = column.get("name") if isinstance(column, dict) else None
+        if name and _values_carry_a_unit(rows, name):
+            column = {**column, "unit": "CNY"}
+        declared.append(column)
+    return declared
+
+
 def _columns_of(fetched) -> list[dict]:  # type: ignore[no-untyped-def]
     for payload in fetched.values():
         columns = payload.get("columns")
@@ -446,6 +479,77 @@ def test_a_real_run_attributes_an_unknown_tool_to_the_model() -> None:
     run = run_task(ACCEPTANCE / "smoke" / "smoke-panel-one-source", client=shallow, env={}, expected_blame="model")
     assert run.report.attribution_accuracy == 1.0, run.report.notes
     assert any("got 'model'" in note for note in run.report.notes), run.report.notes
+
+
+def test_an_unreadable_frozen_carrier_is_a_named_gate(monkeypatch) -> None:
+    """★ ②：载体读不回来 → 报【具名门 sources】，而不是通用失败。
+
+    换的只是报错的**形式**：读不回来仍然是失败，判定器不许退化成"只查名字"。
+    """
+    from bobanana6.sources import SnapshotStore
+
+    original = SnapshotStore.read
+
+    def unreadable(self, snapshot):  # type: ignore[no-untyped-def]
+        snapshot.body_path.unlink(missing_ok=True)
+        return original(self, snapshot)
+
+    monkeypatch.setattr(SnapshotStore, "read", unreadable)
+    run = run_task(ACCEPTANCE / "main" / "panel-three-sources", client=_ScriptedBlocks(), env={})
+    assert run.refused == "sources", run.report.render()
+    assert "sources" in run.report.notes[-1], run.report.notes
+    # ★ 一个块都没跑：读不回来不是"降级继续跑"
+    assert run.report.block_pass_rate == 0.0
+
+
+def _task_with_a_unit_constraint(tmp_path: Path, *, explicit: bool) -> Path:
+    """A copy of the panel task that *requires* the panel's unit to be judged."""
+    import shutil
+
+    import yaml
+
+    source = ACCEPTANCE / "main" / "panel-three-sources"
+    target = tmp_path / ("strict" if explicit else "lenient") / source.name
+    shutil.copytree(source, target, ignore=shutil.ignore_patterns("_run", "__pycache__", "generate.py"))
+    document = yaml.safe_load((target / "task.yaml").read_text(encoding="utf-8"))
+    spec: dict[str, object] = {"concept": "amount", "unit": "CNY"}
+    if explicit:
+        spec["unit_source"] = "explicit"
+    document["constraints"]["hard"].append(
+        {
+            "id": "C-units",
+            "kind": "unit_consistency",
+            "target": "panel.csv",
+            "spec": spec,
+            "rationale": "面板的金额必须带单位；一个源不标单位时，这段不能被静默当成元",
+        }
+    )
+    (target / "task.yaml").write_text(yaml.safe_dump(document, allow_unicode=True), encoding="utf-8")
+    return target
+
+
+def test_a_source_that_does_not_label_its_unit_is_not_silently_assumed(tmp_path: Path) -> None:
+    """★★ ① 端到端：三个源里【有的源不标单位】。
+
+    读取块只在能**确立**单位时声明它（panel-c 的值自带千元 → 归一并声明 CNY）；
+    panel-a/b 的值是光秃秃的数 → 不声明。于是面板那一列的单位【只是假设】：
+
+      · 默认      → 判定层把它**说出来**（"assumption, not a declaration"），不静默
+      · 严格模式  → 这个块**被拒**（要求单位显式），而不是把没标的数当成已知单位
+    ★ 两种情况下都没有「静默猜出来并当正确的值」。
+    """
+    lenient = run_task(_task_with_a_unit_constraint(tmp_path, explicit=False), client=_ScriptedBlocks(), env={})
+    assert lenient.report.block_pass_rate == 1.0, {
+        name: (verdict.failed, dict(verdict.evidence)) for name, verdict in lenient.verdicts.items()
+    }
+    panel_fact = lenient.verdicts["T-04"].evidence["C-units"]
+    assert "assumption, not a declaration" in panel_fact, panel_fact
+    assert "carry no unit" in panel_fact, panel_fact
+
+    strict = run_task(_task_with_a_unit_constraint(tmp_path, explicit=True), client=_ScriptedBlocks(), env={})
+    assert strict.report.block_pass_rate < 1.0, strict.report.render()
+    strict_fact = strict.verdicts["T-04"].evidence.get("C-units", "")
+    assert "requires the unit to be explicit" in strict_fact, strict.verdicts["T-04"].evidence
 
 
 def test_a_unit_heterogeneous_source_is_normalised_at_read_time() -> None:
