@@ -34,6 +34,17 @@
   （合并块交不出面板）、归因 4/4 `constraint`、真值 `rows 0/44` 且 `invented 0`、
   成本 ≈ 52–55 调用/轮。压力题抓到：多版本口径的 pin 靠字典序（题侧改名已修）、
   跨源真冲突仍没判（#63）、读块授权是全部源（容易乱指）。★ 本阶段不做调优：缺口只报不改。
+- ✅ `#21` 采访前置的上下文归档落地（`acceptance/archive.py`：包一层 client，**壳零改动**）：
+  每次调用存 ① 完整 messages ② 原始输出 ③ 块/轮/阶段 ④ 判据的拒绝理由 ⑤ 请求参数 ⑥ 用量
+  ⑦ 时间戳 ⑧ 工具菜单，JSONL 一行一条、索引 `[block, turn, seq]`。
+  ★ 合并块诊断（离线复现 `task.upstream`）：输入交付是**完整内容 + 逐行 provenance**、缺谁指名
+  `missing: true`；但**没有任何一句**告诉它 23 个异构部件怎么摊成四列，任务级 goal 的三条口径规则
+  （ENT-xx / 合并口径 / 换算成元）在 72 条归档里出现 **0 次**（只经 `task.contract` 可达）
+  → 两处可指名的壳侧调优点，证据见 `.bobanana6/b21/合并块诊断.md`，归类留给采访。
+- ⚠️ `#21` 压力任务 B（代码类，§15.5）**未建**：`produce.py:530` 是唯一写 `Candidate.files={}` 的地方
+  （没有生产者，代码不落盘）、`decompose/` 没有按模块切分的策略 → 编译器/测试这个天然判官（④）与
+  「测试文件被改」（③）都无法判。四攻击面读数 = 建了 0 / 判了 0 / 读了 0；建成所需的三件事写在
+  `acceptance/stress/README.md`。**没有用文本假装代码类**（那等于拿信息类读数冒充压力）。
 - ✅ `#19` 用真模型（`Qwen/Qwen3.5-4B`）把 `#15–#18` 的修复复跑了一遍：A11、具名门**一致**；
   单位归一**不一致**（模型只会照抄，不会换算）；A07 的 context 根因**没走到**（模型不回取就答）。
   据此修了三处真缺陷：单位解析器把小数的小数部分当单位（合法值被误拒）· 部件载荷丢了列的单位 ·
@@ -50,7 +61,7 @@
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 753 passed（不再有 xfail） |
+| `pytest tests/ -q` | ✅ 754 passed（不再有 xfail） |
 | `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |

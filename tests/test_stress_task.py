@@ -91,3 +91,53 @@ def test_the_run_is_never_handed_the_truth(materialised: Path) -> None:
     # ★ 真值确实存在（判分器那一侧），它只是没被交出去
     truth = json.loads((materialised / "truth" / "truth.json").read_text(encoding="utf-8"))
     assert truth["expected_keys"]
+
+
+def test_the_archive_keeps_everything_the_interview_needs(tmp_path: Path) -> None:
+    """★ 归档基建（采访设计 §5）：能原样回放一条上下文，且字段够回答 A1/B1。
+
+    A1 要"逐字抄出来交付要求" → 归档必须存【完整 messages】；
+    B1 要它复述 schema → 同一个 prompt 里就有；④ 拒绝理由单独补一条。
+    """
+    import json
+    from types import SimpleNamespace
+
+    from acceptance.archive import Archive, ArchivingClient, record_verdicts
+    from bobanana6.core.model import ModelResponse
+
+    class _Client:
+        def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+            return ModelResponse(text='{"rows": []}', usage={"prompt_tokens": 7, "completion_tokens": 2})
+
+    archive = Archive(path=tmp_path / "context.jsonl")
+    client = ArchivingClient(client=_Client(), archive=archive, params={"model": "m", "temperature": 0.0})
+    briefing = {"subtask": {"id": "T-24", "output": "panel.csv"}, "authorized_sources": ["s01", "s02"]}
+    messages = [
+        {"role": "system", "content": "Answer with a JSON object ..."},
+        {"role": "user", "content": json.dumps(briefing, ensure_ascii=False)},
+    ]
+    menu = [{"type": "function", "function": {"name": "task.upstream"}}]
+    client.complete(messages, menu, 128)
+    # ④ 判据的拒绝理由：判定器才知道是哪条约束、原话是什么，由调用方交过来
+    written = record_verdicts(
+        archive,
+        {
+            "T-24": SimpleNamespace(
+                failed=("C-fields",), evidence={"C-fields": "missing column 'obligor'"}
+            )
+        },
+    )
+    assert written == 1
+
+    lines = [json.loads(line) for line in (tmp_path / "context.jsonl").read_text(encoding="utf-8").splitlines()]
+    call, rejection = lines[0], lines[1]
+    assert call["block"] == "T-24" and call["phase"] == "produce"
+    assert call["messages"] == messages  # ① 原样，不摘要不截断
+    assert call["output"] == '{"rows": []}'  # ② 原始输出
+    assert call["params"]["model"] == "m" and call["params"]["max_tokens"] == 128  # ⑤ 请求参数
+    assert call["tools"] == menu  # ⑧ 工具菜单：`task.upstream` 在不在菜单里，也是"它看到什么"
+    assert call["usage"]["prompt_tokens"] == 7  # ⑥ 用量
+    assert call["at"] > 0  # ⑦ 时间戳
+    assert rejection["block"] == "T-24"  # ④ 拒绝理由挂在哪个块上
+    assert rejection["constraint"] == "C-fields" and "obligor" in rejection["reason"]  # ④ 拒绝理由原话
+    assert archive.report()["calls"] == 1 and archive.report()["bytes"] > 0

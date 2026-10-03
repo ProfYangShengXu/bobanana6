@@ -1122,6 +1122,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_sources.py::test_the_reader_hands_the_frozen_rows_over_as_data",
         "the reader hands over an empty body and the content check sees nothing",
     ),
+    # -- block 21: the interview prerequisite (the archive keeps it verbatim) -- #
+    Mutation(
+        "B36-archive-drops-the-verbatim-context",
+        "acceptance/archive.py",
+        '            "messages": [dict(message) for message in messages],\n',
+        '            "messages": [],  # mutation: the interview can no longer replay the call\n',
+        "tests/test_stress_task.py::test_the_archive_keeps_everything_the_interview_needs",
+        "A1 can no longer be answered -- there is nothing verbatim to quote",
+    ),
     # -- block 20: the pressure task (heterogeneity, degradation, truth isolation) -- #
     Mutation(
         "B32-truth-reported-as-given-to-the-run",
