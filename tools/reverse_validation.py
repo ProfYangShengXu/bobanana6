@@ -946,8 +946,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "V04-missing-ref-papered-over-with-the-block-id",
         "assemble_impl/produce.py",
-        "        if authorized_sources:\n            reject(\n                \"missing_ref\",",
-        "        if False:\n            reject(\n                \"missing_ref\",",
+        '        if authorized_sources:\n            keys = sorted(str(key) for key in document)',
+        '        if False:\n            keys = sorted(str(key) for key in document)',
         "tests/test_runner.py::test_an_answer_that_cites_no_snapshot_fails_at_the_shape_gate",
         "a missing ref becomes a plausible-looking block id that fails downstream",
     ),
