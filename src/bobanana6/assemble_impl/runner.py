@@ -228,7 +228,7 @@ class Runner:
                 verdicts[subtask.id] = Verdict(
                     ok=False,
                     failed=("runtime",),
-                    evidence={"exit": failed.exit_reason, "errors": "; ".join(failed.errors)},
+                    evidence=self._failure_evidence(failed),
                 )
                 continue
             candidates[subtask.id] = candidate
@@ -402,6 +402,24 @@ class Runner:
             if deliverable.name == name:
                 return deliverable
         return DeliverableSpec(name=name)
+
+    def _failure_evidence(self, failed: BlockRuntimeError) -> dict[str, str]:
+        """Why the block produced nothing -- including a check that rejected it.
+
+        ``exit=degrade_single_agent`` with no further detail answers "it failed"
+        and stops there, which is the phenomenon layer (``AGENTS §5.2``). A
+        withheld candidate was rejected by a *named* constraint, and the judge still
+        holds that verdict, so the report can say which rule and on what facts.
+        """
+        evidence = {"exit": failed.exit_reason, "errors": "; ".join(failed.errors)}
+        judge = self.runtime.last_judge
+        withheld = judge.last_verdict if judge is not None else None
+        if withheld is not None and not withheld.ok:
+            evidence["rejected_by"] = ", ".join(withheld.failed)
+            for constraint_id, fact in sorted(withheld.evidence.items()):
+                if constraint_id in withheld.failed:
+                    evidence[constraint_id] = fact
+        return evidence
 
     def _block_rows(self, plan: SplitPlan) -> tuple[Mapping[str, Any], ...]:
         return tuple(

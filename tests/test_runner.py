@@ -616,3 +616,33 @@ def test_the_summarizer_releases_the_gate_when_it_sends() -> None:
     gate = RuntimeGate()
     assert llm_summarizer(client, gate=gate)(({"role": "user", "content": "x"},)) == "summary"
     assert gate.active("default") == 0  # released, so the next call can go
+
+
+def test_a_withheld_candidate_says_which_check_rejected_it(tmp_path: Path) -> None:
+    """★ "exit=degrade" is the phenomenon; the report has to name the rule.
+
+    The 4B answers valid JSON but never cites the snapshot, so ``C-prov`` rejects
+    it. Without this the report said only ``{'exit': 'degrade_single_agent'}`` and
+    the next reader had to re-run the model to find out why.
+    """
+    source = _csv(tmp_path, "panel.csv", "obligor,pd,amount\nA-1,0.01,100\n")
+    text = """
+task_id: t-prov
+goal: build the panel
+deliverables:
+  - {name: out.csv, schema: {obligor: str, pd: float, amount: float}}
+sources:
+  - {ref: src-1, locator: SOURCE_CSV}
+constraints:
+  hard:
+    - {id: C-rows, kind: presence, target: "*", spec: {min_rows: 1}, rationale: "no empty panels"}
+    - {id: C-prov, kind: provenance, target: out.csv, spec: {min_coverage: 0.95}, rationale: "values must be traceable"}
+""".replace("SOURCE_CSV", str(source))
+    # valid JSON, rows present, but no "ref": exactly what the 4B produced
+    client = ScriptedClient([{"text": json.dumps({"rows": [{"obligor": "A-1"}]})}])
+    result = _runner(tmp_path, text, client).run()
+
+    evidence = result.verdicts["T-01"].evidence
+    assert evidence["rejected_by"] == "C-prov"
+    assert "coverage 0.0000" in evidence["C-prov"]
+    assert "unknown snapshots" in evidence["C-prov"]

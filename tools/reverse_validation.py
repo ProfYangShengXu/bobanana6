@@ -918,6 +918,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_arch_guard.py::test_core_does_not_import_the_mid_layer",
         "an arrow points from core/ back at the mid layer (AGENTS.md 1.2)",
     ),
+    Mutation(
+        "Z09-rejected-candidate-has-no-reason",
+        "assemble_impl/runner.py",
+        '            evidence["rejected_by"] = ", ".join(withheld.failed)',
+        '            pass  # mutation: the report stops at the phenomenon layer',
+        "tests/test_runner.py::test_a_withheld_candidate_says_which_check_rejected_it",
+        "a withheld candidate is reported as 'it failed' without naming the rule",
+    ),
     # -- structured output: three layers, and the feedback that reaches the model -- #
     Mutation(
         "Z01-recovery-text-never-reaches-the-transcript",
