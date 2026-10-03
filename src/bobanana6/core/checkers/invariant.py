@@ -45,6 +45,11 @@ _CONSTANTS = {"true": True, "false": False, "none": None}
 class InvariantError(ValueError):
     """The expression is outside the allowed subset or references unknown data."""
 
+    #: The *constraint* is malformed, not the data it is judging: the request
+    #: shape has to change before anything is worth re-running.
+    #: Declared here rather than inferred from wording (see agentloop/errors.py).
+    reason = "format_error"
+
 
 def evaluate(expression: str, row: Mapping[str, Any]) -> Any:
     try:

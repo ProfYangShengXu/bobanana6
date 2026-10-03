@@ -30,6 +30,10 @@ class SourceError(RuntimeError):
     the difference is exactly what a provenance check is supposed to catch.
     """
 
+    #: Declared: one source being unreachable says nothing about the block, so the
+    #: answer is to read a different source rather than to re-ask the worker.
+    reason = "switch_source"
+
 
 @dataclass(frozen=True)
 class SnapshotStore:

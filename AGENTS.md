@@ -23,8 +23,8 @@
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 631 passed |
-| `pytest -m arch_guard -q` | ✅ 35 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
+| `pytest tests/ -q` | ✅ 641 passed |
+| `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |
 
@@ -288,6 +288,15 @@ uv run bobanana6 run task.yaml            # 端到端
 
 ⑪ 内部标识别用 id()
    幂等标记挂 dict/weakref，CPython 地址复用会误判。
+
+⑫ 错误分类别靠消息字符串 —— 谁来「说」自己的错，谁来「判」它的类
+   实测教训：同一个异常类，只因为消息里带不带类名，分类结果完全相反
+   （`CandidateFormatError` 的名字里恰好有 "Format"，`str()` 里没有）。
+   → 自定义异常在类上标 `reason = <FailoverReason 或 BobananaAction 的值>`；
+     `agentloop/errors.py` 先读它，再退回状态码 / 类名 / 词表。
+   → 词表是【兜底】（第三方异常我们标注不了），别再往词表里加词当修法。
+   → 新增自定义异常忘了标注不会报错，只会悄悄退回兜底 ——
+     所以有一条守卫在扫全仓的 `reason = "..."` 是否都在词表里。
 ```
 
 ---

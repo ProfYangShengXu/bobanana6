@@ -66,6 +66,12 @@ def _name_of(calls: Sequence[ToolCall], call_id: str) -> str:
 class CandidateFormatError(ValueError):
     """The model's answer could not be read as a candidate."""
 
+    #: ★ Declared: retrying the identical request cannot fix a malformed answer.
+    #: Without this the message was matched against a word list, and
+    #: "the answer is not JSON" matched nothing -> ``unknown`` -> ``retry_local``,
+    #: which burned the budget re-sending the same request.
+    reason = "format_error"
+
 
 def tool_schemas(toolset: ToolSet) -> list[dict[str, Any]]:
     """The advertised tool surface, in the shape a model expects."""

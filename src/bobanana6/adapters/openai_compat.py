@@ -48,7 +48,13 @@ class LLMError(RuntimeError):
 
 
 class LLMConnectionError(LLMError):
-    """The request never reached a server (the name is read by the classifier)."""
+    """The request never reached a server.
+
+    Declared as the retryable network case: the vocabulary has no separate
+    "connection" reason, and ``timeout`` is the one that maps to a local retry.
+    """
+
+    reason = "timeout"
 
 
 class LLMConfigError(RuntimeError):

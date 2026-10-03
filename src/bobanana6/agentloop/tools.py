@@ -73,6 +73,10 @@ class ToolResult:
 class ToolCallError(ValueError):
     """The arguments are unusable. They are never repaired -- see the module docstring."""
 
+    #: The call's shape is wrong, so the caller must change it -- re-sending the
+    #: same bytes produces the same refusal.
+    reason = "format_error"
+
 
 def parse_tool_arguments(raw_arguments: Any) -> Mapping[str, Any]:
     """Parse model-emitted arguments without repairing or coercing them."""

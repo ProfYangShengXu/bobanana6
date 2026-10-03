@@ -24,6 +24,10 @@ __all__ = ["SandboxError", "SandboxSpec", "WorkerSandbox", "allocate"]
 class SandboxError(RuntimeError):
     """Isolation could not be established -- refuse rather than degrade."""
 
+    #: Not a transient fault and not about the answer: this host cannot run the
+    #: block, so re-asking it here is pointless -- change worker/provider.
+    reason = "switch_source"
+
 
 @dataclass(frozen=True)
 class SandboxSpec:

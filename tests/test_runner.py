@@ -318,11 +318,23 @@ def test_a_broken_tool_reaches_the_attribution_as_a_tool_blame(tmp_path: Path) -
 
 
 def test_a_malformed_answer_fails_the_block_without_building_a_candidate(tmp_path: Path) -> None:
+    """★ The measured chain, end to end.
+
+    A non-JSON answer used to classify as ``unknown`` -> ``retry_local``: the loop
+    re-sent the identical request, got the identical failure, and only stopped when
+    the budget ran out -- ``evidence.errors`` held two copies of the same error.
+    Now the declared reason (``format_error``) routes it to ``fix_constraint``, so
+    the block stops on the first failure with a named exit instead of burning the
+    budget. The handler for that action is *not* built yet (it is the next block's
+    job: re-feed the failure and let the answer change).
+    """
     source = _csv(tmp_path, "panel.csv", "obligor,pd,amount\nA-1,0.01,100\n")
     client = ScriptedClient([{"text": "the panel is probably fine"}])
     result = _runner(tmp_path, ONE_SOURCE.replace("SOURCE_CSV", str(source)), client).run()
     assert result.ok is False
     assert result.candidates == {}
+    assert result.verdicts["T-01"].evidence["exit"] == "fix_constraint"
+    assert len(client.calls) == 1  # one produce call: no identical re-send
 
 
 # --------------------------------------------------------------------------- #

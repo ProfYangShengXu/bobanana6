@@ -41,6 +41,10 @@ Shapes:
 class OntologyDraftError(RuntimeError):
     """The draft could not be read as an ontology document."""
 
+    #: The answer came back in the wrong shape, so the next attempt must be told
+    #: what was wrong instead of being sent the identical request again.
+    reason = "format_error"
+
 
 @dataclass(frozen=True)
 class FileOntology:

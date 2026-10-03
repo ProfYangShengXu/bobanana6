@@ -827,3 +827,72 @@ def test_assembly_point_guard_detects_a_violation() -> None:
     assert constructed_names("x = Port()") == ("Port",)
     # a *reference* is not a construction: passing a class around stays legal
     assert "OpenAICompatibleClient" not in constructed_names("from a import OpenAICompatibleClient")
+
+
+# --------------------------------------------------------------------------- #
+# ★ Declared failure reasons: the vocabulary is checked, so a typo cannot ship
+#
+# ``agentloop/errors.py`` reads ``<Exception>.reason`` before it infers anything
+# from a class name or from wording. An unreadable label is ignored at runtime
+# (a typo must not decide the recovery action), which means a typo would be
+# *silent* -- this guard is what makes it loud.
+# --------------------------------------------------------------------------- #
+
+
+def declared_reasons(source: str) -> dict[str, str]:
+    """Class-body ``reason = "<literal>"`` declarations, keyed by class name."""
+    found: dict[str, str] = {}
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for statement in node.body:
+            if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+                continue
+            target = statement.targets[0]
+            value = statement.value
+            if (
+                isinstance(target, ast.Name)
+                and target.id == "reason"
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            ):
+                found[node.name] = value.value
+        for statement in node.body:
+            # A typed declaration must not escape the guard either.
+            if not isinstance(statement, ast.AnnAssign) or not isinstance(statement.target, ast.Name):
+                continue
+            if statement.target.id != "reason" or statement.value is None:
+                continue
+            value = statement.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                found[node.name] = value.value
+    return found
+
+
+def test_every_declared_reason_is_in_the_vocabulary() -> None:
+    from bobanana6.agentloop.errors import BobananaAction, FailoverReason
+
+    # Either vocabulary is legal: a label may name a reason, or an action when the
+    # 22 reasons have no entry for that failure. Both are checked here so neither
+    # can hold a typo.
+    allowed = {reason.value for reason in FailoverReason} | {action.value for action in BobananaAction}
+    root = REPO / "src" / "bobanana6"
+    declared: dict[str, str] = {}
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        for name, value in declared_reasons(path.read_text(encoding="utf-8")).items():
+            declared[name] = value
+    assert len(declared) >= 6, f"the guard found almost nothing to check: {declared}"
+    offenders = sorted(f"{name} = {value!r}" for name, value in declared.items() if value not in allowed)
+    assert offenders == [], f"declared reason values outside the vocabulary: {offenders}"
+    # The two the measured failure chain depends on.
+    assert declared["CandidateFormatError"] == "format_error"
+    assert declared["SourceError"] == "switch_source"
+    assert declared["ToolCallError"] == "format_error"
+
+
+def test_the_declared_reason_guard_detects_a_typo() -> None:
+    assert declared_reasons('class E(Exception):\n    reason = "fmt_error"') == {"E": "fmt_error"}
+    assert declared_reasons('class E(Exception):\n    reason = LOCALLY_DEFINED') == {}
+    assert declared_reasons("class E(Exception):\n    reason: str = 'format_error'") == {"E": "format_error"}

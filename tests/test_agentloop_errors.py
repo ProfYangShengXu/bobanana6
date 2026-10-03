@@ -206,3 +206,122 @@ def test_status_code_and_message_are_read_off_the_exception() -> None:
     result = classify_error(ApiError("context length exceeded", status_code=429))
     assert result.reason == "context_overflow"
     assert result.detail == "context length exceeded"
+
+
+# --------------------------------------------------------------------------- #
+# ★ declared semantics come first, wording is the fallback
+# --------------------------------------------------------------------------- #
+
+
+class BadAnswer(Exception):
+    """A local exception that *declares* what it is."""
+
+    reason = "format_error"
+
+
+class Mislabelled(Exception):
+    """A typo in the label must not decide the recovery action."""
+
+    reason = "fmt_error"
+
+
+class ReadTimeoutWithALabel(Exception):
+    """The class name says timeout; the declaration says otherwise."""
+
+    reason = "format_error"
+
+
+def test_a_declared_reason_outranks_the_wording() -> None:
+    """★ The raiser knows why it failed, so the message does not get a vote."""
+    result = classify_error(BadAnswer("HTTP 429 rate limit exceeded"))
+    assert result.reason == "format_error"
+    assert result.action is BobananaAction.FIX_CONSTRAINT
+
+
+def test_a_declared_reason_outranks_the_class_name() -> None:
+    result = classify_error(ReadTimeoutWithALabel("read timed out"))
+    assert result.reason == "format_error"
+
+
+def test_an_unreadable_label_is_ignored_not_honoured() -> None:
+    """A typo must not become a reason; the message fallback still applies."""
+    assert classify_error(Mislabelled("rate limit exceeded")).reason == "rate_limit"
+    assert classify_error(Mislabelled("something entirely unfamiliar")).reason == "unknown"
+
+
+def test_an_exception_without_a_label_still_uses_the_message_fallback() -> None:
+    """★ Third-party exceptions cannot be annotated -- the table stays for them."""
+    assert classify_error(RuntimeError("HTTP 429 rate limit exceeded")).reason == "rate_limit"
+    assert classify_error(RuntimeError("bad request")).reason == "format_error"
+
+
+def test_the_measured_failure_chain_classifies_as_measured() -> None:
+    """★ The four lines from the real run, pinned.
+
+    Before the fix, line 1 was ``unknown/retry_local`` -- because
+    ``CandidateFormatError``'s class *name* happened to contain "Format" while its
+    ``str()`` did not. The same class, two different classifications, depending on
+    how the caller spelled the message.
+    """
+    from bobanana6.assemble_impl.produce import CandidateFormatError
+
+    bare = classify_error(CandidateFormatError("the answer is not JSON: Expecting value: line 1 column 1 (char 0)"))
+    assert (bare.reason, bare.action) == ("format_error", BobananaAction.FIX_CONSTRAINT)
+
+    labelled = classify_error(
+        CandidateFormatError("produce: CandidateFormatError: the answer is not JSON: Expecting value")
+    )
+    assert (labelled.reason, labelled.action) == ("format_error", BobananaAction.FIX_CONSTRAINT)
+
+    # An unannotated third-party class is still on the fallback path: this is the
+    # honest answer, not a gap we can close from here.
+    import jsonschema
+
+    assert classify_error(jsonschema.ValidationError("output does not match schema")).reason == "unknown"
+
+    throttled = classify_error(RuntimeError("HTTP 429 rate limit exceeded"))
+    assert (throttled.reason, throttled.action) == ("rate_limit", BobananaAction.RETRY_LOCAL)
+
+
+def test_the_project_exceptions_declare_their_reason() -> None:
+    """Every local exception that reaches the loop says what it is."""
+    from bobanana6.adapters import LLMConnectionError, OntologyDraftError
+    from bobanana6.agentloop.sandbox import SandboxError
+    from bobanana6.agentloop.tools import ToolCallError
+    from bobanana6.assemble_impl.produce import CandidateFormatError
+    from bobanana6.core.checkers.invariant import InvariantError
+    from bobanana6.sources import SourceError
+
+    assert CandidateFormatError.reason == "format_error"
+    assert ToolCallError.reason == "format_error"
+    assert InvariantError.reason == "format_error"
+    assert OntologyDraftError.reason == "format_error"
+    assert SourceError.reason == "switch_source"
+    assert SandboxError.reason == "switch_source"
+    assert LLMConnectionError.reason == "timeout"
+    # ★ These two keep structured signals instead of a label: the status code is
+    #   richer than any single reason (429 + overflow wording is not rate_limit).
+    from bobanana6.adapters import LLMError
+
+    assert not hasattr(LLMError, "reason")
+    assert classify_error(LLMError("rate limit", status_code=429)).reason == "rate_limit"
+
+
+def test_declared_failure_reads_the_label_and_ignores_the_rest() -> None:
+    from bobanana6.agentloop.errors import declared_failure
+
+    assert declared_failure(BadAnswer("x")) is FailoverReason.FORMAT_ERROR
+    assert declared_failure(ReadTimeout("x")) is None  # name only, no label
+    assert declared_failure(Exception()) is None
+
+
+def test_a_label_may_name_an_action_when_no_reason_fits() -> None:
+    """★ The 22 reasons have no "source unreachable"; naming the action is honest,
+    inventing a reason would not be."""
+    from bobanana6.sources import SourceError
+
+    result = classify_error(SourceError("source 'src-1': cannot read /x: No such file"))
+    assert result.action is BobananaAction.SWITCH_SOURCE
+    assert result.reason == "switch_source"  # the action's own name, not a fake reason
+    assert result.retryable is True  # switch, do not abort
+    assert result.should_compress is False

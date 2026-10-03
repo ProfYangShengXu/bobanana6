@@ -26,12 +26,14 @@ from enum import StrEnum
 from typing import Any
 
 __all__ = [
+    "DECLARED_REASON_ATTRIBUTE",
     "PROGRESS_RULER",
     "REASON_ACTION",
     "BobananaAction",
     "ClassifiedError",
     "FailoverReason",
     "classify_error",
+    "declared_failure",
     "progress_ruler",
 ]
 
@@ -235,12 +237,51 @@ def _cause_chain(error: Any, limit: int = 8) -> tuple[str, ...]:
     return tuple(chain)
 
 
-def _by_transport(error: Any, message: str) -> FailoverReason | None:
-    name = type(error).__name__ if error is not None else ""
-    if "Timeout" in name or "Connection" in name or _has(message, _TIMEOUT_SIGNALS):
-        return FailoverReason.TIMEOUT
+#: The attribute an exception declares its own reason with.
+#: ★ Read first: whoever raises a failure knows *why* it happened. Everything
+#: below this line is inference -- from a class name, then from wording -- and
+#: inference is what made the same exception classify two different ways
+#: depending on whether the caller happened to include the class name in the
+#: message (``CandidateFormatError`` matched ``_FORMAT_SIGNALS`` by coincidence,
+#: a class named ``BadAnswer`` would not have).
+DECLARED_REASON_ATTRIBUTE = "reason"
+
+
+def declared_failure(error: Any) -> FailoverReason | BobananaAction | None:
+    """What the raiser labelled itself with, or ``None`` if it did not label.
+
+    The label may name a **reason** (the usual case) or an **action**. The action
+    form exists because the 22-reason vocabulary has no entry for some failures --
+    "the data source is unreachable" is not one of them -- and inventing a reason
+    would put a lie in the field attribution reads. Naming the action says exactly
+    what the raiser knows and nothing more.
+
+    An unreadable label is *ignored* rather than honoured: a typo must not decide
+    the recovery action. ``test_every_declared_reason_is_in_the_vocabulary`` is
+    what keeps a typo from shipping in the first place.
+    """
+    label = getattr(error, DECLARED_REASON_ATTRIBUTE, None)
+    if isinstance(label, (FailoverReason, BobananaAction)):
+        return label
+    if isinstance(label, str):
+        for enum in (FailoverReason, BobananaAction):
+            try:
+                return enum(label)
+            except ValueError:
+                continue
     return None
 
+
+def _by_type(error: Any) -> FailoverReason | None:
+    """Fallback: the class **name**.
+
+    Local exceptions declare a reason instead; this exists for exception types we
+    do not own and cannot annotate.
+    """
+    name = type(error).__name__ if error is not None else ""
+    if "Timeout" in name or "Connection" in name:
+        return FailoverReason.TIMEOUT
+    return None
 
 def _by_status(status: int, message: str) -> FailoverReason | None:
     # (2) Priority is load-bearing -- the branches below are ordered, not equal.
@@ -353,21 +394,48 @@ def classify_error(
 
     ``status_code`` / ``message`` override what is read off ``error``, which is
     what makes the ordering rules testable without a provider SDK.
+
+    ★ Priority, most authoritative first:
+
+      1. what the exception **declares** (:data:`DECLARED_REASON_ATTRIBUTE`):
+         a reason, or an action when no reason fits -- the raiser knows why it
+         failed, so it gets to say so;
+      2. the provider's **status code**, which is structured data from the other
+         side and carries its own ordering rules (413 before generic 4xx, ...);
+      3. the exception's **class name**;
+      4. the **wording** of the message -- a fallback for third-party exceptions
+         that cannot be annotated, kept because dropping it would lose the
+         provider quirks the tables below encode;
+      5. ``unknown``, which is retryable and never guesses a blame.
+
+    Stages 3-4 are *fallbacks by construction*: they infer a cause from a name or
+    from prose, so the same failure can classify differently depending on how the
+    caller spelled the message. Anything local can and should declare instead.
     """
     status = status_code if status_code is not None else _status_of(error)
     text = (message if message is not None else _message_of(error)).lower()
-    reason = (
-        (_by_status(status, text) if status is not None else None)
-        or _by_transport(error, text)
-        or _by_message(text)
-        or FailoverReason.UNKNOWN
-    )
-    action = REASON_ACTION.get(reason, _UNKNOWN_ACTION)
+    declared = declared_failure(error)
+    if isinstance(declared, BobananaAction):
+        # The label named an action, not a reason: keep the action, and say so in
+        # ``reason`` instead of inventing a reason that would not be true.
+        reason: FailoverReason | None = None
+        action = declared
+        reason_text = declared.value
+    else:
+        reason = (
+            declared
+            or (_by_status(status, text) if status is not None else None)
+            or _by_type(error)
+            or _by_message(text)
+            or FailoverReason.UNKNOWN
+        )
+        action = REASON_ACTION.get(reason, _UNKNOWN_ACTION)
+        reason_text = reason.value
     return ClassifiedError(
-        reason=reason.value,
+        reason=reason_text,
         action=action,
         retryable=action is not BobananaAction.ABORT,
-        should_compress=reason in _COMPRESSIBLE,
+        should_compress=reason in _COMPRESSIBLE if reason is not None else False,
         detail=message if message is not None else _message_of(error),
         cause_chain=_cause_chain(error),
     )
