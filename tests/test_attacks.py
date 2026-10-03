@@ -81,13 +81,22 @@ def test_the_report_keeps_the_three_steps_apart() -> None:
 
 
 def test_an_injection_that_breaks_is_a_miss_not_a_pass() -> None:
-    from acceptance.inject.attacks import AttackOutcome
+    from acceptance.inject.attacks import AttackOutcome, Observation
 
     attack = load_attacks()[0]
     broken = AttackOutcome(attack=attack, error="RuntimeError: boom")
     assert broken.observation is None
     assert broken.found == MISS and broken.blame_step == MISS and broken.action_step == MISS
     assert "raised" in broken.evidence[0]
+
+    # ★ 真分支：注入器自己炸了 —— 只有经 run_attacks 才走得到（直接构造 AttackOutcome 走不到）
+    def boom() -> Observation:
+        raise RuntimeError("boom")
+
+    row = attack.id
+    outcome = next(o for o in run_attacks(only=[row], injectors={row: boom}) if o.attack.id == row)
+    assert outcome.found == MISS and outcome.blame_step == MISS and outcome.action_step == MISS
+    assert "raised" in outcome.evidence[0] and "RuntimeError" in outcome.evidence[0]
 
 
 def test_only_runs_what_was_asked_for() -> None:
@@ -223,3 +232,48 @@ def test_a11_the_executor_reports_the_gap_as_a_miss() -> None:
     outcome = _outcome("A11")
     assert outcome.found == MISS
     assert "30" in " ".join(outcome.evidence)
+
+
+def test_a_pure_merge_block_can_cite_any_registered_snapshot() -> None:
+    """★★ 缺口看门狗（夜报 #13 报的「纯合并块假 ref」）。
+
+    纯合并块 `authorized_sources` 为空，`produce.py` 里那条 `unknown_ref` 守卫
+    （`elif authorized_sources and snapshot_ref not in authorized_sources`）**整个不生效**：
+    模型写什么 ref 都收下，而且它会成为 `candidate.source_id`。只要那个名字在快照
+    注册表里，链就报 coverage=1.0 / 无 breaks —— ref 证明的只是「这个名字存在」，
+    不是「这些行来自它」；换来一个没注册的名字才会被抓。等「合并块只能引用它真正
+    拉过的上游」落地，本测试会红 → 升级成正式断言。
+    """
+    from bobanana6.assemble_impl.produce import parse_candidate
+    from bobanana6.core.model import Snapshot, Subtask
+    from bobanana6.core.provenance import validate_points
+
+    merge = Subtask(
+        id="T-04",
+        goal="merge the parts",
+        inputs=("part-panel-a.csv",),
+        output="panel.csv",
+        contract_ref="panel",
+        axis="field",
+        mode="write",
+    )
+    candidate = parse_candidate(
+        '{"ref": "panel-b", "rows": [{"obligor": "A-001"}]}',
+        subtask=merge,
+        source_id="T-04",
+        authorized_sources=(),  # ★ 纯合并：没有任何被授权的快照
+    )
+    # 它只拉过 part-panel-a.csv，却说自己来自 panel-b —— 没人质疑
+    assert candidate.source_id == "panel-b"
+    assert {p.snapshot_ref for p in candidate.provenance} == {"panel-b"}
+
+    registry = {
+        "panel-a": Snapshot(ref="panel-a", body_path=Path("/nonexistent/panel-a.csv"), captured_at="T0"),
+        "panel-b": Snapshot(ref="panel-b", body_path=Path("/nonexistent/panel-b.csv"), captured_at="T0"),
+    }
+    required = tuple(p.value_ref for p in candidate.provenance)
+    assert validate_points(required, candidate.provenance, registry).ok, "名字在注册表里 → 链判为可达"
+
+    # 反证：同一条链只在名字【没注册】时才断 —— 今天查的就只有名字
+    broken = validate_points(required, candidate.provenance, {"panel-a": registry["panel-a"]})
+    assert not broken.ok and broken.breaks[0].missing_snapshot == "panel-b"

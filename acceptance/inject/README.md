@@ -52,6 +52,13 @@ run_attacks(only=["A11-provenance-content"])
 
 **它不需要 ground truth**（快照就在系统手里），所以它是**系统内可判**的缺口。
 
+**同一个缺口的第二个读数（夜报 #13 报的「纯合并块假 ref」）**：
+纯合并块的 `authorized_sources` 为空，`produce.py` 里那条 `unknown_ref` 守卫就**整个不生效** ——
+它写什么 `ref` 都收下，还会变成 `candidate.source_id`。只要那个名字在注册表里，
+链就报 coverage=1.0；换成没注册的名字才会被抓。
+看门狗：`tests/test_attacks.py::test_a_pure_merge_block_can_cite_any_registered_snapshot`
+（证明它会红：变体 T10 把守卫改成对空集也生效 = 模拟修好，测试必须转红）。
+
 **验收证据是两条，同一个事实的两个读数**：
 
 ```
@@ -101,7 +108,9 @@ A08 期望的「装配拒绝」不在 `EXIT_KINDS` 里（它是装配口径，�
 
 ## ★ 反向验证（`tools/reverse_validation.py`）
 
-全绿树上 **172 变体 / 172 被抓住 / 0 漏网**，每条变体一个见证测试，跑完原样还原。
+全绿树上 **186 变体 / 186 被抓住 / 0 漏网**，每条变体一个见证测试，跑完原样还原。
+本块新增的每个测试（执行器结构 / 11 条读数 / A11 两个读数 / 判分器与 harness 纪律）
+都各有一条见证变体 —— 没有「写了但从证明不了会红」的测试。
 两条纪律是血换的：
 
 - **见证测试必须执行被改的那一行**。T02 一开始指向 `test_every_row_in_the_table_has_an_injector`，
