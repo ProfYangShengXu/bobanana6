@@ -203,12 +203,14 @@ def build_toolset(
     fetched: Mapping[str, Snapshot],
     upstream: Mapping[str, Mapping[str, Any]],
     checks: BoundChecks,
+    inherited_sources: tuple[str, ...] = (),
 ) -> ToolSet:
     """Bind the tool surface to one block.
 
     ``sources.snapshot`` is granted when the block's axis says its material comes
     from sources (``axis == "source"``); the declared-input permission is
-    ``subtask.inputs`` and nothing else.
+    ``subtask.inputs`` and nothing else. ``inherited_sources`` are the snapshots
+    the declared inputs came from (a merge block cites those, never its own).
     """
     sources = BoundSources(authorized=authorized, fetched=fetched) if subtask.axis == "source" else None
     return ToolSet(
@@ -218,6 +220,7 @@ def build_toolset(
         check=checks,
         sources=sources,
         allowed_inputs=subtask.inputs,
+        inherited_sources=inherited_sources,
     )
 
 

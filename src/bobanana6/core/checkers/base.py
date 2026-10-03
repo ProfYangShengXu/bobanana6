@@ -22,6 +22,7 @@ from ..model import (
     Limits,
     Ontology,
     Snapshot,
+    SnapshotBody,
 )
 
 __all__ = [
@@ -40,6 +41,9 @@ class CheckContext:
 
     ontology: Ontology | None = None
     snapshots: Mapping[str, Snapshot] = field(default_factory=dict)
+    #: ref -> the frozen rows, read by the outside reader (A11). Empty means the
+    #: content check degrades to the name check; it never means "verified".
+    snapshot_bodies: Mapping[str, SnapshotBody] = field(default_factory=dict)
     unmapped_fields: frozenset[str] = frozenset()
     # concept_id -> unit symbol declared by a peer block, for cross-block units.
     peer_units: Mapping[str, str] = field(default_factory=dict)

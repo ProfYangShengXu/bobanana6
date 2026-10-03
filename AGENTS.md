@@ -23,13 +23,15 @@
   `PROGRESS_RULER` 无读者（没有跨 turn 的「无进展检测」）；`ArbiterPort` 无实作
   （分歧只记录、不自动补约束）。三条都写在 `agentloop/README.md` 的清单里。
 - ⚠️ 判定缺口（`acceptance/inject/README.md` 有逐条读数，**不是代码残留，是判定器看不见的东西**）：
-  缺失与被填平的 `0` 同形（A04）· `unit_consistency` 只比声明不比值（A10）· `target="*"` 在多块装配下
-  永远「找不到产物」（A08）· 三条不同根因拿到同一个 blame（A07 假归因）· 溯源引用只查名字不查
-  引用行是否存在（A11，`tests/test_attacks.py` 的 strict xfail 是它的红证据）。
+  `target="*"` 在多块装配下永远「找不到产物」（A08，留给下一块）· 口径不一致要到 compare 期
+  才被发现（A02，时序）· 持久故障的出口是前置门拒跑而非降级（A06，出口选择）。
+- ✅ `#16` 已收口的四条判定缺口：缺失成为一等状态 `MISSING`（A04）· 单位检查读**值里的单位**（A10）·
+  归因读**自带病因**、两层互相指认则 `unknown`（A07）· 溯源经 `SnapshotReader` 端口逐点重放
+  —— 引用的行要在、值要对得上（A11）。四条都有修前/修后对照读数。
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 713 passed, 1 xfailed（xfail = A11 缺口，修好会 XPASS 变红） |
+| `pytest tests/ -q` | ✅ 729 passed（`#16` 修完 A11 后那条 xfail 已升级成正式断言，不再有 xfail） |
 | `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |

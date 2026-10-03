@@ -229,8 +229,10 @@ class _ScriptedBlocks:
     真模型那一侧见交付报告。
     """
 
-    def __init__(self, *, break_one_read: bool = False) -> None:
+    def __init__(self, *, break_one_read: bool = False, invent_rows: int = 0) -> None:
         self.break_one_read = break_one_read
+        #: ★ A11 的对照开关：读块"编"出这么多行（真值只有 3 行），全部引用自己的快照。
+        self.invent_rows = invent_rows
         self.calls: list[str] = []
 
     def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
@@ -262,6 +264,8 @@ class _ScriptedBlocks:
         rows = snapshot.get("rows", [])
         if self.break_one_read and block == "T-01":
             rows = []
+        if self.invent_rows and block == "T-01":
+            rows = [{"obligor": f"X{i}", "pd": "0.1", "amount": "1"} for i in range(self.invent_rows)]
         return ModelResponse(
             text=json.dumps({"ref": snapshot.get("ref", ""), "rows": rows, "columns": snapshot.get("columns", [])})
         )
@@ -348,6 +352,34 @@ def test_the_scripted_multi_block_run_reaches_assembly() -> None:
     assert run.report.assembly_passed is True, run.assembly_codes
     assert run.plan_shape == "pipeline" and len(run.blocks) == 4
     assert run.report.coverage["deliver"] == "hit"
+
+
+def test_a_fabricated_answer_is_only_caught_once_the_chain_reads_the_snapshot(monkeypatch) -> None:
+    """★★ A11 的离线端到端对照：**同一道题、同一个客户端**，只有尺子不同。
+
+    读块编 30 行（真值只有 3 行），全部引用自己的快照：
+      · 修前（链只查名字：没有快照内容）→ 4 块全过、装配通过、exit passed
+      · 修后（链逐点重放）→ 合并块被 C-prov 拦下，并把 row=3 点到名
+    """
+    from bobanana6.assemble_impl.runner import Runner
+
+    task_dir = ACCEPTANCE / "main" / "panel-three-sources"
+    # 修前读数：把「有没有快照内容」关掉 = 这一版之前的链（只查名字）
+    monkeypatch.setattr(Runner, "_snapshot_bodies", lambda self, snapshots: {})
+    before = run_task(task_dir, client=_ScriptedBlocks(invent_rows=30), env={})
+    assert before.report.block_pass_rate == 1.0, before.report.render()
+    assert before.report.assembly_passed is True, before.assembly_codes
+    assert "invented 0" not in " ".join(before.report.notes), before.report.notes
+
+    # 修后读数：同一个客户端、同一道题，链能读到快照内容
+    monkeypatch.undo()
+    after = run_task(task_dir, client=_ScriptedBlocks(invent_rows=30), env={})
+    assert after.report.block_pass_rate < 1.0, after.report.render()
+    assert after.report.assembly_passed is False, after.assembly_codes
+    facts = " ".join(str(verdict.evidence.get("C-prov", "")) for verdict in after.verdicts.values())
+    # ★ 两种证伪都点到名：引用的行不存在（3 行的快照被引到第 10 行）、值也对不上
+    assert "holds 3 row(s)" in facts, facts
+    assert "does not match snapshot" in facts, facts
 
 
 def test_a_block_that_produces_nothing_is_named_by_the_assembly() -> None:

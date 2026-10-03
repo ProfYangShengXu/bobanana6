@@ -109,8 +109,50 @@ class Attribution:
             raise ValueError("blame=None must pair with confidence='unknown' and vice versa")
 
 
-def _unknown(failure: str, experiment: str) -> Attribution:
-    return Attribution(failure=failure, blame=None, evidence=(), experiment=experiment, confidence="unknown")
+def _unknown(failure: str, experiment: str, evidence: tuple[Event, ...] = ()) -> Attribution:
+    return Attribution(failure=failure, blame=None, evidence=evidence, experiment=experiment, confidence="unknown")
+
+
+#: What the separation experiment declares, when it was run.
+_EXPERIMENT_BLAME: Mapping[Experiment, str] = {
+    Experiment.HUMAN_CANNOT_ANSWER: Blame.CONTEXT,
+    Experiment.HUMAN_CAN_ANSWER: Blame.MODEL,
+    Experiment.HUMAN_DIFFERS: Blame.MODEL,
+}
+
+
+def _trace_declarations(events: tuple[Event, ...]) -> dict[str, list[Event]]:
+    """Which layers said "this one is mine" (``AGENTS.md §7⑫``).
+
+    A bare symptom is not a declaration: "some tool returned ``ok=False``" says
+    nothing about *why* the block could not compute. Only the party that owns the
+    failure may declare it -- the tool marks a deterministic failure, the judge
+    marks the constraint it rejected, and any layer may say so explicitly with
+    ``detail["cause"]``. Everything is read off the event, never guessed from a
+    message string.
+    """
+    declared: dict[str, list[Event]] = {}
+    for event in events:
+        cause = event.detail.get("cause")
+        if not isinstance(cause, str) or cause not in BLAME_KINDS:
+            if event.kind == "tool_result" and not event.ok and event.detail.get("deterministic") is True:
+                cause = Blame.TOOL
+            elif event.kind == "gate_check" and event.detail.get("constraint_rejected") is True:
+                cause = Blame.CONSTRAINT
+            else:
+                continue
+        declared.setdefault(cause, []).append(event)
+    return declared
+
+
+def _declared_confidence(blame: str, evidence: list[Event], events: tuple[Event, ...], experiment: Experiment) -> str:
+    """``proven`` only when the declaring party is the experiment, or when a tool
+    failure says it is deterministic. A bare declaration is ``likely``."""
+    if _EXPERIMENT_BLAME.get(experiment) == blame:
+        return "proven"
+    if any(event.kind == "tool_result" and event.detail.get("deterministic") is True for event in evidence):
+        return "proven"
+    return "likely"
 
 
 def attribute(
@@ -123,23 +165,47 @@ def attribute(
 
     Without a trajectory there is nothing to attach as evidence, so the answer
     is ``unknown`` even if an experiment was run -- requirement (1) outranks
-    having an opinion. Tool failures are read from the trace first (a broken
-    tool is the proximate cause), then a constraint rejection, then the
-    experiment distinguishes model from context.
+    having an opinion.
+
+    Declared causes decide first (``_trace_declarations`` + the experiment). If
+    two layers each declare themselves the cause, the answer is ``unknown``: a
+    coin flip between two blames is exactly the guess this layer must not make.
+    Only when nobody declares anything does the bare-symptom fallback run, in the
+    order the spec gives: a tool failure, then a constraint rejection.
     """
     events = tuple(trace)
     if not events:
         return _unknown(failure, experiment.value)
 
+    declared = _trace_declarations(events)
+    experiment_blame = _EXPERIMENT_BLAME.get(experiment)
+    if experiment_blame is not None:
+        declared.setdefault(experiment_blame, []).extend(events)
+
+    if len(declared) > 1:
+        evidence = tuple(sorted((event for events_of_layer in declared.values() for event in events_of_layer), key=lambda e: e.seq))
+        return _unknown(failure, "conflict", evidence)
+
+    if declared:
+        blame, evidence = next(iter(declared.items()))
+        experiment_name = experiment.value if experiment_blame == blame else "trace"
+        return Attribution(
+            failure=failure,
+            blame=blame,
+            evidence=tuple(evidence),
+            experiment=experiment_name,
+            confidence=_declared_confidence(blame, evidence, events, experiment),
+        )
+
+    # Nobody declared anything: fall back to the bare symptom, weakest evidence last.
     tool_evidence = tuple(event for event in events if event.kind == "tool_result" and not event.ok)
     if tool_evidence:
-        proven = any(event.detail.get("deterministic") is True for event in tool_evidence)
         return Attribution(
             failure=failure,
             blame=Blame.TOOL,
             evidence=tool_evidence,
             experiment="trace",
-            confidence="proven" if proven else "likely",
+            confidence="likely",
         )
 
     constraint_evidence = tuple(
@@ -154,20 +220,4 @@ def attribute(
             confidence="likely",
         )
 
-    if experiment == Experiment.HUMAN_CANNOT_ANSWER:
-        return Attribution(
-            failure=failure,
-            blame=Blame.CONTEXT,
-            evidence=events,
-            experiment=experiment.value,
-            confidence="proven",
-        )
-    if experiment in (Experiment.HUMAN_CAN_ANSWER, Experiment.HUMAN_DIFFERS):
-        return Attribution(
-            failure=failure,
-            blame=Blame.MODEL,
-            evidence=events,
-            experiment=experiment.value,
-            confidence="proven",
-        )
     return _unknown(failure, experiment.value)

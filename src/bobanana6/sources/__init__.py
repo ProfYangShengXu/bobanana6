@@ -9,6 +9,7 @@ from .fetchers import (
     LocatorFetcher,
     suffix_for,
 )
+from .reader import SnapshotFileReader, rows_from_csv, rows_from_json
 from .store import SnapshotStore, SourceError
 
 __all__ = [
@@ -16,7 +17,10 @@ __all__ = [
     "FileFetcher",
     "HttpFetcher",
     "LocatorFetcher",
+    "SnapshotFileReader",
     "SnapshotStore",
     "SourceError",
+    "rows_from_csv",
+    "rows_from_json",
     "suffix_for",
 ]

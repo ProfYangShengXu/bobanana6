@@ -453,6 +453,24 @@ def test_parse_candidate_reads_rows_columns_and_provenance() -> None:
     assert candidate.artifact("out.csv").row_count == 2  # type: ignore[union-attr]
 
 
+def test_an_absent_cell_is_loaded_as_missing_and_a_zero_is_left_alone() -> None:
+    """★ A04：空单元格记成 `MISSING`（一等状态），`0` 是一个值、不许被当成缺失。"""
+    from bobanana6.core.model import MISSING
+
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
+    candidate = parse_candidate(
+        json.dumps({"ref": "src-1", "rows": [{"amount": ""}, {"amount": None}, {"amount": 0}]}),
+        subtask=block,
+        source_id="src-1",
+        authorized_sources=("src-1",),
+    )
+    rows = candidate.artifact("out.csv").rows  # type: ignore[union-attr]
+    assert rows[0]["amount"] is MISSING and rows[1]["amount"] is MISSING
+    assert rows[2]["amount"] == 0
+    # 每行都点名它取自快照的哪一行（A11 的内容级校验要读它）
+    assert [point.source_row for point in candidate.provenance] == [0, 1, 2]
+
+
 def test_parse_candidate_refuses_bad_shapes_with_a_fixable_reason() -> None:
     """★ Every rejection says what was sent, which rule broke, and what is required."""
     block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")

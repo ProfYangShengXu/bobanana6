@@ -1,4 +1,4 @@
-# 攻击注入点（`实现规格.md §14.2` + `#15` 新增的 A11）。
+# 攻击注入点（`实现规格.md §14.2` + `#15` 新增的 A11 + `#16` 收口 A04/A07/A10/A11）。
 #
 # ★ 现在这是【执行器读的表】：`acceptance/inject/attacks.py` 按行注入、按行报结果。
 #
@@ -82,17 +82,18 @@ expected:
   A01-mesh-dependency:               {expect_blame: null, expect_action: declare_cross_block_dependency}
   A02-polysemy:                      {expect_blame: null, expect_action: no_definition_mismatch}
   A03-real-conflict:                 {expect_blame: null, expect_action: record_conflict}
-  A04-missing-not-zero:              {expect_blame: null, expect_action: reject_filled_zero}
+  A04-missing-not-zero:              {expect_blame: null, expect_action: reject_missing_not_fill_zero}
   A05-transient:                     {expect_blame: null, expect_action: retry_local}
   A06-persistent:                    {expect_blame: null, expect_action: degrade_or_mark_unavailable}
   A07-same-symptom-different-layer:  {expect_blame: three_distinct_blames, expect_action: null}
   A08-global-invariant:              {expect_blame: null, expect_action: assembly_rejects}
   A09-impossible:                    {expect_blame: null, expect_action: decline}
-  A10-units:                         {expect_blame: null, expect_action: normalized_values}
+  A10-units:                         {expect_blame: null, expect_action: value_level_unit_read}
 
-# ★ #15 新增：溯源引用的【真实性】没人校验（见仓库根 `溯源缺口-引用真实性未校验-20261003.md`）。
+# ★ #15 新增、#16 收口：溯源引用的【真实性】（见仓库根 `溯源缺口-引用真实性未校验-20261003.md`）。
 #   它不需要 ground truth —— 快照就在系统手里：3 行的快照 + 30 行的候选，
 #   每行都声称来自它 → row=3..29 引用的行根本不存在。
+#   #16 把快照内容经 `SnapshotReader` 端口交给判定器，链逐点重放（行要在、值要对得上）。
 attacks_extra:
   - id: A11-provenance-content
     enabled: true
@@ -100,4 +101,4 @@ attacks_extra:
     inject: 快照只有 3 行，候选声称 30 行且每行都引用该快照（out.csv:row=0..29）
     expect: 系统在【没有真值】的情况下抓住「引用的行不存在」
     fail_if: 放行（coverage=1.0 且装配通过）
-    status: 已知缺口 —— 证据见 tests/test_attacks.py 的 xfail
+    status: 已收口（#16）—— 正式断言见 tests/test_attacks.py 的 test_a11_*

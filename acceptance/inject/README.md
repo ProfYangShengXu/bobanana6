@@ -26,20 +26,28 @@ run_attacks(only=["A11-provenance-content"])
 
 ## ★ 红了就是产出
 
-**本块的目标不是让十条都过**，是让每条都能被独立开关、被跑、并**如实**报出三步各自的结果。
-`miss` 记录的是被测系统当前的真实状态。跑出来的红（2026-10-03）：
+`miss` 记录的是被测系统当前的真实状态，**不是为了让十条都过**。`#15` 先把每条注入做成
+可独立开关、可跑、三步分开报的读数；`#16` 据此把其中四条【判定缺口】补上。
+下面第一张表是 `#16` 的修前 / 修后对照，第二张是仍然红的（性质不同，本块不做）。
+
+### #16 收口的四个（修前 / 修后对照读数）
+
+| 缺口 | 修前读数 | 修后读数 | 证据 |
+|---|---|---|---|
+| **A04** 缺失 vs 被填平的 0 | ① miss ② n/a ③ miss —— 空值与 `0` 产出**完全相同**的 outcome 元组 | ① **hit** ② n/a ③ **hit** —— 缺失格报到 `row=0 col=amount holds no value`，`0` 是一个值、照样通过 | 缺失现在是**一等状态** `core.model.MISSING`；读取端把空单元格映射成它（`0` 不映射），`schema` 在 `nullable: false` 上**逐格**判 |
+| **A07** 假归因 | ① hit ② **miss** ③ n/a —— 三条不同根因全归成 `tool` | ① hit ② **hit** ③ n/a —— `tool` / `context` / `constraint` 三条各不相同 | 归因层先读**自带病因**（工具标 `deterministic` / 判定器标 `constraint_rejected` / 分离实验判上下文）；两层互相指认则 `unknown`，不猜 |
+| **A10** 单位只比声明 | ① miss ② n/a ③ miss —— 值写 `1 千元` 与写 `1 CNY` 得到同一个判决 | ① **hit** ② n/a ③ **hit** —— `1 千元` 在 `row=0 col=amount` 被点名，`1 CNY` 通过 | `unit_consistency` 现在**读值里的单位**（`实现规格 §5.0.1`② 的 Kubernetes `Quantity` 形态）；值里不带单位仍然判不了，如实写在证据里 |
+| **A11** 溯源引用真实性 | ① **miss** ② n/a ③ n/a —— 3 行快照 / 30 行引用，`coverage=1.00 breaks=0` 放行 | ① **hit** ② n/a ③ n/a —— `coverage=0.10 breaks=27`，点到 `row=3` 不存在 | `SnapshotReader` 端口 + 内容级校验；见下 |
+
+### 仍然红的（本块不做，性质不同）
 
 | 攻击 | ① | ② | ③ | 红在哪 |
 |---|---|---|---|---|
-| A02 polysemy | hit | n/a | **miss** | 口径不一致是在 compare 期被发现的，不是 L-1 拦住的（§14.2 的 `fail_if` 正是这条） |
-| A04 missing≠0 | **miss** | n/a | **miss** | 空值与被填平的 0 在判定器眼里是同一个东西 —— 没有判定者 |
-| A06 persistent | hit | n/a | **miss** | 停下来了（没有无限重试），但出口是「前置门拒跑」而不是降级/标记不可得 |
-| A07 同症异层 | hit | **miss** | n/a | **三条不同根因拿到同一个 blame（tool）** —— 假归因 |
-| A08 全局不变量 | **miss** | n/a | **miss** | `target="*"` 在多块装配上只会「看不见产物」，从来没真的看过合并结果 |
-| A10 单位 | **miss** | n/a | **miss** | `unit_consistency` 只比**声明**；候选里的值一个都不读 → 「归一」没有判定者 |
-| A11 溯源真实性 | **miss** | n/a | n/a | ★ 见下 |
+| A02 polysemy | hit | n/a | **miss** | 口径不一致是在 compare 期被发现的，不是 L-1 拦住的（**时序/效率**缺口） |
+| A06 persistent | hit | n/a | **miss** | 停下来了（没有无限重试），但出口是「前置门拒跑」而不是降级/标记不可得（**出口选择**缺口） |
+| A08 全局不变量 | **miss** | n/a | **miss** | `target="*"` 在多块装配上只会「看不见产物」，从来没真的看过合并结果（留给下一块） |
 
-## ★★★ A11：溯源引用的真实性没人校验（本块最重要的新发现）
+## ★★★ A11：溯源引用的真实性（#16 已收口）
 
 见仓库根 `溯源缺口-引用真实性未校验-20261003.md`。一句话：
 
@@ -52,41 +60,59 @@ run_attacks(only=["A11-provenance-content"])
 
 **它不需要 ground truth**（快照就在系统手里），所以它是**系统内可判**的缺口。
 
-**同一个缺口的第二个读数（夜报 #13 报的「纯合并块假 ref」）**：
-纯合并块的 `authorized_sources` 为空，`produce.py` 里那条 `unknown_ref` 守卫就**整个不生效** ——
-它写什么 `ref` 都收下，还会变成 `candidate.source_id`。只要那个名字在注册表里，
-链就报 coverage=1.0；换成没注册的名字才会被抓。
-看门狗：`tests/test_attacks.py::test_a_pure_merge_block_can_cite_any_registered_snapshot`
-（证明它会红：变体 T10 把守卫改成对空集也生效 = 模拟修好，测试必须转红）。
+**同一个缺口的第二个读数（夜报 #13 报的「纯合并块假 ref」）**：纯合并块的 `authorized_sources` 为空时，
+`produce.py` 里那条 `unknown_ref` 守卫**整个不生效** —— 它写什么 `ref` 都收下，还会变成
+`candidate.source_id`；只要那个名字在注册表里，链就报 coverage=1.0。
 
-**验收证据是两条，同一个事实的两个读数**：
+### #16 怎么修的（落点与证据）
 
 ```
-tests/test_attacks.py::test_a11_citing_rows_that_do_not_exist_is_caught   ← xfail(strict=True)，现在【红】
-tests/test_attacks.py::test_a11_the_executor_reports_the_gap_as_a_miss    ← 执行器报 miss
-```
-★ 它是**活体缺陷样本**：按 `§15.9①`「没有失败样本的验收等于没验收」，
-先做成会红的题、再修，才有证据证明修对了。strict 的 xfail 会在修好时 XPASS → 变红 →
-**逼着把它升级成正式断言**。
+① core/ports.py::SnapshotReader     端口定义在稳定侧（core 零 I/O，打不开载体）
+② core/model.py::SnapshotBody       快照内容以【数据】形态注入，core 只判定
+   core/checkers/base.py            CheckContext.snapshot_bodies
+③ sources/reader.py::SnapshotFileReader   外侧读载体、解析成行
+   cli.py 装配 · runner 读一次、注入 CheckContext
 
-### 修的时候落点在哪（本块只报，未动）
-
-```
-★ 这不是「core 忘了实现」，是【分层决定的】：
-  Snapshot.body_path   标注 "external:sources —— 固化载体的位置，core 不打开"
-  AGENTS.md §1.1       core/ 零 I/O（连 http/url 这些词都禁）
-  → core/provenance.py 只做结构性校验是【正确】的，它拿不到快照内容。
-
-修法（AGENTS §1.3「端口定义在稳定侧，实现在外侧」的正用）：
-  ① core/ports.py        加 SnapshotReader 端口
-  ② core/checkers/       加内容级溯源检查器（判定语义，零 I/O：
-                         快照内容由外侧读好、以数据形式注入 CheckContext）
-  ③ sources/ 或 adapters/ 实现读快照
-判据（能证伪）：引用的 <artifact>:row=<n> 必须在快照里真的存在；值必须对得上。
+判定（core，零 I/O）：
+  core/provenance.py::content_break   引用的行必须真的存在（按 source_row）
+  checkers/provenance.py::value_mismatches  引用的值必须与快照那一行一致
+  → 名字可达不再是「引用为真」；coverage 也会因内容不到位而下降
 ```
 
-★ **本块不实现**：一是缺口文档自己写了「先做成会红的题，再修」；
-二是往冻结的 `core/` 里加 kind / 加 CheckContext 字段是设计变更，不是本块的范围。
+**生产端的两件事（同一个事实的两个读数一起修）**：
+
+```
+· 块声明了输入就只能引用它/它消费的部件真正读过的快照（守卫不再对空集失效）
+· 合并块自己没读过快照 → 引用【继承】自它拿到的输入行；编出来的一行
+  与任何输入行都不相同 → 当场拒收（`untraceable_row`），不是发一个撑不住的引用
+```
+
+**验收证据（全部是【正式断言】，没有恒真的 xfail）**：
+
+```
+tests/test_attacks.py::test_a11_citing_rows_that_do_not_exist_is_caught     ← 3 行快照 / 30 行引用 → 抓住 row=3
+tests/test_attacks.py::test_a11_a_citation_whose_value_does_not_match_is_caught
+tests/test_attacks.py::test_a11_the_executor_reports_the_gap_as_found       ← 执行器报 hit
+tests/test_attacks.py::test_a_merge_block_may_not_cite_a_source_it_never_read
+tests/test_attacks.py::test_a_merge_row_inherits_the_citation_of_the_row_it_was_handed
+tests/test_acceptance.py::test_a_fabricated_answer_is_only_caught_once_the_chain_reads_the_snapshot
+```
+
+★ 原来那条 `xfail(strict=True)` 在修好后 XPASS（strict 会让它变红）→ 已按 §15.9① **升级成正式断言**。
+
+**离线端到端对照**（`tests/test_acceptance.py`，同一道题、同一个脚本化客户端，只有尺子不同）：
+
+```
+读块编 30 行（真值只有 3 行），每行都引用自己的快照
+  修前（链只查名字）→ block_pass_rate=1.0 · assembly passed · exit passed
+  修后（链逐点重放）→ 合并块被 C-prov 拦下：'panel.csv:row=10' cites row 10 of
+                      'panel-a', which holds 3 row(s)；值也对不上
+```
+
+**★ 残留（如实报，不假装）**：合并块若**变换**了值（例如把千元换算成元），
+与输入行不再完全相同 → 现在会被判 `untraceable_row` 拒收。也就是说：
+**「引用 + 变换」今天无法表达** —— 需要答案里能声明每行来自哪个输入行（或声明变换），
+那是答案形状的变更，本块没做（属于下一块的范围）。
 
 ## ★ 本次哪些出口没被走到（§4.2⑤）
 
@@ -106,11 +132,14 @@ A08 期望的「装配拒绝」不在 `EXIT_KINDS` 里（它是装配口径，�
 ★ 出口的全景巡检是验收集（§14.3）的职责，不是注入执行器的：执行器只回答
 「这一条注入被系统怎么处置了」。上面这张表是【本块的】覆盖声明，不是全局的。
 
+★ `#16` 的补充：四条修的都是**判定**，不新增出口 —— 上面「没走到的六条」在 `#16` 之后
+仍然没被走到（`#16` 的离线端到端对照走的是 `deliver` + 块级 `C-prov` 拒收）。
+
 ## ★ 反向验证（`tools/reverse_validation.py`）
 
-全绿树上 **186 变体 / 186 被抓住 / 0 漏网**，每条变体一个见证测试，跑完原样还原。
-本块新增的每个测试（执行器结构 / 11 条读数 / A11 两个读数 / 判分器与 harness 纪律）
-都各有一条见证变体 —— 没有「写了但从证明不了会红」的测试。
+全绿树上 **197 变体 / 197 被抓住 / 0 漏网**，每条变体一个见证测试，跑完原样还原。
+本块新增的每个测试（A04 的两半 / A10 的四种读数 / A07 的三条声明规则 /
+A11 的五条 + 离线端到端对照）都各有一条见证变体 —— 没有「写了但证明不了会红」的测试。
 两条纪律是血换的：
 
 - **见证测试必须执行被改的那一行**。T02 一开始指向 `test_every_row_in_the_table_has_an_injector`，

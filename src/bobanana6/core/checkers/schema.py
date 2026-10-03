@@ -3,7 +3,7 @@ bearing unless the constraint explicitly asks for it."""
 
 from __future__ import annotations
 
-from ..model import Candidate, Constraint
+from ..model import Candidate, Constraint, is_missing
 from .base import CheckContext, CheckOutcome, artifact_for, fail, ok
 
 KIND = "schema"
@@ -29,8 +29,17 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
             continue
         if "dtype" in raw and str(raw["dtype"]) != column.dtype:
             facts.append(f"column {name!r} dtype {column.dtype!r} != {raw['dtype']!r}")
-        if raw.get("nullable", True) is False and column.nullable:
-            facts.append(f"column {name!r} is nullable but must not be")
+        if raw.get("nullable", True) is False:
+            if column.nullable:
+                facts.append(f"column {name!r} is nullable but must not be")
+            # ★ A04: "must not be null" is judged on the *cells*, not just on the
+            #   declaration. A missing cell is a first-class state, so this is the
+            #   judge that can tell "no value here" from a filled-in zero.
+            for index, row in enumerate(artifact.rows):
+                value = row.get(name)
+                if is_missing(value) or value is None:
+                    facts.append(f"row={index} col={name} holds no value but the column must not be nullable")
+                    break
 
     if constraint.spec.get("order_sensitive") is True:
         expected_order = [str(raw["name"]) for raw in expected if isinstance(raw, dict) and "name" in raw]

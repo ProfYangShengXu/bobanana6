@@ -69,15 +69,18 @@ def test_a_row_with_no_injector_is_a_miss_not_a_pass() -> None:
 
 
 def test_the_report_keeps_the_three_steps_apart() -> None:
-    """★ §14.5：发现对了但归因错、归因对了但动作错，两种失败处置完全相反。"""
+    """★ §14.5：发现对了但出口错，不能被「发现=hit」盖过去 —— 三步各报各的。"""
     outcomes = run_attacks()
     table = render_table(outcomes)
     assert "① found" in table and "② blame" in table and "③ action" in table
     for forbidden in ("overall", "total", "score"):
         assert forbidden not in table.lower()
-    # 每一行都按三步分开报：A07 的归因是 miss 而不是被「发现=hit」盖过去
+    # A06 这一行就是活证据：发现=hit（停下来了）但出口=miss（走的是前置门拒跑）
+    a06 = next(o for o in outcomes if o.attack.id.startswith("A06"))
+    assert a06.found == HIT and a06.action_step == MISS
+    # 归因那一步同样单独存在：三个 blame 现在互不相同 → hit（A07）
     a07 = next(o for o in outcomes if o.attack.id.startswith("A07"))
-    assert a07.found == HIT and a07.blame_step == MISS
+    assert a07.found == HIT and a07.blame_step == HIT
 
 
 def test_an_injection_that_breaks_is_a_miss_not_a_pass() -> None:
@@ -107,8 +110,10 @@ def test_only_runs_what_was_asked_for() -> None:
 def test_the_gap_notes_name_the_rows_that_missed() -> None:
     """★ §14.3 的覆盖声明：没达到期望的攻击必须被点名。"""
     notes = render_gap_notes(run_attacks())
-    assert "A07-same-symptom-different-layer" in notes
-    assert "A11-provenance-content" in notes
+    assert "A06-persistent" in notes
+    assert "A08-global-invariant" in notes
+    # ★ A11 已经收口：它不再出现在覆盖声明里（收口了就该从缺口名单里消失）
+    assert "A11-provenance-content" not in notes
 
 
 # --------------------------------------------------------------------------- #
@@ -140,25 +145,30 @@ def test_a09_impossible_block_declines_instead_of_inventing() -> None:
     assert outcome.found == HIT and outcome.action_step == HIT, outcome.evidence
 
 
-def test_a07_the_three_root_causes_get_the_same_blame_today() -> None:
-    """★ 假归因，实测复现：工具坏 / 上下文没给到 / 判定器太严 → 三条都归成 tool。
+def test_a07_the_three_root_causes_get_three_distinct_blames() -> None:
+    """★ A07 修后：三条根因必须拿到三个**不同**的 blame（§14.2 的 fail_if）。
 
-    §14.2 的 `fail_if` 就是「三条给同一个 blame」。**这条是红的**，
-    而且**不许为了让 A07 变绿去改 attribution**（本块只测不修）。
-    等 attribution 修好，这条会变红成「不再是同一个 blame」→ 改成正式断言。
+    三条 trace 的症状一样（都有工具失败）；区别在于病因由哪一层自己声明
+    （工具标 deterministic / 判定器标 constraint_rejected / 上下文由分离实验判定）。
     """
     outcome = _outcome("A07")
     assert outcome.found == HIT  # 三条都注意到了
-    assert outcome.blame_step == MISS, outcome.evidence  # ★ 但三条同一个 blame
+    assert outcome.blame_step == HIT, outcome.evidence  # ★ 三个 blame 互不相同
     blames = outcome.observation.blames
-    assert len(set(blames)) == 1
+    assert len(set(blames)) == 3, blames
+    assert set(blames) == {"tool", "context", "constraint"}, blames
 
 
-def test_a04_missing_and_zero_are_indistinguishable_today() -> None:
-    """★ A04：空值与被填平的 0 在判定器眼里是同一个东西 —— 缺口，如实记。"""
+def test_a04_missing_and_zero_are_told_apart() -> None:
+    """★ A04 修后：空值与被填平的 0 在判定器眼里必须**不是**同一个东西。
+
+    缺失是一等状态：空白格在「该列不得为空」的列上被点名，`0` 是一个值、照样通过。
+    """
     outcome = _outcome("A04")
-    assert outcome.found == MISS and outcome.action_step == MISS
-    assert "indistinguishable" in " ".join(outcome.evidence)
+    assert outcome.found == HIT and outcome.action_step == HIT, outcome.evidence
+    evidence = " ".join(outcome.evidence)
+    assert "holds no value" in evidence, evidence
+    assert "filled zero" in evidence, evidence
 
 
 def test_a06_a_persistent_failure_refuses_the_run_instead_of_degrading() -> None:
@@ -176,11 +186,14 @@ def test_a08_the_global_invariant_cannot_see_a_multi_piece_assembly() -> None:
     assert "artifact for target '*' not found" in " ".join(outcome.evidence)
 
 
-def test_a10_unit_consistency_only_compares_declarations() -> None:
-    """★ A10：单位只比【声明】；候选里的值一个都不读，所以「归一」没有判定者。"""
+def test_a10_unit_consistency_reads_the_unit_off_the_value() -> None:
+    """★ A10 修后：单位检查读值里的单位 —— 值写了另一个单位就被点名。"""
     outcome = _outcome("A10")
-    assert outcome.found == MISS and outcome.action_step == MISS
-    assert "declarations only" in " ".join(outcome.evidence)
+    assert outcome.found == HIT and outcome.action_step == HIT, outcome.evidence
+    evidence = " ".join(outcome.evidence)
+    assert "千元" in evidence and "ok=False" in evidence, evidence
+    # ★ 残留如实留着：值里不带单位的仍然判不了，不许假装通过
+    assert "unjudgeable" in evidence, evidence
 
 
 def test_a02_polysemy_is_detected_at_compare_time_not_blocked_at_L1() -> None:
@@ -193,60 +206,110 @@ def test_a02_polysemy_is_detected_at_compare_time_not_blocked_at_L1() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# ★★ A11：溯源引用的真实性没人校验 —— 本条的验收证据【现在必须是红的】
+# ★★ A11：溯源引用的真实性 —— 修后是【正式断言】（xfail 已升级）
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "★ 已知缺口（见 溯源缺口-引用真实性未校验-20261003.md）：core/provenance.py 只查 "
-        "snapshot_ref 这个名字在不在注册表，从不打开快照，所以引用了不存在的行也算 coverage=1.0。"
-        "这条 xfail 就是缺口活着的证据：修好之后它会 XPASS → strict 会让它变红 → 逼着把它改成正式断言。"
-    ),
-)
 def test_a11_citing_rows_that_do_not_exist_is_caught() -> None:
-    """3 行快照 + 30 行候选（每行都引用它）→ 期望当场抓住 `row=3..29` 不存在。"""
-    from bobanana6.core.model import Artifact, Candidate, Column, Provenance, Snapshot
+    """3 行快照 + 30 行候选（每行都引用它）→ 当场抓住 `row=3..29` 不存在。
+
+    ★ 这条原来是 `xfail(strict=True)`（缺口活着的证据）。补上内容级校验后它
+    转绿，于是按 §15.9① 升级成正式断言 —— 不要留一条恒真的 xfail。
+    """
+    from bobanana6.core.model import (
+        Artifact,
+        Candidate,
+        Column,
+        Provenance,
+        Snapshot,
+        SnapshotBody,
+    )
     from bobanana6.core.provenance import validate_points
 
     rows = 30
     snapshot = Snapshot(ref="panel-a", body_path=Path("/nonexistent/panel-a.csv"), captured_at="2026-10-03T00:00:00")
+    body = SnapshotBody(
+        ref="panel-a",
+        columns=(Column(name="obligor", dtype="str"),),
+        rows=tuple({"obligor": f"A-{index:03d}"} for index in range(3)),
+    )
     candidate = Candidate(
         subtask_id="T-04",
         source_id="panel-a",
         artifacts=(Artifact(name="panel.csv", columns=(Column(name="obligor", dtype="str"),), rows=tuple({"obligor": f"X{i}"} for i in range(rows))),),
         provenance=tuple(
-            Provenance(value_ref=f"panel.csv:row={index}", snapshot_ref="panel-a", locator="L") for index in range(rows)
+            Provenance(value_ref=f"panel.csv:row={index}", snapshot_ref="panel-a", locator="L", source_row=index)
+            for index in range(rows)
         ),
     )
     required = tuple(f"panel.csv:row={index}" for index in range(rows))
-    report = validate_points(required, candidate.provenance, {"panel-a": snapshot})
+    report = validate_points(required, candidate.provenance, {"panel-a": snapshot}, {"panel-a": body})
     assert not report.ok, (
         "the cited rows 3..29 do not exist in a 3-row snapshot, yet the chain reports full coverage"
     )
+    assert any("row 3" in break_.detail and "3 row(s)" in break_.detail for break_ in report.breaks), report.breaks
+    # ★ 覆盖也不再是 1.0：名字可达 ≠ 引用为真
+    assert report.coverage < 1.0, report.coverage
 
 
-def test_a11_the_executor_reports_the_gap_as_a_miss() -> None:
-    """★ 执行器那一侧：A11 今天必须是 miss（与上面那条 xfail 是同一件事的两个读数）。"""
+def test_a11_a_citation_whose_value_does_not_match_is_caught() -> None:
+    """引用行存在但**值对不上** —— 同一个缺口的另一半。"""
+    from bobanana6.core.checkers.provenance import value_mismatches
+    from bobanana6.core.model import (
+        Artifact,
+        Candidate,
+        Column,
+        Provenance,
+        SnapshotBody,
+    )
+
+    artifact = Artifact(
+        name="panel.csv",
+        columns=(Column(name="obligor", dtype="str"), Column(name="amount", dtype="float")),
+        rows=({"obligor": "A-001", "amount": 999.0},),
+    )
+    candidate = Candidate(
+        subtask_id="T-01",
+        source_id="panel-a",
+        artifacts=(artifact,),
+        provenance=(Provenance(value_ref="panel.csv:row=0", snapshot_ref="panel-a", source_row=0),),
+    )
+    body = SnapshotBody(ref="panel-a", rows=({"obligor": "A-001", "amount": "1200000.0"},))
+    facts = value_mismatches(artifact, candidate, {"panel-a": body})
+    assert facts and "does not match snapshot" in facts[0], facts
+    # 反过来：CSV 里的字符串与答案里的数，是同一个值
+    matching = Artifact(
+        name="panel.csv",
+        columns=(Column(name="amount", dtype="float"),),
+        rows=({"amount": 1200000.0},),
+    )
+    ok_candidate = Candidate(
+        subtask_id="T-01",
+        source_id="panel-a",
+        artifacts=(matching,),
+        provenance=(Provenance(value_ref="panel.csv:row=0", snapshot_ref="panel-a", source_row=0),),
+    )
+    assert value_mismatches(matching, ok_candidate, {"panel-a": body}) == ()
+
+
+def test_a11_the_executor_reports_the_gap_as_found() -> None:
+    """★ 执行器那一侧：A11 修后必须是 hit（与上面那条是同一件事的两个读数）。"""
     outcome = _outcome("A11")
-    assert outcome.found == MISS
+    assert outcome.found == HIT, outcome.evidence
     assert "30" in " ".join(outcome.evidence)
+    assert "breaks=" in " ".join(outcome.evidence)
 
 
-def test_a_pure_merge_block_can_cite_any_registered_snapshot() -> None:
-    """★★ 缺口看门狗（夜报 #13 报的「纯合并块假 ref」）。
+def test_a_merge_block_may_not_cite_a_source_it_never_read() -> None:
+    """★★ A11 第二个读数的正式断言（夜报 #13 报的「纯合并块假 ref」）。
 
-    纯合并块 `authorized_sources` 为空，`produce.py` 里那条 `unknown_ref` 守卫
-    （`elif authorized_sources and snapshot_ref not in authorized_sources`）**整个不生效**：
-    模型写什么 ref 都收下，而且它会成为 `candidate.source_id`。只要那个名字在快照
-    注册表里，链就报 coverage=1.0 / 无 breaks —— ref 证明的只是「这个名字存在」，
-    不是「这些行来自它」；换来一个没注册的名字才会被抓。等「合并块只能引用它真正
-    拉过的上游」落地，本测试会红 → 升级成正式断言。
+    守卫过去写成 `elif authorized_sources and snapshot_ref not in authorized_sources`，
+    纯合并块（`authorized_sources` 为空）**整个绕过它**：写什么 ref 都收下，
+    还会变成 `candidate.source_id`；只要那个名字在注册表里，链就报 coverage=1.0。
+    现在：块声明了输入，就只能引用它（或它消费的部件）真正读过的快照。
     """
-    from bobanana6.assemble_impl.produce import parse_candidate
-    from bobanana6.core.model import Snapshot, Subtask
-    from bobanana6.core.provenance import validate_points
+    from bobanana6.assemble_impl.produce import CandidateFormatError, parse_candidate
+    from bobanana6.core.model import Subtask
 
     merge = Subtask(
         id="T-04",
@@ -257,23 +320,61 @@ def test_a_pure_merge_block_can_cite_any_registered_snapshot() -> None:
         axis="field",
         mode="write",
     )
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate(
+            '{"ref": "panel-b", "rows": [{"obligor": "A-001"}]}',
+            subtask=merge,
+            source_id="T-04",
+            authorized_sources=(),  # ★ 它一个源都没读过
+        )
+    assert error.value.feedback()["code"] == "unknown_ref", error.value.feedback()
+    assert "not a snapshot this block was given" in error.value.feedback()["problem"]
+
+
+def test_a_merge_row_inherits_the_citation_of_the_row_it_was_handed() -> None:
+    """★★ A11 修后的第三条：合并块的行必须能回指它拿到的输入行。
+
+    合并块自己没读过快照，所以「第 n 行来自源 X」不是它能做的声明 —— 引用由
+    它消费的部件**继承**过来。编出来的一行（没有任何输入行与它相同）会被当场
+    拒绝，而不是发给它一个撑不住的引用。
+    """
+    from bobanana6.assemble_impl.produce import CandidateFormatError, parse_candidate
+    from bobanana6.core.model import Subtask
+
+    merge = Subtask(
+        id="T-04",
+        goal="merge the parts",
+        inputs=("part-panel-a.csv",),
+        output="panel.csv",
+        contract_ref="panel",
+        axis="field",
+        mode="write",
+    )
+    parts = {
+        "part-panel-a.csv": {
+            "rows": [{"obligor": "A-001", "amount": "1"}],
+            "provenance": [
+                {"value_ref": "part-panel-a.csv:row=0", "snapshot_ref": "panel-a", "source_row": 0, "locator": "L"}
+            ],
+        }
+    }
+    answer = '{"ref": "panel-a", "rows": [{"obligor": "A-001", "amount": "1"}]}'
     candidate = parse_candidate(
-        '{"ref": "panel-b", "rows": [{"obligor": "A-001"}]}',
+        answer,
         subtask=merge,
         source_id="T-04",
-        authorized_sources=(),  # ★ 纯合并：没有任何被授权的快照
+        authorized_sources=("panel-a",),  # 继承来的（runner 从部件的溯源算出）
+        parts=parts,
     )
-    # 它只拉过 part-panel-a.csv，却说自己来自 panel-b —— 没人质疑
-    assert candidate.source_id == "panel-b"
-    assert {p.snapshot_ref for p in candidate.provenance} == {"panel-b"}
+    assert [(p.snapshot_ref, p.source_row) for p in candidate.provenance] == [("panel-a", 0)]
 
-    registry = {
-        "panel-a": Snapshot(ref="panel-a", body_path=Path("/nonexistent/panel-a.csv"), captured_at="T0"),
-        "panel-b": Snapshot(ref="panel-b", body_path=Path("/nonexistent/panel-b.csv"), captured_at="T0"),
-    }
-    required = tuple(p.value_ref for p in candidate.provenance)
-    assert validate_points(required, candidate.provenance, registry).ok, "名字在注册表里 → 链判为可达"
-
-    # 反证：同一条链只在名字【没注册】时才断 —— 今天查的就只有名字
-    broken = validate_points(required, candidate.provenance, {"panel-a": registry["panel-a"]})
-    assert not broken.ok and broken.breaks[0].missing_snapshot == "panel-b"
+    # 编出来的一行：与任何输入行都不同 → 拒不收
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate(
+            '{"ref": "panel-a", "rows": [{"obligor": "X-999", "amount": "1"}]}',
+            subtask=merge,
+            source_id="T-04",
+            authorized_sources=("panel-a",),
+            parts=parts,
+        )
+    assert error.value.feedback()["code"] == "untraceable_row", error.value.feedback()

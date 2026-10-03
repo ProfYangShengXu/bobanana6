@@ -35,6 +35,7 @@ from .model import (
     Ontology,
     Recon,
     Snapshot,
+    SnapshotBody,
     SourceRef,
     SplitPlan,
     Subtask,
@@ -50,6 +51,7 @@ __all__ = [
     "DecomposerPort",
     "OntologyPort",
     "SemanticsTools",
+    "SnapshotReader",
     "SourcePort",
     "SourceTools",
     "TaskTools",
@@ -153,6 +155,19 @@ class SourcePort(Protocol):
     def fetch(self, ref: SourceRef) -> Snapshot: ...
 
 
+@runtime_checkable
+class SnapshotReader(Protocol):
+    """Whoever turns a frozen carrier into the rows core may judge (A11).
+
+    Defined on the stable side and implemented outside: the content-level
+    provenance check is judgment and belongs in ``core/``, but opening the
+    carrier is not something ``core/`` may do (``AGENTS.md §1.1``). The reader
+    hands the body over as data.
+    """
+
+    def body(self, snapshot: Snapshot) -> SnapshotBody: ...
+
+
 # --------------------------------------------------------------------------- #
 # Tool surface
 # --------------------------------------------------------------------------- #
@@ -227,6 +242,9 @@ class ToolSet:
     check: CheckTools
     sources: SourceTools | None = None
     allowed_inputs: tuple[str, ...] = ()
+    #: ★ A11: the snapshots this block did not read itself but inherited from the
+    #: parts it consumes. A merge block may cite these and nothing else.
+    inherited_sources: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.subtask == "":

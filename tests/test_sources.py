@@ -9,7 +9,13 @@ from typing import Self
 import pytest
 
 from bobanana6.core.model import SourceRef
-from bobanana6.sources import FileFetcher, HttpFetcher, SnapshotStore, SourceError
+from bobanana6.sources import (
+    FileFetcher,
+    HttpFetcher,
+    SnapshotFileReader,
+    SnapshotStore,
+    SourceError,
+)
 
 NOW = "2026-10-03T00:00:00+08:00"
 
@@ -153,3 +159,29 @@ def test_http_non_200_is_an_error(store: SnapshotStore) -> None:
         HttpFetcher(store=store, captured_at=NOW, opener=opener).fetch(
             SourceRef(ref="src-1", locator="http://example.invalid/x")
         )
+
+
+def test_the_reader_hands_the_frozen_rows_over_as_data(tmp_path: Path) -> None:
+    """★ A11：端口定义在稳定侧、实作在外侧 —— 这里验外侧真的把行读成了 core 的数据。"""
+    store = SnapshotStore(root=tmp_path / "snaps")
+    snapshot = store.put(
+        ref="panel-a",
+        body=b"obligor,amount\nA-001,1200000.0\nA-002,800000.0\n",
+        source_kind="csv",
+        captured_at=NOW,
+        suffix=".csv",
+    )
+    body = SnapshotFileReader(store=store).body(snapshot)
+    assert body.ref == "panel-a"
+    assert [column.name for column in body.columns] == ["obligor", "amount"]
+    assert body.rows[1]["obligor"] == "A-002"
+    assert body.row(2) is None
+
+
+def test_the_reader_refuses_to_pretend_a_missing_file_has_rows(tmp_path: Path) -> None:
+    """读不回来就是错，不是「退化成一个空快照」—— 空快照会让内容级校验说谎。"""
+    store = SnapshotStore(root=tmp_path / "snaps")
+    snapshot = store.put(ref="panel-a", body=b"a\n1\n", source_kind="csv", captured_at=NOW, suffix=".csv")
+    snapshot.body_path.unlink()
+    with pytest.raises(SourceError):
+        SnapshotFileReader(store=store).body(snapshot)

@@ -92,6 +92,41 @@ def test_trace_without_a_signal_and_without_an_experiment_is_unknown() -> None:
     assert result.blame is None
 
 
+# --------------------------------------------------------------------------- #
+# ★ A07: a declared cause outranks a bare symptom (AGENTS.md §7⑫)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_declared_rejection_outranks_a_bare_tool_failure() -> None:
+    """「有工具失败」只是症状；判定器【自己说了】是它拒的，就该听它的。"""
+    trace = (
+        event("tool_result", ok=False, detail={"tool": "read", "error": "timeout"}),
+        event("gate_check", ok=False, detail={"constraint_rejected": True}, seq=2),
+    )
+    result = attribute("could not compute", trace)
+    assert result.blame == "constraint", result
+    assert [item.kind for item in result.evidence] == ["gate_check"]
+
+
+def test_the_experiment_outranks_a_bare_tool_failure() -> None:
+    """把上下文交给人都答不出来 → 缺的是上下文，不是那个恰好也失败的工具。"""
+    trace = (event("tool_result", ok=False, detail={"tool": "read", "error": "timeout"}),)
+    result = attribute("could not compute", trace, experiment=Experiment.HUMAN_CANNOT_ANSWER)
+    assert result.blame == "context", result
+    assert result.confidence == "proven"
+
+
+def test_two_layers_blaming_each_other_is_unknown_not_a_coin_flip() -> None:
+    """两个层各说自己是病因 —— 归因层不许挑一个，交给人看。"""
+    trace = (
+        event("tool_result", ok=False, detail={"deterministic": True}),
+        event("gate_check", ok=False, detail={"constraint_rejected": True}, seq=2),
+    )
+    result = attribute("could not compute", trace, experiment=Experiment.HUMAN_CANNOT_ANSWER)
+    assert result.blame is None and result.confidence == "unknown", result
+    assert {item.kind for item in result.evidence} == {"tool_result", "gate_check"}
+
+
 def test_blame_to_action_mapping_matches_the_spec_table() -> None:
     assert set(BLAME_ACTIONS) == {Blame.MODEL, Blame.TOOL, Blame.CONTEXT, Blame.CONSTRAINT}
     assert actions_for("context") == ("fix_constraint",)

@@ -34,6 +34,8 @@ from ..agentloop.gate import GateVerdict
 from ..agentloop.loop import LoopIO, LoopState, TurnProposal
 from ..agentloop.tools import ToolCall, ToolResult
 from ..core.model import (
+    MISSING,
+    MISSING_CELLS,
     Artifact,
     Budget,
     Candidate,
@@ -345,6 +347,71 @@ def expected_shape(authorized_sources: Sequence[str]) -> str:
     return f'{EXPECTED_SHAPE} -- "ref" must be one of: {listed}'
 
 
+def _inherited_provenance(
+    artifact: Artifact,
+    parts: Mapping[str, Mapping[str, Any]],
+    reject: Reject,
+) -> tuple[Provenance, ...]:
+    """Cite a merge block's rows back to the rows it was handed (A11).
+
+    The block read no snapshot itself, so "row n came from source X" is not its
+    claim to make. Every output row is matched against the input rows it
+    received, and the matched input's citation is inherited. A row that matches
+    nothing is refused loudly: it is either fabricated or transformed, and the
+    system cannot yet tell those apart -- pretending would make the chain lie.
+    """
+
+    pool: list[tuple[int, Mapping[str, Any], Mapping[str, Any]]] = []
+    for name in sorted(parts):
+        payload = parts[name]
+        if not isinstance(payload, Mapping):
+            continue
+        raw_points = payload.get("provenance")
+        by_ref = {
+            str(point.get("value_ref")): point
+            for point in raw_points or []
+            if isinstance(point, Mapping)
+        }
+        rows = payload.get("rows")
+        for index, row in enumerate(rows or []):
+            point = by_ref.get(f"{name}:row={index}")
+            if isinstance(row, Mapping) and isinstance(point, Mapping):
+                pool.append((index, row, point))
+
+    provenance: list[Provenance] = []
+    for index, row in enumerate(artifact.rows):
+        matched = [entry for entry in pool if _same_row(row, entry[1])]
+        if not matched:
+            reject(
+                "untraceable_row",
+                f"row {index} of {artifact.name!r} matches no row this block was handed; "
+                "a merge may only carry values it received",
+            )
+        seen: set[tuple[str, int]] = set()
+        for input_index, _input_row, point in matched:
+            snapshot_ref = str(point.get("snapshot_ref") or "")
+            raw_source_row = point.get("source_row")
+            source_row = raw_source_row if isinstance(raw_source_row, int) else input_index
+            if not snapshot_ref or (snapshot_ref, source_row) in seen:
+                continue
+            seen.add((snapshot_ref, source_row))
+            provenance.append(
+                Provenance(
+                    value_ref=f"{artifact.name}:row={index}",
+                    snapshot_ref=snapshot_ref,
+                    locator=str(point.get("locator") or ""),
+                    source_row=source_row,
+                )
+            )
+    return tuple(provenance)
+
+
+def _same_row(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    from ..core.provenance import same_value
+
+    return all(same_value(left.get(key), right.get(key)) for key in set(left) | set(right))
+
+
 def parse_candidate(
     text: str,
     *,
@@ -352,12 +419,19 @@ def parse_candidate(
     source_id: str,
     authorized_sources: Sequence[str] = (),
     output_cap: int | None = None,
+    parts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Candidate:
     """Read one answer into a ``Candidate``, or fail loudly.
 
     Row-level provenance is synthesized from the snapshot the answer cites:
     ``required_refs`` asks for ``<artifact>:row=<n>`` per row, so citing one
     snapshot per row is exactly enough for the chain to be walkable.
+
+    ★ A11: two shapes of citation. A block with a source of its own cites it
+    positionally (``source_row`` = its own row). A block that only merges parts
+    (``parts`` handed in) read no snapshot itself, so its citations are
+    *inherited* from the rows it was actually given -- and a row that matches no
+    input row is refused instead of being given a citation it cannot support.
     """
     # ★ One place builds the fix, and every rejection carries it: what the model
     #   sent, which rule it broke, and the shape that would be accepted.
@@ -380,7 +454,10 @@ def parse_candidate(
     for row in rows:
         if not isinstance(row, Mapping):
             reject("row_not_an_object", f"a row is {type(row).__name__}, not an object of column: value")
-        clean_rows.append(dict(row))
+        # ★ A04: an absent cell is recorded as *absent* (``MISSING``), never as an
+        #   empty string or a zero. ``0`` is not in ``MISSING_CELLS`` on purpose:
+        #   a filled zero is a value and must stay distinguishable from "no value".
+        clean_rows.append({key: (MISSING if value in MISSING_CELLS else value) for key, value in row.items()})
 
     # ★ ``ref`` is not optional: it is what makes the chain walkable. Filling it
     #   with the block id would look legal (a non-empty string) and then fail
@@ -399,7 +476,11 @@ def parse_candidate(
         # No authorized source to cite (a block that only merges upstream parts):
         # there is nothing better to put here, and the gap is reported.
         snapshot_ref = source_id
-    elif authorized_sources and snapshot_ref not in authorized_sources:
+    elif (authorized_sources or subtask.inputs) and snapshot_ref not in authorized_sources:
+        # ★ A11: the guard used to be skipped whenever ``authorized_sources`` was
+        #   empty -- which is exactly the merge block, so it could cite anything.
+        #   A block that declares inputs may only cite a snapshot it (or the parts
+        #   it consumed) actually read.
         reject(
             "unknown_ref",
             f"'ref' names {snapshot_ref!r}, which is not a snapshot this block was given",
@@ -414,7 +495,14 @@ def parse_candidate(
         text=artifact_text if isinstance(artifact_text, str) else None,
     )
     provenance = [
-        Provenance(value_ref=f"{subtask.output}:row={index}", snapshot_ref=snapshot_ref, locator=locator)
+        Provenance(
+            value_ref=f"{subtask.output}:row={index}",
+            snapshot_ref=snapshot_ref,
+            locator=locator,
+            # ★ A11: say explicitly which snapshot row this output row was taken
+            #   from, so the content check has something to replay.
+            source_row=index,
+        )
         for index in range(len(clean_rows))
     ]
     if isinstance(artifact_text, str) and artifact_text:
@@ -423,6 +511,11 @@ def parse_candidate(
             for index, line in enumerate(artifact_text.splitlines())
             if line
         )
+    if parts:
+        # ★ A11: the block read no snapshot of its own, so its citations cannot be
+        #   positional. They are inherited from the rows it was handed; a row that
+        #   matches no input is refused (never given a citation it cannot support).
+        provenance = list(_inherited_provenance(artifact, parts, reject))
     versions = document.get("definition_versions")
     return Candidate(
         subtask_id=subtask.id,
@@ -476,10 +569,7 @@ class LoopIOImpl(LoopIO):
         ``state.messages`` (``AGENTS.md §6``: no cache-hostile prompt assembly).
         """
         block = self.toolset.task.mysubtask()
-        authorized: list[str] = []
-        sources = getattr(self.toolset, "sources", None)
-        if sources is not None and hasattr(sources, "refs"):
-            authorized = list(sources.refs())
+        authorized = list(self.authorized_sources())
         head = [
             {
                 "role": "system",
@@ -513,13 +603,38 @@ class LoopIOImpl(LoopIO):
             source_id=self.source_id,
             authorized_sources=self.authorized_sources(),
             output_cap=cap,
+            parts=self._upstream_parts(),
         )
         return TurnProposal(candidate=candidate, text=response.text)
 
     def authorized_sources(self) -> tuple[str, ...]:
-        """The snapshots this block may cite -- the same list the prompt carries."""
+        """The snapshots this block may cite -- the same list the prompt carries.
+
+        ★ A11: for a merge block this is not empty either. It read no source
+        itself, but the parts it consumed did, and a citation has to point at one
+        of those instead of at whatever the answer names.
+        """
         sources = getattr(self.toolset, "sources", None)
-        return tuple(sources.refs()) if sources is not None and hasattr(sources, "refs") else ()
+        own = tuple(sources.refs()) if sources is not None and hasattr(sources, "refs") else ()
+        inherited = tuple(getattr(self.toolset, "inherited_sources", ()) or ())
+        return own + inherited
+
+    def _upstream_parts(self) -> dict[str, Any]:
+        """The parts this block was handed, for a block that consumes inputs.
+
+        They carry the producing blocks' per-row citations, which is what a
+        consumer inherits its provenance from. A block with no declared inputs
+        read its material itself and cites it positionally.
+        """
+        if not self.subtask.inputs:
+            return {}
+        parts: dict[str, Any] = {}
+        for name in self.subtask.inputs:
+            try:
+                parts[name] = dict(self.toolset.task.upstream(name))
+            except PermissionError:  # not a declared input: it is not this block's to read
+                continue
+        return parts
 
     def wants_structured_output(self) -> bool:
         """Whether this call should ask for the answer shape.

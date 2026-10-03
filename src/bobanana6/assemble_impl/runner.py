@@ -54,8 +54,10 @@ from ..core.model import (
     DeliverableSpec,
     Limits,
     Ontology,
+    Provenance,
     Recon,
     Snapshot,
+    SnapshotBody,
     SourceRef,
     SplitPlan,
     Subtask,
@@ -63,7 +65,7 @@ from ..core.model import (
     Verdict,
 )
 from ..core.ontology import validate_ontology
-from ..core.ports import DecomposerPort, OntologyPort, SourcePort
+from ..core.ports import DecomposerPort, OntologyPort, SnapshotReader, SourcePort
 from ..core.split import SplitReport, check_split
 from ..report import ReportBundle, build_reports
 from ..services import TOOL_NAMES, BoundChecks, artifact_payload, build_toolset
@@ -140,6 +142,10 @@ class Runner:
     now: str
     #: Monotonic seconds for evidence timestamps, injected for the same reason.
     epoch: Callable[[], float]
+    #: ★ A11: whoever turns a frozen carrier into rows core may judge. Injected at
+    #: the assembly point; ``None`` means the content check cannot run and the
+    #: chain honestly degrades to the name check.
+    reader: SnapshotReader | None = None
     limits: Limits = DEFAULT_LIMITS
     budget: Budget = field(default_factory=lambda: Budget(max_calls=64, max_wall_s=3600, max_output=8192))
     #: The capabilities the deployment declares. ``None`` means "nothing was
@@ -205,6 +211,7 @@ class Runner:
         context = CheckContext(
             ontology=ontology,
             snapshots=snapshots,
+            snapshot_bodies=self._snapshot_bodies(snapshots),
             unmapped_fields=bundle.unmapped_fields,
             now=self.now,
             limits=self.limits,
@@ -212,11 +219,17 @@ class Runner:
         )
         self.runtime.context = context
         pieces: dict[str, Any] = {}
+        piece_provenance: dict[str, tuple[Provenance, ...]] = {}
         candidates: dict[str, Candidate] = {}
         verdicts: dict[str, Verdict] = {}
         decisions: list[Convergence] = []
         for subtask in plan.subtasks:
-            toolset = self._toolset(plan, subtask, bundle, ontology, snapshots, pieces, context)
+            inherited = tuple(
+                sorted({p.snapshot_ref for name in subtask.inputs for p in piece_provenance.get(name, ())})
+            )
+            toolset = self._toolset(
+                plan, subtask, bundle, ontology, snapshots, pieces, piece_provenance, inherited, context
+            )
             try:
                 candidate = self.runtime.run(subtask, bundle, ontology, toolset, self.budget)
             except BlockDeclined as declined:
@@ -232,6 +245,7 @@ class Runner:
                 )
                 continue
             candidates[subtask.id] = candidate
+            piece_provenance[subtask.output] = candidate.provenance
             judge = self.runtime.last_judge
             verdict = judge.last_verdict if judge is not None and judge.last_verdict is not None else judge.admit(candidate)  # type: ignore[union-attr]
             verdicts[subtask.id] = verdict
@@ -338,6 +352,16 @@ class Runner:
         evidence = RecordedEvidence()
         return {SHELL_COMMAND_CHECK: shell_command_check(evidence, self.epoch)}
 
+    def _snapshot_bodies(self, snapshots: Mapping[str, Snapshot]) -> dict[str, SnapshotBody]:
+        """Read every fetched snapshot's frozen rows, once, before any judgment.
+
+        A snapshot that cannot be read back is an error, not a reason to quietly
+        fall back to the weaker name-only check.
+        """
+        if self.reader is None:
+            return {}
+        return {ref: self.reader.body(snapshot) for ref, snapshot in sorted(snapshots.items())}
+
     def _toolset(
         self,
         plan: SplitPlan,
@@ -346,6 +370,8 @@ class Runner:
         ontology: Ontology,
         snapshots: Mapping[str, Snapshot],
         pieces: Mapping[str, Any],
+        piece_provenance: Mapping[str, tuple[Provenance, ...]],
+        inherited_sources: tuple[str, ...],
         context: CheckContext,
     ) -> Any:
         # ★ The upstream tool hands over the *content* of the declared inputs, not
@@ -356,7 +382,21 @@ class Runner:
             if artifact is None:
                 upstream[name] = {"schema": plan.interfaces.get(name, ""), "missing": True}
             else:
-                upstream[name] = {"schema": plan.interfaces.get(name, ""), **artifact_payload(artifact)}
+                upstream[name] = {
+                    "schema": plan.interfaces.get(name, ""),
+                    **artifact_payload(artifact),
+                    # ★ A11: the part's own per-row citations travel with it, so the
+                    #   consumer can inherit a truthful chain instead of inventing one.
+                    "provenance": [
+                        {
+                            "value_ref": point.value_ref,
+                            "snapshot_ref": point.snapshot_ref,
+                            "locator": point.locator,
+                            "source_row": point.source_row,
+                        }
+                        for point in piece_provenance.get(name, ())
+                    ],
+                }
         checks = BoundChecks(
             block=subtask.id,
             verdict=None,
@@ -372,6 +412,7 @@ class Runner:
             fetched=snapshots,
             upstream=upstream,
             checks=checks,
+            inherited_sources=inherited_sources,
         )
 
     def _split_report_for(self, plan: SplitPlan, bundle: ConstraintBundle, ontology: Ontology) -> SplitReport:

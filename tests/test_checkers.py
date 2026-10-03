@@ -13,6 +13,7 @@ from fakes import artifact, candidate, constraint, mini_ontology, provenance, sn
 from bobanana6.core.checkers import CHECKS, JUDGMENT_ORDER, check_kind
 from bobanana6.core.checkers.base import CheckContext
 from bobanana6.core.model import (
+    MISSING,
     Artifact,
     Claim,
     Column,
@@ -64,6 +65,29 @@ def test_schema_rejects_missing_column_and_reports_it() -> None:
     outcome = run("schema", {"columns": [{"name": "amount", "dtype": "float"}]}, cand=candidate(artifacts=(art,)))
     assert not outcome.ok
     assert "missing column 'amount'" in outcome.facts[0]
+
+
+def test_schema_rejects_a_missing_cell_in_a_not_null_column() -> None:
+    """★ A04：列声明了不得为空，缺失格就必须报到具体坐标 —— 不能被静默填平。"""
+    art = artifact("out.csv", ({"amount": MISSING},), columns=(Column("amount", "str", nullable=False),))
+    outcome = run(
+        "schema",
+        {"columns": [{"name": "amount", "dtype": "str", "nullable": False}]},
+        cand=candidate(artifacts=(art,)),
+    )
+    assert not outcome.ok
+    assert "row=0 col=amount holds no value" in outcome.facts[0]
+
+
+def test_schema_accepts_a_filled_zero_in_a_not_null_column() -> None:
+    """★ A04 的另一半：`0` 是一个值，不得被当成「缺失」而误杀。"""
+    art = artifact("out.csv", ({"amount": 0},), columns=(Column("amount", "float", nullable=False),))
+    outcome = run(
+        "schema",
+        {"columns": [{"name": "amount", "dtype": "float", "nullable": False}]},
+        cand=candidate(artifacts=(art,)),
+    )
+    assert outcome.ok, outcome.facts
 
 
 def test_schema_rejects_wrong_dtype() -> None:
@@ -383,6 +407,44 @@ def test_unit_consistency_rejects_undeclared_conversion() -> None:
 def test_unit_consistency_accepts_declared_conversion() -> None:
     outcome = run("unit_consistency", {"concept": "credit.amount", "unit": "USD", "conversion": "7 CNY/USD"})
     assert outcome.ok
+
+
+def test_unit_consistency_reads_the_unit_off_the_value() -> None:
+    """★ A10：值里写了单位就按值判 —— 只比声明会放过「1 千元」。"""
+    art = artifact("out.csv", ({"credit.amount": "1 千元"},))
+    outcome = run(
+        "unit_consistency",
+        {"concept": "credit.amount", "unit": "CNY"},
+        cand=candidate(artifacts=(art,)),
+    )
+    assert not outcome.ok
+    assert "declares unit '千元'" in outcome.facts[0] and "row=0" in outcome.facts[0]
+
+
+def test_unit_consistency_accepts_a_value_that_declares_the_same_unit() -> None:
+    art = artifact("out.csv", ({"credit.amount": "1 CNY"},))
+    outcome = run(
+        "unit_consistency",
+        {"concept": "credit.amount", "unit": "CNY"},
+        cand=candidate(artifacts=(art,)),
+    )
+    assert outcome.ok, outcome.facts
+
+
+def test_unit_consistency_leaves_a_unitless_value_alone() -> None:
+    """★ 残留如实留着：值里不带单位就无从判，不假装通过也不误杀。"""
+    art = artifact("out.csv", ({"credit.amount": "1"},))
+    assert run("unit_consistency", {"concept": "credit.amount", "unit": "CNY"}, cand=candidate(artifacts=(art,))).ok
+
+
+def test_unit_consistency_accepts_a_convertible_unit_when_declared() -> None:
+    art = artifact("out.csv", ({"credit.amount": "1 USD"},))
+    outcome = run(
+        "unit_consistency",
+        {"concept": "credit.amount", "unit": "CNY", "conversion": "7 CNY/USD"},
+        cand=candidate(artifacts=(art,)),
+    )
+    assert outcome.ok, outcome.facts
 
 
 def test_unit_consistency_detects_peer_conflict() -> None:

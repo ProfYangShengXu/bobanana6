@@ -50,6 +50,8 @@ from typing import Any
 __all__ = [
     "KNOWN_KINDS",
     "MAX_ROUNDS",
+    "MISSING",
+    "MISSING_CELLS",
     "UNIT_SYMBOLS",
     "Artifact",
     "BlindSpot",
@@ -79,12 +81,14 @@ __all__ = [
     "Relation",
     "ResourceUse",
     "Snapshot",
+    "SnapshotBody",
     "SourceRef",
     "SplitPlan",
     "Subtask",
     "TaskContract",
     "Unit",
     "Verdict",
+    "is_missing",
 ]
 
 #: The fourteen constraint kinds from the spec.
@@ -152,6 +156,41 @@ def canonical_json(value: Any) -> str:
 
 def content_digest(value: Any) -> str:
     return sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Missing values
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class _Missing:
+    """The one "this cell holds no value" marker (A04).
+
+    A missing cell is not a zero and not an empty string: a zero is a value. The
+    kernel cannot tell a filled-in zero from a real one *after the fact*, so the
+    loader maps an absent cell here and the judgment reads absence directly
+    instead of guessing from the number.
+    """
+
+    def __str__(self) -> str:
+        return "MISSING"
+
+    def __repr__(self) -> str:
+        return "MISSING"
+
+
+#: The missing-value marker. Compare with ``is`` (``is_missing``).
+MISSING = _Missing()
+
+#: Raw cell shapes the loader maps to :data:`MISSING`: no JSON value, or an
+#: empty cell. ``0`` is deliberately **not** in this set -- a filled zero is a
+#: value and must stay distinguishable from an absent one.
+MISSING_CELLS: tuple[Any, ...] = (None, "")
+
+
+def is_missing(value: Any) -> bool:
+    return value is MISSING
 
 
 # --------------------------------------------------------------------------- #
@@ -592,6 +631,11 @@ class Provenance:
     value_ref: str  # core:checkers —— 逐点覆盖统计读它
     snapshot_ref: str  # core:checkers —— 可达性判定读它
     locator: str = ""  # external:report —— 人读定位串，core 不判定
+    #: Which row of the cited snapshot this point came from (A11). ``None`` means
+    #: the producer did not say: the check then falls back to the row named in
+    #: ``value_ref``. A merge block names a *different* source row than its own
+    #: output row, which is exactly why this has to be sayable.
+    source_row: int | None = None  # core:checkers —— 内容级溯源校验读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.value_ref, "Provenance.value_ref must not be empty")
@@ -616,7 +660,6 @@ class Artifact:
     Loaders live outside ``core/``; the kernel only reasons over this value, so
     no path is ever opened here.
     """
-
     name: str  # core:checkers —— 产出定位与坐标报错读它
     columns: tuple[Column, ...] = ()  # core:checkers —— schema/range/relation 读它
     rows: tuple[Mapping[str, Any], ...] = ()  # core:checkers —— 逐值判定遍历它
@@ -634,6 +677,28 @@ class Artifact:
     @property
     def row_count(self) -> int:
         return len(self.rows)
+
+
+@dataclass(frozen=True)
+class SnapshotBody:
+    """The frozen content of one snapshot, as data (A11).
+
+    core never opens ``Snapshot.body_path``; the reader outside parses the carrier
+    and hands the rows over in this shape (``AGENTS.md §1.3``). Having the body is
+    what lets a citation be checked for *content* instead of only for its name.
+    """
+
+    ref: str  # core:provenance —— 内容级校验按 ref 找体
+    columns: tuple[Column, ...] = ()  # core:provenance —— 值比对按列名取交集
+    rows: tuple[Mapping[str, Any], ...] = ()  # core:provenance —— 引用行是否存在、值是否一致读它
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.ref, "SnapshotBody.ref must not be empty")
+
+    def row(self, index: int) -> Mapping[str, Any] | None:
+        if 0 <= index < len(self.rows):
+            return self.rows[index]
+        return None
 
 
 @dataclass(frozen=True)

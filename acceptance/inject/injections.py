@@ -163,24 +163,59 @@ def a03_real_conflict() -> Observation:
 
 
 def a04_missing_not_zero() -> Observation:
-    """A04：源里故意留空且不标注 —— 面板里必须是「缺失」，不能是被填平的 0。"""
+    """A04：源里故意留空且不标注 —— 面板里必须是「缺失」，不能是被填平的 0。
+
+    ★ 修后：「缺失」是**一等状态**（`core.model.MISSING`），不再是「某个空串」。
+    读取端把空单元格映射成 `MISSING`；列声明了 `nullable: false` 时，`schema`
+    逐格判它 —— 空白格报到 `row=0`，而被填平的 `0` 是一个值、照样通过。
+    两者因此不再同形（对照读数见 acceptance/inject/README.md）。
+    """
+    import json
+
+    from bobanana6.assemble_impl.produce import parse_candidate
     from bobanana6.core.checkers.base import CheckContext
     from bobanana6.core.kernel import run_hard
+    from bobanana6.core.model import Subtask
 
-    blank = _candidate(sid="T-01", source="src-1", artifact=_artifact("out.csv", ({"amount": ""},), ("amount",)))
-    zero = _candidate(sid="T-02", source="src-2", artifact=_artifact("out.csv", ({"amount": "0"},), ("amount",)))
-    bundle = _bundle(_constraint("C-rows", "presence", "out.csv", {"min_rows": 1}))
+    block = Subtask(
+        id="T-01", goal="read one source", inputs=(), output="out.csv", contract_ref="t", axis="field", mode="read"
+    )
+
+    def candidate_from(cell: Any) -> Any:
+        answer = json.dumps(
+            {
+                "ref": "snap-1",
+                "columns": [{"name": "amount", "dtype": "str", "nullable": False}],
+                "rows": [{"amount": cell}],
+            }
+        )
+        return parse_candidate(answer, subtask=block, source_id="snap-1", authorized_sources=("snap-1",))
+
+    blank = candidate_from("")  # ★ 空单元格：读取端记成 MISSING，不是 ""
+    zero = candidate_from(0)  # ★ 被填平的 0：一个值
+    bundle = _bundle(
+        _constraint(
+            "C-amount",
+            "schema",
+            "out.csv",
+            {"columns": [{"name": "amount", "dtype": "str", "nullable": False}]},
+        )
+    )
     blank_outcomes = tuple((o.constraint_id, o.ok, o.facts) for o in run_hard(bundle, blank, CheckContext()))
     zero_outcomes = tuple((o.constraint_id, o.ok, o.facts) for o in run_hard(bundle, zero, CheckContext()))
     # ★ 判据是【行为】而不是别的：一条空值和一条 0 在判定器眼里是不是同一个东西
     distinguished = blank_outcomes != zero_outcomes
     return Observation(
         found=distinguished,
-        action="reject_filled_zero" if distinguished else "missing_and_zero_look_the_same",
+        action="reject_missing_not_fill_zero" if distinguished else "missing_and_zero_look_the_same",
         evidence=(
-            f"blank cell -> {blank_outcomes}",
+            f"missing cell -> {blank_outcomes}",
             f"filled zero -> {zero_outcomes}",
-            "the two are indistinguishable to every check in the bundle",
+            (
+                "★ a missing cell is a first-class state, so a not-null column can name it"
+                if distinguished
+                else "the two are still indistinguishable to every check in the bundle"
+            ),
         ),
     )
 
@@ -297,28 +332,41 @@ def a09_impossible() -> Observation:
 def a07_same_symptom_different_layer() -> Observation:
     """★ A07：三个块都报「算不出来」，根因分别是 工具坏 / 上下文没给到 / 判定器太严。
 
-    实测形态：`attribute()` 先抓 `tool_result and not ok` 的旁支就定案 ——
-    三条 trace 只要都含工具失败，就都归成 `tool`。**同一个 blame = §14.2 的 fail_if。**
+    ★ 修后：三条 trace **仍然都含「工具失败」这个症状**，但病因改由
+    「产生失败的那一方自己声明」（`AGENTS.md §7⑫` 的同一个手法）：
+      工具坏        → 工具标了自己的失败是确定性的（`deterministic`）
+      上下文没给到  → 分离实验（把上下文交给人都答不出来）
+      判定器太严    → 判定器宣告了它拒的那条约束（`constraint_rejected`）
+    归因层先读声明，不再按固定优先级把「有工具失败」当死因。
     """
-    from bobanana6.agentloop.attribution import attribute
+    from bobanana6.agentloop.attribution import Experiment, attribute
     from bobanana6.agentloop.events import EventLog
 
-    def trace(*, tool_failed: bool, constraint_evidence: bool, model_hint: str) -> tuple:
+    def trace(*, deterministic: bool = False, constraint_rejected: bool = False) -> tuple:
         log = EventLog()
-        if tool_failed:
-            log.record(kind="tool_result", task_id="t", worker_id="w", at=1.0, ok=False, detail={"tool": "fetch"})
-        if constraint_evidence:
-            log.record(kind="gate_check", task_id="t", worker_id="w", at=1.0, ok=False, detail={"detail": "C-1"})
-        if model_hint:
-            log.record(kind="retry", task_id="t", worker_id="w", at=1.0, ok=False, detail={"detail": model_hint})
+        detail: dict[str, Any] = {"tool": "fetch"}
+        if deterministic:
+            detail["deterministic"] = True
+        log.record(kind="tool_result", task_id="t", worker_id="w", at=1.0, ok=False, detail=detail)
+        if constraint_rejected:
+            log.record(
+                kind="gate_check",
+                task_id="t",
+                worker_id="w",
+                at=1.0,
+                ok=False,
+                detail={"constraint_rejected": True, "detail": "C-1"},
+            )
         return log.events
 
     cases = {
-        "tool_is_broken": trace(tool_failed=True, constraint_evidence=False, model_hint=""),
-        "context_not_given": trace(tool_failed=True, constraint_evidence=False, model_hint="context"),
-        "judge_too_strict": trace(tool_failed=True, constraint_evidence=True, model_hint=""),
+        "tool_is_broken": (trace(deterministic=True), Experiment.NOT_RUN),
+        "context_not_given": (trace(), Experiment.HUMAN_CANNOT_ANSWER),
+        "judge_too_strict": (trace(constraint_rejected=True), Experiment.NOT_RUN),
     }
-    blames = tuple(attribute(name, events).blame for name, events in cases.items())
+    blames = tuple(
+        attribute(name, events, experiment=experiment).blame for name, (events, experiment) in cases.items()
+    )
     distinct = len(set(blames)) == len(blames)
     return Observation(
         found=True,
@@ -326,9 +374,9 @@ def a07_same_symptom_different_layer() -> Observation:
         evidence=(
             "blames=" + str(dict(zip(cases, blames, strict=True))),
             (
-                "★ tool evidence decides first: three different root causes get the same blame"
-                if not distinct
-                else "the three blames are distinct"
+                "★ all three blocks report the same symptom (a failed tool); each layer declares its own cause"
+                if distinct
+                else "the three blames are still not distinct"
             ),
         ),
     )
@@ -380,9 +428,9 @@ def a08_global_invariant() -> Observation:
 def a10_units() -> Observation:
     """A10：元/千元/百万元混用且部分源不标 → 归一后数值正确。
 
-    ★ 实测形态：单位**只有在声明了的时候**才可判（`unit_consistency` 拿
-    `spec.concept` / `spec.unit` 与本体比对）。源里**不标**单位的那一半，
-    系统无从判断 —— 它需要真值（§14.1 的物理隔离），本块不含。
+    ★ 修后：单位检查**读值里的单位**（`"1 CNY"` / `"1 千元"`），不再只比两边的声明。
+    值里带了一个不同/未声明的单位 → 当场报到具体位置；值里**不带**单位的那种
+    仍然无法判（那需要真值或声明），这一条残留如实写在证据里，不假装通过。
     """
     from bobanana6.core.checkers.base import CheckContext
     from bobanana6.core.checkers.unit_consistency import check as unit_check
@@ -396,33 +444,35 @@ def a10_units() -> Observation:
         units={"amount:CNY": Unit(concept_id="amount", symbol="CNY", scale=1.0, base="CNY")},
     ).freeze()
     declared = _constraint("U-1", "unit_consistency", "out.csv", {"concept": "amount", "unit": "CNY"})
-    labeled = _candidate(sid="T-01", source="s", artifact=_artifact("out.csv", ({"amount": "1 CNY"},), ("amount",)))
-    unlabeled = _candidate(sid="T-02", source="s2", artifact=_artifact("out.csv", ({"amount": "1 千元"},), ("amount",)))
-    labeled_ok = unit_check(declared, labeled, CheckContext(ontology=ontology)).ok
-    unlabeled_outcome = unit_check(declared, unlabeled, CheckContext(ontology=ontology))
-    # ★ unit_consistency 只比【声明】：constraint 声明的单位 vs 本体声明的单位（+ 邻块声明）。
-    #   候选里的值它一个都不看 —— 所以「归一后数值正确」这件事今天没有判定者。
-    same_verdict_for_a_wrong_value = unlabeled_outcome.ok
+
+    def verdict(cell: Any) -> Any:
+        candidate = _candidate(sid="T-01", source="s", artifact=_artifact("out.csv", ({"amount": cell},), ("amount",)))
+        return unit_check(declared, candidate, CheckContext(ontology=ontology))
+
+    matching = verdict("1 CNY")
+    wrong_unit = verdict("1 千元")
+    no_unit = verdict("1")
+    # ★ 判据：值里写了另一个单位必须被抓；写了同一个单位必须放行；不带单位的仍判不了。
+    caught_wrong_unit = not wrong_unit.ok
     return Observation(
-        found=same_verdict_for_a_wrong_value is False,
-        action="normalized_values" if not same_verdict_for_a_wrong_value else "value_level_normalization_not_judged",
+        found=caught_wrong_unit,
+        action="value_level_unit_read" if caught_wrong_unit else "value_level_unit_not_read",
         evidence=(
-            f"a declared unit is checkable (CNY passes: {labeled_ok})",
-            (
-                f"a candidate whose value reads '1 千元' gets the same verdict: {unlabeled_outcome.ok} "
-                f"({'; '.join(unlabeled_outcome.facts)[:70]})"
-            ),
-            "★ unit_consistency compares declarations only (constraint vs ontology vs peer); no value is ever read",
+            f"a declared unit is checkable (CNY passes: {matching.ok})",
+            f"a value reading '1 千元' -> ok={wrong_unit.ok} ({'; '.join(wrong_unit.facts)[:80]})",
+            f"a value carrying no unit ('1') -> ok={no_unit.ok} (still unjudgeable without a declaration)",
         ),
     )
 
 
 def a11_provenance_content() -> Observation:
-    """★★ A11：溯源引用的**真实性**没人校验（见仓库根 `溯源缺口-引用真实性未校验-20261003.md`）。
+    """★★ A11：溯源引用的**真实性**（见仓库根 `溯源缺口-引用真实性未校验-20261003.md`）。
 
     注入：快照只有 3 行，候选声称 30 行、每行都引用它 → `row=3..29` 引用的行不存在。
-    期望：在没有真值的情况下当场抓住。**当前行为：放行。**
+    ★ 修后：快照内容由外侧读好、以 `SnapshotBody` 注入判定器，链**逐点重放**：
+    引用的行必须在、值必须对得上。名字在注册表里不再等于引用为真。
     """
+    from bobanana6.core.model import SnapshotBody
     from bobanana6.core.provenance import validate_points
 
     rows = 30
@@ -433,7 +483,11 @@ def a11_provenance_content() -> Observation:
         provenance=_provenance_for_rows("panel.csv", rows, "panel-a"),
     )
     required = tuple(f"panel.csv:row={index}" for index in range(rows))
-    report = validate_points(required, candidate.provenance, {"panel-a": _snapshot("panel-a")})
+    body = SnapshotBody(
+        ref="panel-a",
+        rows=tuple({"obligor": f"A-{index:03d}"} for index in range(3)),  # ★ 快照真的只有 3 行
+    )
+    report = validate_points(required, candidate.provenance, {"panel-a": _snapshot("panel-a")}, {"panel-a": body})
     return Observation(
         found=not report.ok,
         action="rejected" if not report.ok else "passed",
@@ -441,7 +495,11 @@ def a11_provenance_content() -> Observation:
             f"snapshot has 3 rows; the candidate cites {rows} rows (row=3..29 do not exist)",
             f"coverage={report.coverage:.2f}, breaks={len(report.breaks)}, "
             + f"unreachable={len(report.unreachable_points)}",
-            "★ the chain only checks that the snapshot *name* is known -- the file is never opened",
+            (
+                "★ the chain now replays the citation against the frozen body"
+                if not report.ok
+                else "★ the chain still only checks that the snapshot *name* is known"
+            ),
         ),
     )
 

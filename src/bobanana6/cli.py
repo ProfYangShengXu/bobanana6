@@ -51,7 +51,7 @@ from .core.model import DEFAULT_LIMITS, Budget
 from .core.ports import LLMClient, OntologyPort, SourcePort
 from .decompose import Decomposer, RoundBudget
 from .ontology import load_ontology_file
-from .sources import LocatorFetcher, SnapshotStore
+from .sources import LocatorFetcher, SnapshotFileReader, SnapshotStore
 
 __all__ = ["App", "build_app", "main"]
 
@@ -101,6 +101,10 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
 
     store = SnapshotStore(root=Path(args.snapshots))
     fetcher: SourcePort = LocatorFetcher(store=store, captured_at=_now_iso())
+    # ★ A11: the content-level provenance check needs the frozen rows as data,
+    #   and core never opens a path -- so the reader is built here, at the one
+    #   assembly point, and injected into the runner.
+    reader = SnapshotFileReader(store=store)
 
     decomposer = Decomposer(
         strategy=args.strategy,
@@ -133,6 +137,7 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
         runtime=runtime,
         fetcher=fetcher,
         store=store,
+        reader=reader,
         now=_now_iso(),
         epoch=time.monotonic,
         limits=DEFAULT_LIMITS,
