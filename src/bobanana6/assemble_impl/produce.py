@@ -663,15 +663,38 @@ class LoopIOImpl(LoopIO):
             # ★ The third legal exit: the worker says it cannot get this
             #   information. It is not a failure and the loop must not retry it.
             return TurnProposal(declined=True, detail=_decline_reason(response.text))
-        candidate = parse_candidate(
-            response.text,
-            subtask=self.subtask,
-            source_id=self.source_id,
-            authorized_sources=self.authorized_sources(),
-            output_cap=cap,
-            parts=self._upstream_parts(),
-        )
+        try:
+            candidate = parse_candidate(
+                response.text,
+                subtask=self.subtask,
+                source_id=self.source_id,
+                authorized_sources=self.authorized_sources(),
+                output_cap=cap,
+                parts=self._upstream_parts(),
+            )
+        except CandidateFormatError as rejected:
+            # ★ `#65`: 这一类的生产者【只有模型自己】——答案的结构性错误（不是 JSON /
+            #   缺必需字段 / 行对不上）在进程内是可判的；而"语义答错"在进程内与
+            #   "上下文不够"分不开（`#17` 已论证），所以这里【只声明结构性错误】，
+            #   不加启发式硬判。声明走事件流（`detail["cause"]`），归因层照 `#16` 的
+            #   规矩先读声明，不再把这一类记成 `None`。
+            self._declare_model_failure(rejected)
+            raise
         return TurnProposal(candidate=candidate, text=response.text)
+
+    def _declare_model_failure(self, rejected: CandidateFormatError) -> None:
+        """把「模型给了结构性坏答案」这件事作为【声明】写进事件流。"""
+        if self.log is None:
+            return
+        code = str(getattr(rejected, "code", "") or "")
+        self.log.record(
+            kind="produce_failure",
+            task_id=self.task_id or self.subtask.id,
+            worker_id=self.subtask.id,
+            at=self.epoch(),
+            ok=False,
+            detail={"cause": "model", "code": code, "reason": rejected.reason},
+        )
 
     def authorized_sources(self) -> tuple[str, ...]:
         """The snapshots this block may cite -- the same list the prompt carries.

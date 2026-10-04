@@ -1737,7 +1737,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "W01-block-bundle-not-projected",
         "assemble_impl/runtime.py",
-        "            bundle=block_bundle(bundle, subtask),",
+        "            bundle=block_bundle(bundle, subtask, ontology),",
         "            bundle=bundle,",
         "tests/test_runner.py::test_two_source_task_runs_the_pipeline_and_the_merge_block",
         "each block is judged against the whole plan's bundle, so neighbours' constraints fail it",
@@ -1987,6 +1987,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "        if True:  # mutation: hundreds of inputs are dumped into the context whole\n",
         "tests/test_acceptance.py::test_hundreds_of_inputs_do_not_cost_the_worker_any_turns",
         "a 240-input task tries to paste everything and blows the context instead of indexing",
+    ),
+    # -- #65：结构性坏答案必须自报 blame -- #
+    Mutation(
+        "Q10-model-failure-is-not-declared",
+        "assemble_impl/produce.py",
+        "        code = str(getattr(rejected, \"code\", \"\") or \"\")\n",
+        "        return  # mutation: the model's own bad shape is never declared\n",
+        "tests/test_acceptance.py::test_a_structurally_bad_answer_is_declared_as_the_models_failure",
+        "the most common real-run failure goes back to blame=None",
     ),
 )
 

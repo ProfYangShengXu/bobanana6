@@ -274,7 +274,7 @@ class Runner:
             verdict = judge.last_verdict if judge is not None and judge.last_verdict is not None else judge.admit(candidate)  # type: ignore[union-attr]
             verdicts[subtask.id] = verdict
             # ★ judged against this block's slice, not the whole plan's bundle
-            decisions.append(converge(block_bundle(bundle, subtask), (candidate,), context))
+            decisions.append(converge(block_bundle(bundle, subtask, ontology), (candidate,), context))
             artifact = candidate.artifact(subtask.output)
             if artifact is not None:
                 pieces[subtask.output] = artifact

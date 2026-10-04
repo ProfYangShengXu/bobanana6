@@ -42,6 +42,7 @@ from ..core.model import (
     Subtask,
     TaskContract,
 )
+from ..core.ontology import map_field
 from ..core.ports import LLMClient, ToolSet
 from ..services.checks import BlockJudge
 from ..services.registry import build_registry
@@ -59,7 +60,18 @@ __all__ = [
 ]
 
 
-def block_bundle(bundle: ConstraintBundle, subtask: Subtask) -> ConstraintBundle:
+#: ★ `#66` (+「引用+变换」那条 / A02)：这三类是【字段级】规则 —— 名称说的是
+#: 某个字段/概念该怎么长（形状、单位、口径版本），中间块的产出也该按同一条规则判。
+#: 以前它们只点名交付物，于是脏值要等到合并块才爆（`#19` run 4：读块的 `amount`
+#: 是嵌套 dict 也全绿），而合并块若替它换算又会被继承守卫拒（"引用+变换"表达不了）。
+_FIELD_KINDS: tuple[str, ...] = ("schema", "unit_consistency", "definition_pin")
+
+
+def block_bundle(
+    bundle: ConstraintBundle,
+    subtask: Subtask,
+    ontology: Ontology | None = None,
+) -> ConstraintBundle:
     """The slice of a bundle that judges *this* block.
 
     ★ ``kernel.admit`` judges one candidate against a bundle. Handing it the full
@@ -67,16 +79,48 @@ def block_bundle(bundle: ConstraintBundle, subtask: Subtask) -> ConstraintBundle
     block would be judged against ``AUTO-T-02`` while only holding its own
     output. Constraints targeting ``*`` are kept: they are global invariants, and
     ``assemble.check_assembly`` re-checks them over the merged pieces.
+
+    ★ `#66`/A02/变换：字段级规则（``_FIELD_KINDS``）在**中间块**上重指向本块的产出 ——
+    同一条规则、换个目标。只有规则点名的字段确实由本块声明时才重指向，
+    否则会把"邻居的字段"算到它头上。
     """
+
+    declared = set(subtask.output_fields)
 
     def keep(constraint: Constraint) -> bool:
         return constraint.target in ("*", subtask.id, subtask.output)
 
-    return replace(
-        bundle,
-        hard=tuple(c for c in bundle.hard if keep(c)),
-        soft=tuple(c for c in bundle.soft if keep(c)),
+    def retarget(constraint: Constraint) -> Constraint | None:
+        if constraint.target in ("*", subtask.id, subtask.output) or constraint.kind not in _FIELD_KINDS:
+            return None
+        if not declared or not _names_a_declared_field(constraint, declared, ontology):
+            return None
+        return replace(constraint, id=f"{constraint.id}@{subtask.id}", target=subtask.output)
+
+    hard = tuple(c for c in bundle.hard if keep(c)) + tuple(
+        r for r in (retarget(c) for c in bundle.hard) if r is not None
     )
+    soft = tuple(c for c in bundle.soft if keep(c)) + tuple(
+        r for r in (retarget(c) for c in bundle.soft) if r is not None
+    )
+    return replace(bundle, hard=hard, soft=soft)
+
+
+def _names_a_declared_field(constraint: Constraint, declared: set[str], ontology: Ontology | None) -> bool:
+    """Does this field-level rule talk about a field this block produces?"""
+    spec = constraint.spec
+    columns = spec.get("columns")
+    if isinstance(columns, list):  # schema
+        names = {str(c.get("name")) for c in columns if isinstance(c, Mapping) and "name" in c}
+        return bool(names) and names <= declared
+    concept = spec.get("concept")
+    if isinstance(concept, str) and concept:  # unit_consistency / definition_pin
+        if ontology is None:
+            return False
+        return any(
+            field == concept or map_field(field, ontology) == concept for field in declared
+        )
+    return False
 
 
 class BlockRuntimeError(RuntimeError):
@@ -201,7 +245,7 @@ class BlockRuntime:
         budget: Budget,
     ) -> Candidate:
         judge = BlockJudge(
-            bundle=block_bundle(bundle, subtask),
+            bundle=block_bundle(bundle, subtask, ontology),
             subtask=subtask,
             context=self.context,
             required_scope=self.required_scope,

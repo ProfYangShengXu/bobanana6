@@ -27,6 +27,10 @@ EVENT_KINDS: tuple[str, ...] = (
     "gate_check",
     "checkpoint",
     "attribute",
+    # ★ `#65`: 事件词表里原来没有"模型给的答案结构性不可用"这一格 —— 于是这一类失败
+    #   没有生产者敢声明，归因就成了 `None`。补一格，声明由产出阶段发出
+    #   （`detail["cause"] = "model"`）。
+    "produce_failure",
 )
 
 

@@ -607,8 +607,16 @@ def test_a_mixed_unit_panel_is_caught_only_once_the_task_judges_units(tmp_path: 
 
     judged = run_task(ACCEPTANCE / "main" / "panel-three-sources", client=_ScriptedBlocks(normalise_units=False), env={})
     assert judged.report.block_pass_rate < 1.0, judged.report.render()
-    fact = judged.verdicts["T-04"].evidence.get("C-units", "")
-    assert "declares unit '千元'" in fact, judged.verdicts["T-04"].evidence
+    # ★ `#66`: 这条规则现在在【读块】就生效（以前只在合并块爆）—— 照抄千元的那一块
+    #   产出时就被点名，脏值不必等到最后。
+    caught = {
+        block: " ".join(str(value) for key, value in verdict.evidence.items() if key.startswith("C-units"))
+        for block, verdict in judged.verdicts.items()
+    }
+    caught = {block: fact for block, fact in caught.items() if "declares unit '千元'" in fact}
+    assert caught, {b: dict(v.evidence) for b, v in judged.verdicts.items()}
+    # 读 panel-c 的那一块【自己】就被点名（不是等到合并块）
+    assert len(caught) == 1, caught
 
 
 def test_a_source_that_does_not_label_its_unit_is_not_silently_assumed(tmp_path: Path) -> None:
@@ -625,14 +633,21 @@ def test_a_source_that_does_not_label_its_unit_is_not_silently_assumed(tmp_path:
     assert lenient.report.block_pass_rate == 1.0, {
         name: (verdict.failed, dict(verdict.evidence)) for name, verdict in lenient.verdicts.items()
     }
-    panel_fact = lenient.verdicts["T-04"].evidence["C-units"]
+    panel_fact = " ".join(
+        str(value) for verdict in lenient.verdicts.values() for key, value in verdict.evidence.items() if key.startswith("C-units")
+    )
     assert "assumption, not a declaration" in panel_fact, panel_fact
     assert "carry no unit" in panel_fact, panel_fact
 
     strict = run_task(_task_with_a_unit_constraint(tmp_path, explicit=True), client=_ScriptedBlocks(), env={})
     assert strict.report.block_pass_rate < 1.0, strict.report.render()
-    strict_fact = strict.verdicts["T-04"].evidence.get("C-units", "")
-    assert "requires the unit to be explicit" in strict_fact, strict.verdicts["T-04"].evidence
+    # ★ `#66`: 严格模式下【没标单位的那一块自己】就被拒（以前是合并块替它挨）
+    strict_facts = " ".join(
+        str(value) for v in strict.verdicts.values() for key, value in v.evidence.items() if key.startswith("C-units")
+    )
+    assert "requires the unit to be explicit" in strict_facts, {
+        b: dict(v.evidence) for b, v in strict.verdicts.items()
+    }
 
 
 def test_a_unit_heterogeneous_source_is_normalised_at_read_time() -> None:
@@ -1119,3 +1134,20 @@ def test_hundreds_of_inputs_do_not_cost_the_worker_any_turns() -> None:
     body = big._delivered_inputs()
     assert len(body["delivered_inputs_index"]) == 240
     assert "task.upstream_all" in body["note"], body["note"]
+
+
+def test_a_structurally_bad_answer_is_declared_as_the_models_failure() -> None:
+    """★ `#65`：真跑里最常见的失败（答案不可用）必须有 blame —— 以前是 `None`。
+
+    ★ 只声明【结构性】错误（非 JSON / 缺必需字段 / 行对不上）：这些在进程内可判；
+      "语义答错"与"上下文不够"在进程内分不开（`#17` 已论证），所以不加启发式硬判。
+    """
+    from bobanana6.adapters import ScriptedClient
+
+    client = ScriptedClient([{"text": "not json at all"}])
+    run = run_task(ACCEPTANCE / "smoke" / "smoke-panel-one-source", client=client, env={}, expected_blame="model")
+    assert run.report.attribution_accuracy == 1.0, run.report.notes
+    assert run.report.block_pass_rate == 0.0
+    # ★ 该块确实是被"答案读不出来"拦下的（不是别的失败）
+    evidence = next(iter(run.verdicts.values())).evidence
+    assert "CandidateFormatError" in str(evidence.get("errors")), evidence
