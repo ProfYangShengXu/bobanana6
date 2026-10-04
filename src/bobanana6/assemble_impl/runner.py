@@ -239,6 +239,10 @@ class Runner:
                     "missing_inputs": list(subtask.inputs),
                 }
                 self._note_gate(subtask, False, evidence)
+                # ★ `failed=("runtime",)` **不是"运行期崩了"**：它与下面 `BlockRuntimeError`
+                #   那一格共用同一个标签，而两者是不同的失败 —— 这里是**前置门**（输入一件都没到，
+                #   0 次模型调用）。真因在 `evidence` 里（`exit="inputs_unavailable"`），
+                #   读读数时先看它，不要从标签猜。
                 verdicts[subtask.id] = Verdict(ok=False, failed=("runtime",), evidence=evidence)
                 continue
             inherited = tuple(
@@ -262,6 +266,11 @@ class Runner:
                 if failure_evidence.get("rejected_by"):
                     failure_detail["constraint_rejected"] = True
                 self._note_gate(subtask, False, failure_detail)
+                # ★ 同一个 `"runtime"` 标签的第二半：这里**多半是"候选被判定器拒收"**
+                #   （`exit` 是 `degrade_single_agent` / `fix_constraint` 之类），
+                #   真因在 `evidence["rejected_by"]` 与具名门里 —— 不是进程崩了。
+                #   ★ 实测代价：24 源压力题上修前 1 块、修后 15–16 块都带这个标签，
+                #   只看标签会把"读块各自撞字段规则"误读成"运行期不稳定"。
                 verdicts[subtask.id] = Verdict(
                     ok=False,
                     failed=("runtime",),
