@@ -227,6 +227,20 @@ class Runner:
         verdicts: dict[str, Verdict] = {}
         decisions: list[Convergence] = []
         for subtask in plan.subtasks:
+            available = [name for name in subtask.inputs if name in pieces]
+            if subtask.inputs and not available:
+                # ★ ①(c) 前置门：计划知道它要哪些输入，一件都没到就【不许开工】。
+                #   这是「输入取不回来」（生产它的块失败了），不是「它没去取」——
+                #   不能靠模型自觉发现、更不能让它凭名字编一张表出来（E-0 就是这么编的）。
+                #   0 次模型调用，按具名理由记失败；缺失的一件走 A06 的降级与标记。
+                evidence = {
+                    "exit": "inputs_unavailable",
+                    "cause": "context",
+                    "missing_inputs": list(subtask.inputs),
+                }
+                self._note_gate(subtask, False, evidence)
+                verdicts[subtask.id] = Verdict(ok=False, failed=("runtime",), evidence=evidence)
+                continue
             inherited = tuple(
                 sorted({p.snapshot_ref for name in subtask.inputs for p in piece_provenance.get(name, ())})
             )

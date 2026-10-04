@@ -34,8 +34,6 @@ from ..agentloop.gate import GateVerdict
 from ..agentloop.loop import LoopIO, LoopState, TurnProposal
 from ..agentloop.tools import ToolCall, ToolResult
 from ..core.model import (
-    MISSING,
-    MISSING_CELLS,
     Artifact,
     Budget,
     Candidate,
@@ -44,6 +42,7 @@ from ..core.model import (
     ModelResponse,
     Provenance,
     Subtask,
+    canonical_row,
     content_digest,
 )
 from ..core.ports import LLMClient, ToolSet
@@ -412,7 +411,11 @@ def _inherited_provenance(
 def _same_row(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
     from ..core.provenance import same_value
 
-    return all(same_value(left.get(key), right.get(key)) for key in set(left) | set(right))
+    # ★ ②: compare the *canonical* rows. "No value" has one spelling (the key is
+    #   absent), so a row that spelled it ``null`` and a row that omitted the key
+    #   are the same row -- which is what the guard always meant.
+    one, other = canonical_row(left), canonical_row(right)
+    return all(same_value(one.get(key), other.get(key)) for key in set(one) | set(other))
 
 
 def parse_candidate(
@@ -457,10 +460,13 @@ def parse_candidate(
     for row in rows:
         if not isinstance(row, Mapping):
             reject("row_not_an_object", f"a row is {type(row).__name__}, not an object of column: value")
-        # ★ A04: an absent cell is recorded as *absent* (``MISSING``), never as an
-        #   empty string or a zero. ``0`` is not in ``MISSING_CELLS`` on purpose:
-        #   a filled zero is a value and must stay distinguishable from "no value".
-        clean_rows.append({key: (MISSING if value in MISSING_CELLS else value) for key, value in row.items()})
+        # ★ A04 + ②: an absent cell is recorded as *absent*, never as an empty
+        #   string or a zero. The canonical spelling is "the key is not there"
+        #   (``canonical_row``), so every later reader -- the merge guard, the
+        #   payload the consumer sees, the truth comparison -- has exactly one
+        #   shape to handle instead of guessing at ``null`` / ``""`` / a sentinel.
+        #   ``0`` stays a value: a filled zero must remain distinguishable.
+        clean_rows.append(canonical_row(row))
 
     # ★ ``ref`` is not optional: it is what makes the chain walkable. Filling it
     #   with the block id would look legal (a non-empty string) and then fail
@@ -535,6 +541,26 @@ def parse_candidate(
     )
 
 
+#: ★ ①: 前置预取一次最多塞进多少字符。超了就退化成「索引 + 可逐件取」——
+#: 默认给全是对的（E-5：3/3 交出面板），但 240 个输入不能靠"一律全塞"。
+DELIVERED_INPUTS_BUDGET = 120_000
+
+
+def _input_index(parts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """够用来挑件的最小索引：名字 / schema / 列 / 行数 / 第一行。"""
+    index = {}
+    for name, payload in sorted(parts.items()):
+        rows = payload.get("rows") or []
+        index[name] = {
+            "schema": payload.get("schema"),
+            "columns": payload.get("columns"),
+            "rows": len(rows),
+            "missing": bool(payload.get("missing")),
+            "first_row": dict(rows[0]) if rows and isinstance(rows[0], Mapping) else None,
+        }
+    return index
+
+
 @dataclass
 class LoopIOImpl(LoopIO):
     """The loop's three collaborators: produce, execute, verify.
@@ -585,7 +611,44 @@ class LoopIOImpl(LoopIO):
             },
             {"role": "user", "content": json.dumps({"subtask": dict(block), "authorized_sources": authorized}, ensure_ascii=False)},
         ]
+        delivered = self._delivered_inputs()
+        if delivered:
+            # ★ 不能被当成 briefing：它前面有一句人话，所以它不是一条以 "{" 开头的
+            #   JSON user 消息（读归档 / 读 brief 的地方都在找那一条，别让它们认错）。
+            head.append(
+                {
+                    "role": "user",
+                    "content": "★ 以下是壳替你取好的输入（原文，未改动）：\n" + json.dumps(delivered, ensure_ascii=False),
+                }
+            )
         return [*head, *(dict(message) for message in state.messages)]
+
+    def _delivered_inputs(self) -> dict[str, Any]:
+        """★ ① 运行时前置预取：把本块声明的输入【取好、放进 context】。
+
+        计划知道 inputs 是谁，所以"取回输入"不该再是模型的工作（E-2 证明提示有效但只有
+        2/3；E-5 证明直接把部件放进 context 是 3/3）。超出预算时退化成索引 ——
+        模型仍可用 ``task.upstream`` / ``task.upstream_all`` 逐件或整批取。
+        """
+        if not self.subtask.inputs:
+            return {}
+        parts = {name: dict(self.toolset.task.upstream(name)) for name in self.subtask.inputs}
+        body: str = json.dumps(parts, ensure_ascii=False)
+        if len(body) <= DELIVERED_INPUTS_BUDGET:
+            return {
+                "delivered_inputs": parts,
+                "note": (
+                    "★ 你的输入已经由壳取好、就在这里：不必再调 task.upstream。"
+                    "答案里的每一行都必须来自这些行（缺件在 missing 里点名）。"
+                ),
+            }
+        return {
+            "delivered_inputs_index": _input_index(parts),
+            "note": (
+                "★ 输入太多，先给索引：用 `task.upstream_all` 一次取全部，"
+                "或用 `task.upstream` 逐件取（每件都是完整内容 + 逐行引用）。"
+            ),
+        }
 
     def produce(self, state: LoopState) -> TurnProposal:
         self.calls += 1

@@ -125,6 +125,16 @@ def split_by_source(
     keys = _source_keys(contract, recon)
     if len(keys) < 2:
         return split_single(contract, ontology, round=round, version=version)
+    if contract.sources_share_state:
+        # ★ ③: 判据是【声明】：这些来源共享同一份状态，按来源扇出就是 fake parallelism。
+        #   注意这不是"来源数不够"—— 5 个来源也照样回落（判据换掉了的证明）。
+        return split_single(
+            contract,
+            ontology,
+            round=round,
+            version=version,
+            refusal="the contract declares the sources share one state; a split by source would cut it",
+        )
 
     part_fields = _deliverable_fields(contract) or ("value",)
     interfaces: dict[str, str] = {}
@@ -203,7 +213,14 @@ def split_by_field(
     )
 
 
-def split_single(contract: TaskContract, ontology: Ontology, *, round: int = 1, version: int = 1) -> SplitPlan:
+def split_single(
+    contract: TaskContract,
+    ontology: Ontology,
+    *,
+    round: int = 1,
+    version: int = 1,
+    refusal: str = "",
+) -> SplitPlan:
     """No fan-out: one write block per deliverable, all at the same layer (star)."""
     interfaces: dict[str, str] = {}
     blocks: list[Subtask] = []
@@ -231,6 +248,7 @@ def split_single(contract: TaskContract, ontology: Ontology, *, round: int = 1, 
         shape="star",
         interfaces=interfaces,
         costs=estimate_costs(len(blocks)),
+        refusal=refusal,
     )
 
 

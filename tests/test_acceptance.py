@@ -23,6 +23,7 @@ from acceptance import (
     smoke_gate,
 )
 from bobanana6.adapters import EchoToolResultClient, ScriptedClient
+from bobanana6.agentloop.tools import ToolCall
 from bobanana6.contract import compile_bundle, parse_contract_file
 from bobanana6.core.model import ModelResponse, Recon
 from bobanana6.core.split import check_split
@@ -787,21 +788,23 @@ def test_counter_task_is_not_fanned_out() -> None:
     assert report.ok, report.codes()
 
 
-def test_counter_set_gap_refusal_exit_does_not_exist_yet() -> None:
-    """★★ 缺口的看门狗（等 `refuse_split` 落地时本测试会变红 → 升级成 §14.4 的判据）。
+def test_counter_task_refuses_to_split_and_falls_back_to_single_agent() -> None:
+    """★★ §14.4 的正式判据（`#14` 的看门狗到点升级了）。
 
-    三份「看起来可切」的局部视图会被切分器扇成 3 读 + 1 合并，而 11 条合法性检查
-    **一条都看不出三方共享同一份状态** —— 门禁会放行。>计划< 这是假的并行。
+    三份「看起来可切」的局部视图以前会被扇成 3 读 + 1 合并、门禁放行（假并行）。
+    现在判据是**契约的声明**（`sources_share_state`）而不是来源数：
+    切分器拒绝扇出、回落单块，而且拒绝的理由跟着计划一起报出来。
     """
     task_dir = ACCEPTANCE / "counter" / "state-machine-task"
     document, ontology, plan, bundle = _plan_for(task_dir, task_file="party-task.yaml")
     report = check_split(plan, document.contract, bundle, ontology, frozen_hash=ontology.content_hash())
 
-    assert len(plan.subtasks) == 4, "the shared-state task is no longer fanned out -- upgrade this test"
-    assert report.ok, (
-        "the gate now refuses a fake-parallel split: `refuse_split` has landed -- "
-        "replace this canary with §14.4's `plan.decision == 'refuse_split'` assertion"
-    )
+    assert plan.decision == "refuse_split", plan.decision
+    assert plan.fallback == "single_agent", plan.fallback
+    assert len(plan.subtasks) == 1 and plan.shape == "star"
+    assert "share one state" in plan.refusal
+    # 回落之后这份计划本身是【合法】的：拒绝扇出不是"报个红就完了"
+    assert report.ok, report.codes()
 
 
 # --------------------------------------------------------------------------- #
@@ -920,3 +923,199 @@ def test_the_other_two_main_domains_are_the_same_shape() -> None:
         assert constraints["C-units"]["spec"] == {"concept": unit_concept, "unit": unit_symbol}
         locators = [source["locator"] for source in document["sources"]]
         assert len(locators) == 3 and all(locator.startswith("input/") for locator in locators)
+
+
+# --------------------------------------------------------------------------- #
+# ① 输入递送：壳在派活前把声明的输入取好；一件都没到就不许开工
+# --------------------------------------------------------------------------- #
+
+
+def test_the_declared_inputs_are_delivered_before_the_merge_block_is_asked() -> None:
+    """★ ①：计划的 inputs 由【壳】在派活前取好、放进 context —— 不再靠模型自己去取。
+
+    （`#22`：E-0 什么都不加 → 0 次取回、编一张表；E-2 加一句提示 → 2/3；
+      E-5 直接把部件放进 context → 3/3。所以把"取回"从模型的工作里拿掉。）
+    """
+    seen: list[list[dict]] = []
+
+    class _Capture(_ScriptedBlocks):
+        def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+            if _block_of(messages) == "T-04" and not seen:
+                seen.append([dict(message) for message in messages])
+            return super().complete(messages, tools, max_tokens, **kw)
+
+    run = run_task(ACCEPTANCE / "main" / "panel-three-sources", client=_Capture(), env={})
+    assert run.report.block_pass_rate == 1.0, run.report.render()
+    assert seen, "the merge block was never asked"
+    delivered = [
+        message
+        for message in seen[0]
+        if message.get("role") == "user" and "delivered_inputs" in str(message.get("content"))
+    ]
+    assert len(delivered) == 1, [message.get("role") for message in seen[0]]
+    body = json.loads(str(delivered[0]["content"]).split("\n", 1)[1])
+    assert sorted(body["delivered_inputs"]) == ["part-panel-a.csv", "part-panel-b.csv", "part-panel-c.csv"]
+    # ★ 给的是【内容】（列 + 行 + 逐行引用），不是又一份名字清单
+    payload = body["delivered_inputs"]["part-panel-a.csv"]
+    assert payload.get("missing") is not True
+    assert payload["rows"] and payload["provenance"]
+    # ★ 而且它不能被当成 briefing（读归档的地方在找那一条 JSON user 消息）
+    assert not str(delivered[0]["content"]).startswith("{")
+
+
+def test_a_block_whose_inputs_never_arrived_is_not_dispatched() -> None:
+    """★ ①(c) 前置门：三个读块全挂 → 合并块一件输入都没到 → 0 次模型调用。
+
+    这是「输入取不回来」（生产者失败），不是「它没去取」；不能让它凭名字编一张表
+    （E-0 基线就是这么编的）。
+    """
+    asked: list[str] = []
+
+    class _EmptyReads:
+        def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+            asked.append(_block_of(messages))
+            return ModelResponse(text=json.dumps({"ref": "panel-a", "rows": [], "columns": []}))
+
+    run = run_task(ACCEPTANCE / "main" / "panel-three-sources", client=_EmptyReads(), env={})
+    assert "T-04" not in asked, asked
+    verdict = run.verdicts["T-04"]
+    assert verdict.evidence.get("exit") == "inputs_unavailable", verdict.evidence
+    assert verdict.evidence.get("missing_inputs") == ["part-panel-a.csv", "part-panel-b.csv", "part-panel-c.csv"]
+    assert run.report.assembly_passed is False  # 该拼不上还是拼不上
+
+
+def test_the_batch_tool_returns_every_declared_input_at_once() -> None:
+    """★ ①(b) 兜底：一次把全部声明输入取回来（"忘了取"的代价 = 一次调用）。"""
+    from bobanana6.services.registry import build_registry
+
+    payloads = {
+        "part-a.csv": {"name": "part-a.csv", "rows": [{"x": 1}]},
+        "part-b.csv": {"name": "part-b.csv", "missing": True},
+    }
+
+    class _Task:
+        def upstream(self, name):  # type: ignore[no-untyped-def]
+            return payloads[name]
+
+    class _Tools:
+        from bobanana6.core.ports import ToolSpec
+
+        subtask = "T-09"
+        allowed_inputs = ("part-a.csv", "part-b.csv")
+        task = _Task()
+
+        def specs(self):  # type: ignore[no-untyped-def]
+            return (
+                self.ToolSpec("task.upstream", ("name",), "schema+path", "inputs"),
+                self.ToolSpec("task.upstream_all", (), "every declared input, by name", "inputs"),
+            )
+
+        def require_upstream(self, name):  # type: ignore[no-untyped-def]
+            if name not in self.allowed_inputs:
+                raise PermissionError(name)
+
+    registry = build_registry(_Tools(), lambda snapshot: b"")  # type: ignore[arg-type]
+    result = registry.execute((ToolCall(call_id="c1", name="task.upstream_all", arguments={}),))
+    assert len(result) == 1 and result[0].ok, result
+    body = json.loads(result[0].content)
+    assert sorted(body) == ["part-a.csv", "part-b.csv"] and body["part-b.csv"]["missing"] is True
+
+
+# --------------------------------------------------------------------------- #
+# ③ 该不该拆：判据是契约的【声明】，不是来源数
+# --------------------------------------------------------------------------- #
+
+
+def test_the_split_decision_reads_the_declaration_not_the_source_count() -> None:
+    """★ ③：1 源不拆 / 3 源声明了不拆 / **5 源声明了也不拆** —— 来源数不再是决定因素。
+
+    反向（同一份 3 源题，只把声明去掉）必须【照旧扇出】：
+    拦的是声明，不是"来源数"，也不是"这道题看起来像什么"。
+    """
+    from dataclasses import replace
+
+    counter = ACCEPTANCE / "counter" / "state-machine-task"
+    single = _plan_for(counter, task_file="task.yaml")[2]
+    three = _plan_for(counter, task_file="party-task.yaml")[2]
+    five = _plan_for(counter, task_file="five-party-task.yaml")[2]
+
+    assert (single.decision, single.fallback, len(single.subtasks)) == ("single_agent", "single_agent", 1)
+    for plan, sources in ((three, 3), (five, 5)):
+        assert plan.decision == "refuse_split", (sources, plan.decision)
+        assert plan.fallback == "single_agent"
+        assert len(plan.subtasks) == 1 and plan.shape == "star"
+        assert plan.refusal, "a refusal must say why"
+
+    # ★ 反向：把声明拿掉，3 源照旧扇出（判据换掉了，不是把"切"这件事关掉了）
+    document, ontology, _plan, _bundle = _plan_for(counter, task_file="party-task.yaml")
+    no_declaration = replace(document.contract, sources_share_state=False)
+    fanned = Decomposer(strategy="source").split(no_declaration, ontology, None)
+    assert fanned.decision == "split" and len(fanned.subtasks) == 4 and fanned.shape == "pipeline"
+
+
+def test_a_plan_that_fans_out_declared_shared_sources_is_caught() -> None:
+    """★ ③：声明了共享状态、计划却仍然切成多块 → split 检查报 `shared_state`。"""
+    from dataclasses import replace
+
+    counter = ACCEPTANCE / "counter" / "state-machine-task"
+    document, ontology, _plan, _bundle = _plan_for(counter, task_file="party-task.yaml")
+    hand_made = Decomposer(strategy="source").split(
+        replace(document.contract, sources_share_state=False), ontology, None
+    )
+    report = check_split(
+        hand_made,
+        replace(document.contract, sources_share_state=True),
+        compile_bundle(document, hand_made),
+        ontology,
+        frozen_hash=ontology.content_hash(),
+    )
+    assert "shared_state" in report.codes(), report.codes()
+    assert any("share one state" in violation.detail for violation in report.violations)
+
+
+def test_hundreds_of_inputs_do_not_cost_the_worker_any_turns() -> None:
+    """★ ① 换规模（3 → 240）：壳侧行为不变 —— 搬运不花模型的推理预算。
+
+    小件：240 个全部放进 context（默认给全）。
+    大件：超预算 → 退化成索引 + 一次 `task.upstream_all`（这才是"忘了取"的兜底形态）。
+    两种都不需要模型为"取回"多花一轮。
+    """
+    from bobanana6.assemble_impl.produce import LoopIOImpl
+    from bobanana6.core.model import Budget, Subtask
+
+    class _Task:
+        def __init__(self, parts):  # type: ignore[no-untyped-def]
+            self.parts = parts
+
+        def upstream(self, name):  # type: ignore[no-untyped-def]
+            return self.parts[name]
+
+    class _Tools:
+        def __init__(self, parts):  # type: ignore[no-untyped-def]
+            self.task = _Task(parts)
+
+    def phase(names: list[str], rows: int) -> LoopIOImpl:
+        parts = {
+            name: {"name": name, "columns": [{"name": "x", "dtype": "str"}], "rows": [{"x": i} for i in range(rows)]}
+            for name in names
+        }
+        block = Subtask(
+            id="T-99", goal="g", inputs=tuple(names), output="out.csv", contract_ref="t", axis="source", mode="write"
+        )
+        return LoopIOImpl(
+            client=None,  # type: ignore[arg-type]
+            toolset=_Tools(parts),  # type: ignore[arg-type]
+            registry=None,  # type: ignore[arg-type]
+            judge=None,  # type: ignore[arg-type]
+            subtask=block,
+            budget=Budget(max_calls=1, max_wall_s=1, max_output=1),
+        )
+
+    small = phase([f"part-{index:03d}.csv" for index in range(240)], rows=2)
+    body = small._delivered_inputs()
+    assert len(body["delivered_inputs"]) == 240, "240 small inputs are delivered whole"
+
+    big = phase([f"big-{index:03d}.csv" for index in range(240)], rows=200)
+    body = big._delivered_inputs()
+    assert len(body["delivered_inputs_index"]) == 240
+    assert "task.upstream_all" in body["note"], body["note"]

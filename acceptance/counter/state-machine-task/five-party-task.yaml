@@ -1,0 +1,38 @@
+# ★ ③ 的泛化判据：**5 个来源**、同样共享同一份状态机。
+#   修前：数到 5 ≥ 2 → 一定切（predictable 的 fake parallelism）。
+#   修后：判据换成了【声明】→ 5 个来源也照样回落单块。
+task_id: counter-state-machine-five-parties
+goal: 顺着同一份状态机一步步推出最终状态（五方各持一步）
+version: 1
+sources_share_state: true
+
+deliverables:
+  - name: final-state.csv
+    schema: {step: str, actor: str, event: str, state: str}
+
+sources:
+  - {ref: party-1, locator: input/party-1.csv}
+  - {ref: party-2, locator: input/party-2.csv}
+  - {ref: party-3, locator: input/party-3.csv}
+  - {ref: party-4, locator: input/party-4.csv}
+  - {ref: party-5, locator: input/party-5.csv}
+
+constraints:
+  hard:
+    - id: C-rows
+      kind: presence
+      target: final-state.csv
+      spec: {min_rows: 5}
+      rationale: "五个步骤一步都不能少——少一步后面全错"
+    - id: C-prov
+      kind: provenance
+      target: final-state.csv
+      spec: {min_coverage: 0.95}
+      rationale: "每一步都要能指回事件日志"
+
+blind:
+  - "每一步依赖上一步的 state，五方各自只看得见自己那一步"
+
+limits: {max_rounds: 3}
+
+notes: 反例的泛化版：5 个来源共享同一份状态；判据必须是"该不该拆"，不是"来源数够不够"。

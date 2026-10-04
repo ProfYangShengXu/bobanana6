@@ -227,6 +227,18 @@ def check_split(
             if ratio >= limits.merge_cost_ratio:
                 add("merge_cheap", f"merge/execute ratio {ratio:.4f} >= limit {limits.merge_cost_ratio}")
 
+    # -- shared_state ------------------------------------------------------
+    # ★ ③: 契约说"这些来源共享同一份状态"，而计划仍然把它们切成多块 ——
+    #   这就是 fake parallelism 的形状（每块单独看都合格，整体拼不上）。
+    #   判据是【声明】，不是"来源数"：5 个来源声明了也一样拦。
+    if contract.sources_share_state and len(plan.subtasks) > 1:
+        add(
+            "shared_state",
+            "the contract declares the sources share one state, but the plan splits them "
+            f"across {len(plan.subtasks)} blocks",
+            *(subtask.id for subtask in plan.subtasks),
+        )
+
     # -- concept_mapped ----------------------------------------------------
     if ontology is None:
         add("concept_mapped", "ontology is required to prove output fields map to shared semantics")

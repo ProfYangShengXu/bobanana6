@@ -34,6 +34,15 @@ PARTY_VIEWS = {
     "party-b": ("2", "5"),
     "party-c": ("4",),
 }
+#: ★ ③ 的泛化判据：**5 个来源**、同样共享同一份状态机。
+#: 修前一定切（数到 5 ≥ 2）；修后必须【也不拆】—— 而且理由不再是"来源数"。
+PARTY_VIEWS_FIVE = {
+    "party-1": ("1",),
+    "party-2": ("2",),
+    "party-3": ("3",),
+    "party-4": ("4",),
+    "party-5": ("5",),
+}
 
 
 def generate(*, root: Path | None = None) -> dict[str, Path]:
@@ -47,7 +56,7 @@ def generate(*, root: Path | None = None) -> dict[str, Path]:
         "step,actor,event\n" + "\n".join(f"{s},{a},{e}" for s, a, e, _ in TRANSITIONS) + "\n",
         encoding="utf-8",
     )
-    for party, steps in PARTY_VIEWS.items():
+    for party, steps in {**PARTY_VIEWS, **PARTY_VIEWS_FIVE}.items():
         rows = [f"{s},{a},{e}" for s, a, e, _ in TRANSITIONS if s in steps]
         (given / f"{party}.csv").write_text("step,actor,event\n" + "\n".join(rows) + "\n", encoding="utf-8")
 

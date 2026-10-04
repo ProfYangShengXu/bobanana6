@@ -45,7 +45,20 @@ __all__ = [
 ]
 
 _TOP_LEVEL_KEYS = frozenset(
-    {"task_id", "goal", "version", "deliverables", "sources", "notes", "constraints", "blind", "unmapped", "limits"}
+    {
+        "task_id",
+        "goal",
+        "version",
+        "deliverables",
+        "sources",
+        "notes",
+        "constraints",
+        "blind",
+        "unmapped",
+        "limits",
+        # ★ ③: 声明"这些来源共享同一份状态"（多份局部视图 / 同一份账本）
+        "sources_share_state",
+    }
 )
 _CONSTRAINT_KEYS = frozenset({"id", "kind", "target", "spec", "rationale"})
 
@@ -223,6 +236,9 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
     unknown = sorted(set(constraints) - {"hard", "soft"})
     if unknown:
         _fail(source, "$.constraints", f"unknown groups {unknown!r}", "additionalProperties")
+    share_state = data.get("sources_share_state", False)
+    if not isinstance(share_state, bool):
+        _fail(source, "$.sources_share_state", "sources_share_state must be a boolean", "type")
     notes = data.get("notes", "")
     if not isinstance(notes, str):
         _fail(source, "$.notes", "notes must be a string", "type")
@@ -233,6 +249,7 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
         deliverables=_deliverables(data, source),
         sources=_sources(data, source),
         notes=notes,
+        sources_share_state=share_state,
     )
     return ContractDocument(
         contract=contract,

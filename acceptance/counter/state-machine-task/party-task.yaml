@@ -6,6 +6,9 @@
 task_id: counter-state-machine-parties
 goal: 顺着同一份状态机一步步推出最终状态（三方各持局部视图）
 version: 1
+# ★ ③: 这些来源是同一份状态机的局部视图 —— 拆开就是 fake parallelism。
+#   壳的判据读这一行（不是数来源个数）。
+sources_share_state: true
 
 deliverables:
   - name: final-state.csv

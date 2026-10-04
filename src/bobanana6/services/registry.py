@@ -29,7 +29,7 @@ from ..agentloop.tools import (
     invalid_arguments_result,
     parse_tool_arguments,
 )
-from ..core.model import Artifact, Column, Snapshot
+from ..core.model import Artifact, Column, Snapshot, canonical_row
 from ..core.ports import ToolSet
 
 __all__ = [
@@ -217,7 +217,9 @@ def artifact_payload(artifact: Artifact) -> dict[str, Any]:
         "columns": [
             {"name": c.name, "dtype": c.dtype, "nullable": c.nullable, "unit": c.unit} for c in artifact.columns
         ],
-        "rows": [dict(row) for row in artifact.rows],
+        # ★ ②: the payload the consumer sees carries the canonical spelling too --
+        #   an absent cell is an absent key, not a null it must learn to translate.
+        "rows": [canonical_row(row) for row in artifact.rows],
         "text": artifact.text,
     }
 
@@ -300,6 +302,14 @@ def build_registry(toolset: ToolSet, body_reader: Callable[[Snapshot], bytes]) -
         toolset.require_upstream(name)
         return payload(toolset.task.upstream(name))
 
+    def upstream_all(args: Mapping[str, Any]) -> str:
+        # ★ ①(b): 名字来自【本块声明的输入】，不是调用方给的列表 ——
+        #   授权仍然由稳定侧说了算（require_upstream 一件一件过）。
+        names = [str(name) for name in getattr(toolset, "allowed_inputs", ()) or ()]
+        for name in names:
+            toolset.require_upstream(name)
+        return payload({name: dict(toolset.task.upstream(name)) for name in names})
+
     def contract(args: Mapping[str, Any]) -> str:
         value = toolset.task.contract()
         return payload(
@@ -332,6 +342,7 @@ def build_registry(toolset: ToolSet, body_reader: Callable[[Snapshot], bytes]) -
         "semantics.check": (check_usage, (), ()),
         "task.mysubtask": (mysubtask, (), ()),
         "task.upstream": (upstream, (), ("name",)),
+        "task.upstream_all": (upstream_all, (), ()),
         "task.contract": (contract, (), ()),
         "check.local": (check_local, (), ()),
         "check.provenance": (check_provenance, (), ()),

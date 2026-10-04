@@ -27,6 +27,7 @@ from bobanana6.contract import parse_contract
 from bobanana6.core.capabilities import Capability, WorkerCapabilities, WorkerLimits
 from bobanana6.core.checkers.base import CheckContext
 from bobanana6.core.model import (
+    MISSING,
     Budget,
     ModelResponse,
     Subtask,
@@ -462,8 +463,6 @@ def test_parse_candidate_reads_rows_columns_and_provenance() -> None:
 
 def test_an_absent_cell_is_loaded_as_missing_and_a_zero_is_left_alone() -> None:
     """★ A04：空单元格记成 `MISSING`（一等状态），`0` 是一个值、不许被当成缺失。"""
-    from bobanana6.core.model import MISSING
-
     block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
     candidate = parse_candidate(
         json.dumps({"ref": "src-1", "rows": [{"amount": ""}, {"amount": None}, {"amount": 0}]}),
@@ -472,7 +471,9 @@ def test_an_absent_cell_is_loaded_as_missing_and_a_zero_is_left_alone() -> None:
         authorized_sources=("src-1",),
     )
     rows = candidate.artifact("out.csv").rows  # type: ignore[union-attr]
-    assert rows[0]["amount"] is MISSING and rows[1]["amount"] is MISSING
+    # ★ ②：。「没有值」只有【一种】规范写法 —— 键缺席；空串与 null 都归一成它。
+    #   0 仍然是一个值，必须与「没有值」分得开（A04）。
+    assert "amount" not in rows[0] and "amount" not in rows[1]
     assert rows[2]["amount"] == 0
     # 每行都点名它取自快照的哪一行（A11 的内容级校验要读它）
     assert [point.source_row for point in candidate.provenance] == [0, 1, 2]
@@ -794,3 +795,41 @@ def test_the_block_runtime_hands_the_ports_budget_to_the_producer(tmp_path: Path
     )
     runtime.run(block, make_bundle(), mini_ontology(), tools, Budget(max_calls=4, max_wall_s=30, max_output=1234))
     assert client.max_tokens == [1234]
+
+
+def test_every_spelling_of_a_missing_cell_becomes_the_same_representation() -> None:
+    """★ ②（`三条调优点`）：「没有值」只有【一种】规范写法，三个入口都归一。
+
+    验证的是**矩阵**（每种写法 × 三个入口），不是那一种写法：
+      解析入口   null / "" / "  " / 键缺席 → 都变成「键缺席」
+      比较处     写了 null 的行 == 省略了键的行（继承守卫不再误杀）
+      序列化出口 部件载荷里也只剩规范写法
+    """
+    from bobanana6.assemble_impl.produce import _same_row, parse_candidate
+    from bobanana6.core.model import Artifact, Column, canonical_row
+    from bobanana6.services.registry import artifact_payload
+
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="read")
+    # 走 JSON 的四种写法（哨兵不从 JSON 来，单独在下面验）
+    spellings = [{"amount": None}, {"amount": ""}, {"amount": "   "}, {"amount": "MISSING"}, {}]
+    for raw in spellings:
+        candidate = parse_candidate(
+            json.dumps({"ref": "s1", "rows": [raw]}),
+            subtask=block,
+            source_id="s1",
+            authorized_sources=("s1",),
+        )
+        row = candidate.artifact("out.csv").rows[0]  # type: ignore[union-attr]
+        assert "amount" not in row, raw
+
+    # 内部标记（哨兵）也归一：它和 null / 空串最终是同一个「缺」
+    assert canonical_row({"amount": MISSING, "year": 2021}) == {"year": 2021}
+
+    # 比较处：两种写法是【同一行】；多一格才是不同的行
+    assert _same_row({"amount": None, "year": 2021}, {"year": 2021})
+    assert _same_row({"amount": "", "year": 2021}, {"year": 2021})
+    assert not _same_row({"amount": 1, "year": 2021}, {"year": 2021})
+
+    # 序列化出口：载荷里也不会出现 null 写法
+    artifact = Artifact(name="out.csv", columns=(Column(name="amount", dtype="str"),), rows=({"amount": None},))
+    assert artifact_payload(artifact)["rows"] == [{}]

@@ -99,6 +99,28 @@
 - ✅ `#16` 已收口的四条判定缺口：缺失成为一等状态 `MISSING`（A04）· 单位检查读**值里的单位**（A10）·
   归因读**自带病因**、两层互相指认则 `unknown`（A07）· 溯源经 `SnapshotReader` 端口逐点重放
   —— 引用的行要在、值要对得上（A11）。四条都有修前/修后对照读数。
+- ✅ `#25` **调优第一块：修 A 类三条**（同一个病的三个实例：该在入口拦住的，放到了出口才发现）。
+  · ① **输入递送**：运行时**前置预取**（计划既然知道 inputs 是谁，就由壳在派活前取好、放进
+    context）+ 批量工具 `task.upstream_all`（兜底，忘取时代的价 = 一次调用）+ **前置门**
+    （一件输入都没到 → 不派活、**0 次模型调用**、具名理由 `inputs_unavailable`；这是"取不回来"，
+    不是"它没去取"，与 A06 的降级/具名门同源）。证据：`#22` 的 E-0 是 0 次取回 + 编 53/4/2 行；
+    修后同一条链里 **0 次取回**是因为壳把部件送到了（`delivered_inputs`）。
+  · ② **缺格表示**：`core/model.py::canonical_row` + `is_missing` 成为**唯一**的表示定义
+    （哨兵 / `None` / 空串 / 空白 / 序列化后的 `"MISSING"` 一律归一成「**键缺席**」），
+    三个入口（解析 / 序列化 / 比较）全部走它 —— 不在判据函数里补特例。
+    反证（确定性、不重跑模型）：`#22` 被继承守卫误杀的那三份答案，修前 4 / 5 / 5 行对不上，
+    修后走**真的解析入口 + 真的守卫** = **0 次拒收**。
+  · ③ **该不该拆**：定量版（拿 `prompt_tokens` 当跨块通信成本）**被实验否掉** ——
+    传递形态越贵成功率越高（4,232→0/3 · 25,913→1/3 · 35,224→3/3），它会把"信息送到"算成成本；
+    换成**结构版**：契约声明 `sources_share_state: true` → 切分器拒绝扇出、回落单块，
+    `plan.decision == "refuse_split"` + `plan.fallback == "single_agent"` **第一次为真**
+    （规格 §14.4 要的那两个出口，背后有判据）；手工把声明过的来源切成多块 → `shared_state` 检查拦住。
+    泛化：1 源不拆 / 3 源声明不拆 / **5 源声明也不拆**（来源数不再是决定因素）；反向：把声明去掉，
+    3 源照旧扇出 ✓。`#14` 的看门狗测试到点**升级**成 §14.4 的正式判据。
+  · 四条泛化检验与同族清单见报告；**壳的判定语义没有被放宽**：无声明的题（主验 3 域、压力题）
+    读数不变。
+  · 读数：ruff 绿 · **764 passed** · arch_guard 37 · smoke 2 · 见证变体 **231/231/0** ·
+    42 个哈希种子 0 失败。
 - ✅ `#24` 反例「假通过」的反证 + 主验补两个域（数据 `.bobanana6/b24/报告.md`）。
   · ★ 反例：对照题**已经在仓库里**（`counter/state-machine-task/party-task.yaml`，与现题同一个
     `generate.py`）。逐字对过两版，只有三处不同，其中**只有 sources（1 → 3）是变量**
@@ -193,7 +215,7 @@
 
 | 命令 | 现状 |
 |---|---|
-| `pytest tests/ -q` | ✅ 757 passed（不再有 xfail） |
+| `pytest tests/ -q` | ✅ 764 passed（不再有 xfail） |
 | `pytest -m arch_guard -q` | ✅ 37 passed（含 §1.2 依赖方向 + §1.4 唯一装配点守卫，装配点规则从源码树推导而非手写名单） |
 | `pytest -m acceptance_smoke -q` | ✅ 2 passed（本机用 `.venv/bin/python -m pytest`） |
 | `uv run bobanana6 run task.yaml` | ⚠️ 入口已配（`[project.scripts]`），但**本机没装 `uv`，也没有 setuptools 可做 editable 安装**；等价的真实调用是 `PYTHONPATH=src .venv/bin/python -m bobanana6 run examples/task.yaml --ontology examples/ontology.yaml --offline` |

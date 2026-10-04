@@ -215,6 +215,8 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec("semantics.check", ("usage",), "ok/reason"),
     ToolSpec("task.mysubtask", (), "goal/inputs/output/axis/mode", "subtask"),
     ToolSpec("task.upstream", ("name",), "schema+path", "inputs"),
+    #: ★ ①(b) 兜底：一次把【全部】声明输入取回来，"忘了取"的代价降到一次调用。
+    ToolSpec("task.upstream_all", (), "every declared input, by name", "inputs"),
     ToolSpec("task.contract", (), "interface contract"),
     ToolSpec("check.local", (), "Verdict for this block", "subtask"),
     ToolSpec("check.provenance", (), "provenance report", "subtask"),

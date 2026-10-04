@@ -88,6 +88,7 @@ __all__ = [
     "TaskContract",
     "Unit",
     "Verdict",
+    "canonical_row",
     "is_missing",
 ]
 
@@ -190,7 +191,30 @@ MISSING_CELLS: tuple[Any, ...] = (None, "")
 
 
 def is_missing(value: Any) -> bool:
-    return value is MISSING
+    """Whether this cell carries no value, *whatever shape it arrived in*.
+
+    ★ ②（`三条调优点-介绍与修法`）：本文档的纪律是「一个东西的表示在**一个地方**
+    定义」。这里就是那个地方 —— 哨兵 / ``None`` / 空白串都算「没有值」，
+    每一个读者（判定器、比较、序列化）都问这一个函数，不再各自记住写法。
+    ``0`` **不是**缺：填进去的 0 是一个值，必须与「没有值」分得开（A04）。
+    """
+    if value is MISSING or value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    # ★ 哨兵【被序列化之后】的写法也是「缺」：`json.dumps(..., default=str)` 会把它
+    #   写成字符串 "MISSING"，而消费方（部件载荷 / 归档）看到的就是这个字符串。
+    #   不认它的话，②的归一就漏掉一条真在流动的写法。
+    return not value.strip() or value.strip().upper() == "MISSING"
+
+
+def canonical_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The canonical spelling of "no value": **the key is absent**.
+
+    ★ 这是解析入口用的归一：进来时把每一种「缺」的写法都折成同一种，
+    后面（序列化、比较、判定）就只有一个形态要处理。
+    """
+    return {str(key): value for key, value in row.items() if not is_missing(value)}
 
 
 # --------------------------------------------------------------------------- #
@@ -404,6 +428,10 @@ class TaskContract:
     deliverables: tuple[DeliverableSpec, ...] = ()  # core:split —— deliverable_names 供切分/装配判定读
     sources: tuple[SourceRef, ...] = ()  # external:sources —— 取网实现读它
     notes: str = ""  # external:report (summary.json) —— 契约备注；报告模块未落地，当前无实现读者
+    #: ★ ③: 这些来源【共享同一份状态】（多份局部视图 / 同一份账本）。
+    #: 拆开就是 fake parallelism —— 但这不是壳替任务猜的：是任务【声明】的。
+    #: 壳的判据是"声明了就别按来源扇出"，不是"数来源个数"。
+    sources_share_state: bool = False  # core:split —— 切分策略据此回落单块，split 检查据此拦多块计划
 
     def __post_init__(self) -> None:
         _require_non_empty(self.task_id, "TaskContract.task_id must not be empty")
@@ -474,6 +502,21 @@ class SplitPlan:
     )
     recon_evidence: str = ""  # external:report (summary.json) —— 「为什么这么切」；报告模块未落地，当前无实现读者
     costs: PlanCosts | None = None  # core:split —— merge_cheap 读它
+    #: ★ ③: 为什么这份计划【不扇出】（空串 = 没拒绝）。判据来自契约的声明，
+    #: 不是"来源数不够"（那是代理判据，正是本块要换掉的东西）。
+    refusal: str = ""  # core:split —— decision 读它（refuse_split 的判据落点）
+
+    @property
+    def decision(self) -> str:
+        """`refuse_split` / `split` / `single_agent` —— 规格 §14.4 的那三个名字。"""
+        if self.refusal:
+            return "refuse_split"
+        return "split" if len(self.subtasks) > 1 else "single_agent"
+
+    @property
+    def fallback(self) -> str:
+        """Where a refused plan lands: the single-agent shape."""
+        return "single_agent" if len(self.subtasks) <= 1 else "none"
 
     def __post_init__(self) -> None:
         _require_non_empty(self.task_id, "SplitPlan.task_id must not be empty")
