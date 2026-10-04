@@ -1372,9 +1372,9 @@ MUTATIONS: tuple[Mutation, ...] = (
         "T17-a08-blind-spot-reported-as-judged",
         "acceptance/inject/injections.py",
         "        found=not report.passed and not blind,\n",
-        "        found=True,  # mutation: not finding it counts as finding it\n",
-        "tests/test_attacks.py::test_a08_the_global_invariant_cannot_see_a_multi_piece_assembly",
-        "the '*' blind spot is reported as the invariant having been judged",
+        "        found=False,  # mutation: the old '看不见产物' reading is sold as a miss\n",
+        "tests/test_attacks.py::test_a08_the_global_invariant_sees_the_multi_piece_assembly",
+        "the '*' blind spot is reported as if the invariant had never seen the assembly",
     ),
     Mutation(
         "T18-a09-decline-exit-unrecognised",
@@ -1996,6 +1996,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "        return  # mutation: the model's own bad shape is never declared\n",
         "tests/test_acceptance.py::test_a_structurally_bad_answer_is_declared_as_the_models_failure",
         "the most common real-run failure goes back to blame=None",
+    ),
+    # -- A08：`*` 要能看见装配后的全部产物 -- #
+    Mutation(
+        "Q11-star-target-blind-to-a-multi-piece-assembly",
+        "core/checkers/base.py",
+        "        return _combined_artifact(candidate.artifacts)\n",
+        "        return None  # mutation: '*' is blind again whenever several pieces exist\n",
+        "tests/test_attacks.py::test_a08_the_global_invariant_sees_the_multi_piece_assembly",
+        "a global invariant on the assembled whole goes back to 'artifact not found'",
     ),
 )
 

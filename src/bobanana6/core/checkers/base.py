@@ -9,7 +9,7 @@ must be able to answer "why was this block rejected".
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -92,5 +92,25 @@ def artifact_for(constraint: Constraint, candidate: Candidate) -> Artifact | Non
     if target in ("*", candidate.subtask_id):
         if len(candidate.artifacts) == 1:
             return candidate.artifacts[0]
-        return None
+        # ★ A08: `*` 说的是【装配后的全部产物】。以前只在"候选恰好一个产物"时才解析，
+        #   于是它在多块装配下永远报 not found（#23 复核：与块数无关），全局不变量
+        #   只能逐字段点名交付物表达 —— 表达力被削掉一半。
+        #   这里把【同构】的多个产物合成一个：列名一致才合（部件 + 合并产物就是这种）；
+        #   列名不一致时不猜（那不是同一张表，合并语义没有定义），仍然返回 None。
+        return _combined_artifact(candidate.artifacts)
     return None
+
+
+def _combined_artifact(artifacts: Sequence[Artifact]) -> Artifact | None:
+    """All pieces as one table, when they really are one table (same columns)."""
+    if not artifacts:
+        return None
+    first = tuple(column.name for column in artifacts[0].columns)
+    if not first or any(tuple(column.name for column in a.columns) != first for a in artifacts):
+        return None
+    return Artifact(
+        name="*",
+        columns=artifacts[0].columns,
+        rows=tuple(row for a in artifacts for row in a.rows),
+        text=None,
+    )

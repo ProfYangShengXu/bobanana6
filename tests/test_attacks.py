@@ -111,7 +111,8 @@ def test_the_gap_notes_name_the_rows_that_missed() -> None:
     """★ §14.3 的覆盖声明：没达到期望的攻击必须被点名。"""
     notes = render_gap_notes(run_attacks())
     assert "A02-polysemy" in notes
-    assert "A08-global-invariant" in notes
+    # ★ A08 修好后从缺口名单里消失（它以前是唯一被点名的那条）
+    assert "A08-global-invariant" not in notes, notes
     # ★ 收口了就从缺口名单里消失：A06（出口选择）与 A11（溯源真实性）都不该再被点名
     assert "A06-persistent" not in notes
     assert "A11-provenance-content" not in notes
@@ -182,11 +183,37 @@ def test_a06_a_dead_source_degrades_and_a_dead_run_still_refuses() -> None:
     assert "该拒的还是要拒" in evidence
 
 
-def test_a08_the_global_invariant_cannot_see_a_multi_piece_assembly() -> None:
-    """★ A08：`target="*"` 的全局不变量在多块装配上只会「看不见产物」。"""
+def test_a08_the_global_invariant_sees_the_multi_piece_assembly() -> None:
+    """★ A08 修后：`target="*"` 解析到【装配后的全部产物】，而且真的在判。
+
+    修前：多块装配下永远 `artifact for target '*' not found` —— 全局不变量只能靠
+    「点名交付物」表达（`#24` 的反例对照题就因此改了 `C-rows target`）。
+    修后：同构的多个产物合成一张表，装配关照常判；`*` 与点名交付物两种写法都能用。
+    """
+    from acceptance.inject.injections import a08_global_invariant
+
     outcome = _outcome("A08")
-    assert outcome.found == MISS and outcome.action_step == MISS
-    assert "artifact for target '*' not found" in " ".join(outcome.evidence)
+    assert outcome.found == HIT, outcome.evidence
+    evidence = " ".join(outcome.evidence)
+    assert "artifact for target '*' not found" not in evidence, evidence
+
+    # ★ 而且判据真的在看：同构产物合成后，"装配后的整体"是能被点到的
+    from bobanana6.core.checkers.base import artifact_for
+    from bobanana6.core.model import Artifact, Candidate, Column, Constraint
+
+    def art(name: str) -> Artifact:
+        return Artifact(name=name, columns=(Column(name="x", dtype="str"),), rows=({"x": name},))
+
+    candidate = Candidate(subtask_id="*", source_id="assembly", artifacts=(art("part-a.csv"), art("panel.csv")))
+    resolved = artifact_for(Constraint(id="G", kind="presence", target="*", spec={}, rationale="r"), candidate)
+    assert resolved is not None and resolved.row_count == 2, resolved
+    # ★ 列不一致时不猜（那不是同一张表）
+    odd = Candidate(
+        subtask_id="*", source_id="assembly",
+        artifacts=(art("a.csv"), Artifact(name="b.csv", columns=(Column(name="y", dtype="str"),), rows=({"y": 1},))),
+    )
+    assert artifact_for(Constraint(id="G", kind="presence", target="*", spec={}, rationale="r"), odd) is None
+    assert a08_global_invariant().found is True
 
 
 def test_a10_unit_consistency_reads_the_unit_off_the_value() -> None:

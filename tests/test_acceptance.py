@@ -746,14 +746,13 @@ def test_a_block_that_produces_nothing_is_named_by_the_assembly() -> None:
     assert "cut_complete" in run.assembly_codes, run.assembly_codes
 
 
-def test_a_global_invariant_cannot_see_a_multi_piece_assembly() -> None:
-    """★★ 缺口的看门狗（§14.2 A08）：target="*" 的全局不变量在多块装配上看不见东西。
+def test_a_global_invariant_sees_the_multi_piece_assembly_and_can_reject_it() -> None:
+    """★★ §14.2 A08 的**正式断言**（看门狗到点升级了）。
 
-    `artifact_for` 只在候选【恰好一个产物】时解析 `*`；装配关把**所有** piece 拼成
-    一个候选，于是 `*`-targeted 的检查一律报「artifact not found」—— **即使合并
-    结果完全正确也会报**。所以「块各自合格但合起来违反全局不变量」这件事，
-    今天**表达不出来**（已作为发现上报）。等这条路修好，本测试会变红 → 升级成
-    「装配拒绝」的正式断言。
+    修前：`*` 只在候选恰好一个产物时解析 → 装配关把**所有** piece 拼成一个候选 →
+    `*` 的检查一律报「artifact not found」，**即使合并结果完全正确也报**；
+    「块各自合格、合起来违反全局不变量」这件事表达不出来。
+    修后：同构的多个产物合成一张表 → 装配照常判；违反就被装配拒（不再"看不见"）。
     """
     from bobanana6.core.assemble import check_assembly
     from bobanana6.core.checkers.base import CheckContext
@@ -778,9 +777,18 @@ def test_a_global_invariant_cannot_see_a_multi_piece_assembly() -> None:
     report = check_assembly(
         plan, document.contract, bundle, pieces, CheckContext(ontology=ontology), snapshots={}
     )
-    assert "global_invariant" in report.codes(), report.codes()
-    detail = " ".join(v.detail for v in report.violations if v.check == "global_invariant")
-    assert "not found" in detail, detail  # ★ 不是「违反了界」，而是「看不见产物」
+    # ★ 这条界本身是满足的（装配后共 2 行 ≥ 1）→ 不该报违反，也不该报「找不到产物」
+    assert "global_invariant" not in report.codes(), report.codes()
+
+    # ★ 而违反的时候必须被拦住（"判据真的在看"那一半）
+    violating = replace(
+        bundle,
+        hard=(*bundle.hard, Constraint(id="G-2", kind="presence", target="*", spec={"min_rows": 99}, rationale="bound")),
+    )
+    caught = check_assembly(plan, document.contract, violating, pieces, CheckContext(ontology=ontology), snapshots={})
+    assert "global_invariant" in caught.codes(), caught.codes()
+    detail = " ".join(v.detail for v in caught.violations if v.check == "global_invariant")
+    assert "not found" not in detail, detail  # ★ 是「违反了界」，不是「看不见产物」
 
 
 # --------------------------------------------------------------------------- #
