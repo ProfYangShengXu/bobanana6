@@ -414,10 +414,19 @@ class DeliverableSpec:
         _require_non_empty(self.name, "DeliverableSpec.name must not be empty")
 
 
+#: ★ `#32`: 载体行尾的**声明词表**（数据，不是判定）。`""` = 没声明；`preserve` = 原样。
+#: 词表放稳定侧，`contract/`（声明解析）与 `sources/`（规整动作）都读它，避免各写一份。
+EOL_MODES: tuple[str, ...] = ("", "preserve", "lf", "crlf")
+
+
 @dataclass(frozen=True)
 class SourceRef:
     ref: str  # external:sources —— SourcePort.fetch 的入参
     locator: str = ""  # external:sources —— 取回定位，core 不读
+    #: ★ `#32`: 载体的**形式**，由任务声明；`core` 不读这两项（与 `locator` 同类）。
+    #: 空串 = 没声明 —— 壳按 utf-8 猜，并把"这是假设"写进投递载荷，不静默替换。
+    encoding: str = ""  # external:sources —— 声明的字符编码（如 gbk / utf-8-sig）
+    eol: str = ""  # external:sources —— "" / preserve 原样 · lf · crlf
 
     def __post_init__(self) -> None:
         _require_non_empty(self.ref, "SourceRef.ref must not be empty")

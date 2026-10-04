@@ -9,6 +9,7 @@ from .fetchers import (
     LocatorFetcher,
     suffix_for,
 )
+from .form import SourceForm, SourceFormError, decode_body, form_for, forms_for
 from .reader import SnapshotFileReader, rows_from_csv, rows_from_json
 from .store import SnapshotStore, SourceError
 
@@ -20,6 +21,11 @@ __all__ = [
     "SnapshotFileReader",
     "SnapshotStore",
     "SourceError",
+    "SourceForm",
+    "SourceFormError",
+    "decode_body",
+    "form_for",
+    "forms_for",
     "rows_from_csv",
     "rows_from_json",
     "suffix_for",

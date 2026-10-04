@@ -35,7 +35,7 @@ from bobanana6.services import (
     shell_command_check,
     snapshot_payload,
 )
-from bobanana6.sources import SnapshotStore
+from bobanana6.sources import SnapshotStore, SourceForm
 
 PASSES = f'{sys.executable} -c "print(1)"'
 
@@ -635,3 +635,48 @@ def test_a_zero_allowance_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(OutputLimitUnitError, match="positive cap"):
         model_output_cap(Budget(max_calls=1, max_wall_s=1, max_output=0))
+
+
+# --------------------------------------------------------------------------- #
+# ★ #32：投递载荷按声明的形式规整（块看到的那一份）
+# --------------------------------------------------------------------------- #
+
+
+def test_a_declared_carrier_form_is_normalized_before_the_block_sees_it(tmp_path: Path) -> None:
+    body = "def f():\r\n    # 归一\r\n".encode("gbk")
+    _store, snap = _snapshot(tmp_path, suffix=".txt", body=body)
+
+    payload = json.loads(
+        snapshot_payload("src-1", snap, body, SourceForm(encoding="gbk", eol="lf"))  # type: ignore[arg-type]
+    )
+    text = payload["rows"][0]["text"]
+
+    assert "归一" in text and "\ufffd" not in text and "\r" not in text
+    assert payload["source_form"] == {
+        "encoding": "gbk",
+        "assumed": False,
+        "replacement_chars": 0,
+        "eol": "lf",
+        "eol_normalized": True,
+    }
+
+
+def test_an_undeclared_garbled_carrier_carries_a_spoken_assumption(tmp_path: Path) -> None:
+    body = "café".encode("latin-1")
+    _store, snap = _snapshot(tmp_path, suffix=".txt", body=body)
+
+    payload = json.loads(snapshot_payload("src-1", snap, body))  # type: ignore[arg-type]
+
+    assert "\ufffd" in payload["rows"][0]["text"]
+    assert payload["source_form"]["assumed"] is True
+    assert payload["source_form"]["replacement_chars"] == 1
+
+
+def test_an_undeclared_clean_carrier_payload_is_unchanged(tmp_path: Path) -> None:
+    """★★ 反向（载荷层）：没声明 + 干净 ⇒ 载荷里连 `source_form` 这个键都不出现。"""
+    _store, snap = _snapshot(tmp_path)
+
+    payload = json.loads(snapshot_payload("src-1", snap, b"a,b\n1,2\n"))  # type: ignore[arg-type]
+
+    assert "source_form" not in payload
+    assert payload["rows"] == [{"a": "1", "b": "2"}]

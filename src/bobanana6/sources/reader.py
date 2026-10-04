@@ -12,10 +12,11 @@ import csv
 import io
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.model import Column, Snapshot, SnapshotBody
+from .form import SourceForm, decode_body, form_for
 from .store import SnapshotStore
 
 __all__ = ["SnapshotFileReader", "rows_from_csv", "rows_from_json"]
@@ -41,12 +42,20 @@ def rows_from_json(text: str) -> tuple[tuple[Column, ...], tuple[Mapping[str, An
 
 @dataclass(frozen=True)
 class SnapshotFileReader:
-    """Read a frozen snapshot body into the rows the kernel may judge."""
+    """Read a frozen snapshot body into the rows the kernel may judge.
+
+    ★ `#32`: the carrier's *form* is normalized here too (one of the two decode
+    points; the other is the payload a block sees -- `services/registry.py`).
+    Both go through :func:`sources.form.decode_body`, so the rule lives in one place.
+    """
 
     store: SnapshotStore
+    #: `{ref: SourceForm}` —— 任务声明的那张形式清单（空 = 一律按 utf-8 猜）。
+    forms: Mapping[str, SourceForm] = field(default_factory=dict)
 
     def body(self, snapshot: Snapshot) -> SnapshotBody:
-        text = self.store.read(snapshot).decode("utf-8", errors="replace")
+        decoded = decode_body(self.store.read(snapshot), form_for(self.forms, snapshot.ref))
+        text = decoded.text
         suffix = snapshot.body_path.suffix.lower()
         if suffix == ".csv":
             columns, rows = rows_from_csv(text)

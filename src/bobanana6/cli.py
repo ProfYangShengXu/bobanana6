@@ -52,6 +52,7 @@ from .core.ports import LLMClient, OntologyPort, SourcePort
 from .decompose import Decomposer, RoundBudget
 from .ontology import load_ontology_file
 from .sources import LocatorFetcher, SnapshotFileReader, SnapshotStore
+from .sources.form import forms_for
 
 __all__ = ["App", "build_app", "main"]
 
@@ -104,7 +105,8 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
     # ★ A11: the content-level provenance check needs the frozen rows as data,
     #   and core never opens a path -- so the reader is built here, at the one
     #   assembly point, and injected into the runner.
-    reader = SnapshotFileReader(store=store)
+    # ★ `#32`: 载体的形式由任务声明（sources[].encoding / .eol）；壳在派人之前按它规整。
+    reader = SnapshotFileReader(store=store, forms=forms_for(contract.sources))
 
     decomposer = Decomposer(
         strategy=args.strategy,

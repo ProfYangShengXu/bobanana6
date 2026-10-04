@@ -17,6 +17,7 @@ Two fields are load-bearing and are refused here rather than later:
 
 from __future__ import annotations
 
+import codecs
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ import yaml
 
 from ..core.model import (
     DEFAULT_LIMITS,
+    EOL_MODES,
     KNOWN_KINDS,
     Constraint,
     ConstraintBundle,
@@ -133,8 +135,20 @@ def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:
         path = f"$.sources[{index}]"
         if not isinstance(raw, Mapping) or not isinstance(raw.get("ref"), str) or not raw["ref"]:
             _fail(source, f"{path}.ref", "source ref must be a non-empty string", "required")
+        encoding = str(raw.get("encoding", "") or "")
+        eol = str(raw.get("eol", "") or "")
+        # ★ `#32`: 载体的形式由任务声明；**声明错了当场报**（别留到运行时才炸）。
+        if encoding:
+            try:
+                codecs.lookup(encoding)
+            except LookupError:
+                _fail(source, f"{path}.encoding", f"unknown encoding {encoding!r}", "source")
+        if eol not in EOL_MODES:
+            _fail(source, f"{path}.eol", f"unknown eol {eol!r}; expected one of {EOL_MODES!r}", "source")
         try:
-            sources.append(SourceRef(ref=raw["ref"], locator=str(raw.get("locator", ""))))
+            sources.append(
+                SourceRef(ref=raw["ref"], locator=str(raw.get("locator", "")), encoding=encoding, eol=eol)
+            )
         except ValueError as exc:
             _fail(source, path, str(exc), "source")
     return tuple(sources)

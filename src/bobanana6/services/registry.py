@@ -31,6 +31,7 @@ from ..agentloop.tools import (
 )
 from ..core.model import Artifact, Column, Snapshot, canonical_row
 from ..core.ports import ToolSet
+from ..sources.form import SourceForm, decode_body, form_for
 
 __all__ = [
     "TOOL_NAMES",
@@ -242,14 +243,25 @@ def _rows_from_json(text: str) -> tuple[list[Column], list[dict[str, Any]]]:
     return [Column(name=name, dtype="str") for name in names], rows
 
 
-def snapshot_payload(ref: str, snapshot: Snapshot, body: bytes) -> str:
+def snapshot_payload(
+    ref: str,
+    snapshot: Snapshot,
+    body: bytes,
+    form: SourceForm | None = None,
+) -> str:
     """The JSON a ``sources.snapshot`` call answers with.
 
     The payload is artifact-shaped on purpose: it is what the worker is expected
     to hand back as its answer, and what ``produce.py`` parses into an
     ``Artifact`` with a ``Provenance`` back to the frozen carrier.
+
+    ★ `#32`: this is the **派活前** delivery point -- the bytes are normalized to
+    the form the task declared (`encoding` / `eol`) *here*, before any block sees
+    them, and what was normalized (or assumed) rides along in ``source_form``.
+    Undeclared and clean stays byte-identical to the old payload (no extra key).
     """
-    text = body.decode("utf-8", errors="replace")
+    decoded = decode_body(body, form)
+    text = decoded.text
     suffix = snapshot.body_path.suffix.lower()
     if suffix == ".csv":
         columns, rows = _rows_from_csv(text)
@@ -257,20 +269,24 @@ def snapshot_payload(ref: str, snapshot: Snapshot, body: bytes) -> str:
         columns, rows = _rows_from_json(text)
     else:
         columns, rows = [Column(name="text", dtype="str")], [{"text": text}]
-    return json.dumps(
-        {
-            "ref": ref,
-            "source_kind": snapshot.source_kind,
-            "captured_at": snapshot.captured_at,
-            "body_path": str(snapshot.body_path),
-            "columns": [{"name": c.name, "dtype": c.dtype, "nullable": c.nullable} for c in columns],
-            "rows": rows,
-        },
-        ensure_ascii=False,
-    )
+    payload: dict[str, Any] = {
+        "ref": ref,
+        "source_kind": snapshot.source_kind,
+        "captured_at": snapshot.captured_at,
+        "body_path": str(snapshot.body_path),
+        "columns": [{"name": c.name, "dtype": c.dtype, "nullable": c.nullable} for c in columns],
+        "rows": rows,
+    }
+    if decoded.note:
+        payload["source_form"] = dict(decoded.note)
+    return json.dumps(payload, ensure_ascii=False)
 
 
-def build_registry(toolset: ToolSet, body_reader: Callable[[Snapshot], bytes]) -> ToolRegistry:
+def build_registry(
+    toolset: ToolSet,
+    body_reader: Callable[[Snapshot], bytes],
+    forms: Mapping[str, SourceForm] | None = None,
+) -> ToolRegistry:
     """Register every tool the bound ``ToolSet`` advertises.
 
     The registry is built *from* the toolset, so a tool cannot exist in the
@@ -334,7 +350,7 @@ def build_registry(toolset: ToolSet, body_reader: Callable[[Snapshot], bytes]) -
         if toolset.sources is None:
             raise PermissionError(f"subtask {toolset.subtask!r} is not authorized to read sources")
         bound = toolset.sources.snapshot(str(args.get("ref", "")))
-        return snapshot_payload(bound.ref, bound, body_reader(bound))
+        return snapshot_payload(bound.ref, bound, body_reader(bound), form_for(forms or {}, bound.ref))
 
     catalog: Mapping[str, tuple[Handler, tuple[str, ...], tuple[str, ...]]] = {
         "semantics.lookup": (lookup, (), ()),

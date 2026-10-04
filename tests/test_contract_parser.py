@@ -181,3 +181,36 @@ def test_compile_bundle_carries_declarations_and_limits() -> None:
     assert bundle.blind == ("unknown_column",)
     assert bundle.unmapped_fields == frozenset({"mystery"})
     assert bundle.limits.max_rounds == 3
+
+
+# --------------------------------------------------------------------------- #
+# ★ #32：源载体形式的声明（encoding / eol）
+# --------------------------------------------------------------------------- #
+
+
+def test_a_source_may_declare_its_carrier_form() -> None:
+    document = parse_contract(
+        VALID.replace(
+            "  - {ref: src-1, locator: https://example.invalid/1}",
+            "  - {ref: src-1, locator: https://example.invalid/1, encoding: gbk, eol: lf}",
+        )
+    )
+    source = document.contract.sources[0]
+    assert (source.encoding, source.eol) == ("gbk", "lf")
+
+
+def test_a_source_without_a_declared_form_stays_undeclared() -> None:
+    """★ 没写就是没写（空串）—— 壳按 utf-8 猜并把假设说出来，不许悄悄默认。"""
+    document = parse_contract(VALID)
+    source = document.contract.sources[0]
+    assert (source.encoding, source.eol) == ("", "")
+
+
+def test_an_unknown_encoding_in_the_declaration_is_refused() -> None:
+    with pytest.raises(ContractParseError, match="unknown encoding"):
+        parse_contract(
+            VALID.replace(
+                "  - {ref: src-1, locator: https://example.invalid/1}",
+                "  - {ref: src-1, locator: https://example.invalid/1, encoding: not-a-codec}",
+            )
+        )

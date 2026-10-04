@@ -47,6 +47,7 @@ from ..core.ports import LLMClient, ToolSet
 from ..services.checks import BlockJudge
 from ..services.registry import build_registry
 from ..sources import SnapshotStore
+from ..sources.form import forms_for
 from .produce import LoopIOImpl, ResponseFormatSupport
 
 __all__ = [
@@ -263,7 +264,8 @@ class BlockRuntime:
             required_scope=self.required_scope,
             last_edit_at=self.edit_clock(subtask),
         )
-        registry = build_registry(tools, self.store.read)
+        # ★ `#32`: 派活前按任务声明的形式规整载体（encoding / eol）—— 规整清单来自契约，动作只有一套。
+        registry = build_registry(tools, self.store.read, forms=forms_for(self.contract.sources))
         io = LoopIOImpl(
             client=self.client,
             toolset=tools,

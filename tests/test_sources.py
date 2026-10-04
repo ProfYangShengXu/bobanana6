@@ -15,6 +15,9 @@ from bobanana6.sources import (
     SnapshotFileReader,
     SnapshotStore,
     SourceError,
+    SourceForm,
+    SourceFormError,
+    decode_body,
 )
 
 NOW = "2026-10-03T00:00:00+08:00"
@@ -185,3 +188,74 @@ def test_the_reader_refuses_to_pretend_a_missing_file_has_rows(tmp_path: Path) -
     snapshot.body_path.unlink()
     with pytest.raises(SourceError):
         SnapshotFileReader(store=store).body(snapshot)
+
+
+# --------------------------------------------------------------------------- #
+# ★ #32：源载体的【形式】—— 派活前按任务声明规整（机制层，不许出现领域词）
+# --------------------------------------------------------------------------- #
+
+
+def test_a_declared_encoding_is_used_instead_of_guessed() -> None:
+    """★ 声明了 gbk 就用 gbk：不再出现静默替换出来的 U+FFFD。"""
+    body = "def f():\r\n    # 归一\r\n".encode("gbk")
+    decoded = decode_body(body, SourceForm(encoding="gbk"))
+
+    assert decoded.text.startswith("def f():")
+    assert "归一" in decoded.text
+    assert "\ufffd" not in decoded.text
+    assert decoded.note["encoding"] == "gbk"
+    assert decoded.note["assumed"] is False
+
+
+def test_an_undeclared_carrier_is_guessed_but_says_so() -> None:
+    """★ 没声明就按 utf-8 猜，但**把假设说出来**（#18 的「不许沉默」）。"""
+    decoded = decode_body("café".encode("latin-1"), SourceForm())
+
+    assert decoded.text == "caf\ufffd"
+    assert decoded.note["assumed"] is True
+    assert decoded.note["replacement_chars"] == 1
+
+
+def test_a_clean_undeclared_carrier_is_delivered_verbatim() -> None:
+    """★★ 反向的单元版：没有声明、字节干净 ⇒ 逐字一样，而且**不带任何说明**。"""
+    decoded = decode_body(b"a\nb\n", SourceForm())
+
+    assert decoded.text == "a\nb\n"
+    assert decoded.note == {}
+
+
+def test_a_declared_encoding_that_does_not_match_is_a_named_error() -> None:
+    """声明错了要报具名错（重试无用），不是静默替换。"""
+    with pytest.raises(SourceFormError, match="declared as 'gbk'"):
+        decode_body("中文".encode(), SourceForm(encoding="gbk"))
+
+    assert SourceFormError.reason == "fix_constraint"
+
+
+def test_a_declared_eol_is_normalized_both_ways() -> None:
+    assert decode_body(b"a\r\nb\r\n", SourceForm(eol="lf")).text == "a\nb\n"
+    assert decode_body(b"a\nb\n", SourceForm(eol="crlf")).text == "a\r\nb\r\n"
+    assert decode_body(b"a\r\nb\r\n", SourceForm(eol="preserve")).text == "a\r\nb\r\n"
+
+
+def test_an_unknown_form_is_refused_at_declaration_time() -> None:
+    with pytest.raises(ValueError, match="unknown encoding"):
+        SourceForm(encoding="not-a-codec")
+    with pytest.raises(ValueError, match="unknown eol"):
+        SourceForm(eol="cr")
+
+
+def test_the_reader_normalizes_the_carrier_before_it_becomes_rows(tmp_path: Path) -> None:
+    """A11 的读者走同一条规整（两处解码点，一套动作）。"""
+    store = SnapshotStore(root=tmp_path / "s")
+    snapshot = store.put(
+        ref="src-1",
+        body="a,b\n归一,2\n".encode("gbk"),
+        source_kind="file",
+        captured_at="2026-01-01T00:00:00",
+        suffix=".csv",
+    )
+    reader = SnapshotFileReader(store=store, forms={"src-1": SourceForm(encoding="gbk")})
+
+    body = reader.body(snapshot)
+    assert body.rows == ({"a": "归一", "b": "2"},)
