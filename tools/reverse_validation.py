@@ -2040,6 +2040,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_acceptance.py::test_rows_from_different_periods_are_never_paired",
         "ENT-01|2021 is compared with ENT-01|2024 and the report fills with false conflicts",
     ),
+    Mutation(
+        "Q16-plan-layer-exits-not-collected",
+        "acceptance/harness.py",
+        '    plan = getattr(result, "plan", None)\n',
+        "    plan = None  # mutation: the split decision layer is never read\n",
+        "tests/test_acceptance.py::test_a_refused_split_reaches_the_exit_coverage",
+        "refuse_split / single_agent go back to being invisible however truly they were refused",
+    ),
 )
 
 

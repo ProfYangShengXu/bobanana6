@@ -31,8 +31,21 @@ _EXIT_FROM_REASON: Mapping[str, str] = {
     "declined": "decline",
     "abort": "abort",
     "reshard": "reshard",
+    # ★ `retry` / `retry_after_error` 是 loop 的**续跑**理由（`PhaseResult.cont`），
+    #   不是终态：下一轮会把 `exit_reason` 覆盖掉，预算用尽时是 `budget_exhausted`。
+    #   这两条映射今天【到不了】（见 tests/test_agentloop_loop.py 里的看门狗）——
+    #   留着是因为词表按 `RecoveryAction` 对齐；真要收 `retry_local`，得先让运行期
+    #   把它记成"发生过一次重试"（那是壳的改动，不是采集的改动）。
     "retry": "retry_local",
     "retry_after_error": "retry_local",
+}
+
+#: ★ `#30`：**计划层**的出口。`refuse_split` / `single_agent` 不是 run 级 exit、也不在
+#: 任何块 verdict 里 —— 它们由切分决策产生（`SplitPlan.decision` / `.fallback`）。
+#: 只读 run 级与块级时，这两条出口【结构上不可能出现】——那不是"没走到"，是"没被读"。
+_PLAN_EXITS: Mapping[str, str] = {
+    "refuse_split": "refuse_split",
+    "single_agent": "single_agent",
 }
 
 
@@ -72,22 +85,40 @@ def _materialise(task_dir: Path) -> None:
 
 
 def _exits_from_run(result: Any) -> set[str]:
+    """这一跑真正走过哪些出口 —— **三层信号合起来**才算完整（`#30` 量的）。
+
+    * **run 级** —— `ok`（装配过 + 全部块合格）与 `exit_reason`（`passed` / `declined` / `failed`）；
+    * **块级** —— 每个 verdict 的 `evidence["exit"]`（loop 的终态理由，含具名门）；
+    * **计划层** —— `SplitPlan.decision` / `.fallback`（`refuse_split` / `single_agent`）。
+
+    ★ 缺了第三层时，「该不该拆」这条判据走得再真也进不了图 —— `#25` 修好的
+    `refuse_split` / `single_agent` 因此在那之前的每一张图上都是 `not_hit`。
+    """
     seen: set[str] = set()
     if result.ok:
         seen.add("deliver")
+    run_reason = str(getattr(result, "exit_reason", ""))
+    if run_reason in _EXIT_FROM_REASON:
+        seen.add(_EXIT_FROM_REASON[run_reason])
     for verdict in result.verdicts.values():
         reason = str(verdict.evidence.get("exit", ""))
         mapped = _EXIT_FROM_REASON.get(reason)
         if mapped is not None:
             seen.add(mapped)
+    plan = getattr(result, "plan", None)
+    if plan is not None:
+        for name in (getattr(plan, "decision", ""), getattr(plan, "fallback", "")):
+            mapped = _PLAN_EXITS.get(str(name))
+            if mapped is not None:
+                seen.add(mapped)
     return seen
 
 
-def _contract_sources(task_dir: Path) -> tuple[str, ...]:
+def _contract_sources(task_dir: Path, task_file: str = "task.yaml") -> tuple[str, ...]:
     """The declared source refs of the task, read for the degradation note only."""
     import yaml
 
-    document = yaml.safe_load((task_dir / "task.yaml").read_text(encoding="utf-8"))
+    document = yaml.safe_load((task_dir / task_file).read_text(encoding="utf-8"))
     return tuple(str(row.get("ref", "")) for row in (document.get("sources", ()) or ()) if isinstance(row, dict))
 
 
@@ -100,12 +131,21 @@ def run_task(
     expected_blame: str | None = None,
     offline: bool = False,
     concurrency: int | None = None,
+    task_file: str = "task.yaml",
 ) -> TaskRun:
     """Run one acceptance task through the real assembly point.
 
     ``client`` exists for the deterministic mechanism tests: it is substituted *at*
     ``cli.build_client`` (the single construction site) rather than by reaching
     around the assembly point.
+
+    ``task_file`` selects which contract file to run. It exists because a task
+    directory can hold **several versions of the same question** and the interesting
+    one is sometimes not ``task.yaml`` — e.g. the counterexample's
+    ``party-task.yaml`` declares ``sources_share_state`` and is refused a split,
+    while its ``task.yaml`` is the single-source counterpart. Without this knob the
+    refusal could only be run *outside* the harness, so its exit never reached the
+    coverage map（`#30`）.
     """
     from bobanana6 import cli
     from bobanana6.assemble_impl import RunRefused, RunResult
@@ -116,7 +156,7 @@ def run_task(
     snapshots = base / "_run" / "snapshots"
     argv = [
         "run",
-        str(base / "task.yaml"),
+        str(base / task_file),
         "--ontology",
         str(base / "ontology.yaml"),
         "--strategy",
@@ -170,7 +210,7 @@ def run_task(
         )
 
     exits = _exits_from_run(result)
-    base_sources = _contract_sources(base)
+    base_sources = _contract_sources(base, task_file)
     total = len(result.verdicts)
     passed = sum(1 for verdict in result.verdicts.values() if verdict.ok)
     accuracy = 0.0

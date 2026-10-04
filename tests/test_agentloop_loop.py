@@ -353,6 +353,40 @@ def test_completed_actions_are_persisted_and_not_replayed() -> None:
     assert resume(checkpoint).completed_actions == ("tool:1", "tool:2")
 
 
+def test_a_local_retry_is_a_continuation_and_never_a_terminal_exit() -> None:
+    """★ `#30` 的看门狗：重试（`retry` / `retry_after_error`）**不留终态**。
+
+    验收的九条出口里有 `retry_local`，但采集图里它今天到不了 —— 不是因为没重试
+    （这一跑就重试了一次），而是因为重试是 `PhaseResult.cont`：下一轮会把
+    `exit_reason` 覆盖掉，预算用尽时是 `budget_exhausted`。
+
+    ★ 如果哪天运行期把"发生过一次重试"记进终态（或新加一个字段），**这条会红**。
+    那时要做的不是删它，而是把新信号接进 `harness._exits_from_run`。
+    """
+    io = FakeIO(
+        [TurnProposal(candidate=candidate()), TurnProposal(candidate=candidate())],
+        gates=[GateVerdict("failed", "full"), GateVerdict("passed", "full")],
+    )
+    result = WorkerLoop(io, config=LoopConfig(max_turns=4, max_retries=3)).run(task_id="t", worker_id="w")
+
+    assert io.verify_calls == 2  # 确实重试了一次（不是没走到）
+    assert result.exit_reason == "passed"
+    assert result.exit_reason not in {"retry", "retry_after_error"}
+
+
+def test_exhausted_retries_land_on_degrade_single_agent_never_on_retry() -> None:
+    """★ 同一个看门狗的另一半：重试预算用尽 → `degrade_single_agent`，也不是 `retry`。"""
+    io = FakeIO(
+        [TurnProposal(candidate=candidate()) for _ in range(8)],
+        gates=[GateVerdict("failed", "full") for _ in range(8)],
+    )
+    loop = WorkerLoop(io, config=LoopConfig(max_turns=8, max_retries=2, max_reflections=1))
+    result = loop.run(task_id="t", worker_id="w")
+
+    assert io.verify_calls >= 3, io.verify_calls
+    assert result.exit_reason == "degrade_single_agent", result.exit_reason
+
+
 def test_the_compression_callback_is_the_injected_summarizer() -> None:
     """★ Wiring point: ``summarize`` is injected, so the loop never builds one.
 

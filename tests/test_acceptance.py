@@ -442,13 +442,20 @@ def _columns_of(fetched) -> list[dict]:  # type: ignore[no-untyped-def]
 
 
 def test_the_scripted_multi_block_run_reaches_assembly() -> None:
-    """★ 4 块全过 → 装配；合并产物带着自己的溯源引用。"""
+    """★ 4 块全过 → 装配；合并产物带着自己的溯源引用。
+
+    `#30` 的反向检验也在这里：多块 pipeline 的计划层决定是 `split`，
+    所以 `refuse_split` / `single_agent` 这两格**必须仍是不变**的 `not_hit`
+    —— 采集补上计划层不等于把这两格送出去。
+    """
     task_dir = ACCEPTANCE / "main" / "panel-three-sources"
     run = run_task(task_dir, client=_ScriptedBlocks(), env={})
     assert run.report.block_pass_rate == 1.0, (run.report.render(), {k: v.failed for k, v in run.verdicts.items()})
     assert run.report.assembly_passed is True, run.assembly_codes
     assert run.plan_shape == "pipeline" and len(run.blocks) == 4
     assert run.report.coverage["deliver"] == "hit"
+    assert run.report.coverage["refuse_split"] == "not_hit"
+    assert run.report.coverage["single_agent"] == "not_hit"
 
 
 # --------------------------------------------------------------------------- #
@@ -473,6 +480,8 @@ def test_a_real_run_attributes_a_missing_input_to_context() -> None:
     # ★ 而且要【问得出是哪一个输入缺席】才停得下来：载荷不报名字的话，调用方只会
     #   一遍遍再要同一个输入，最后死在预算上（那是另一种失败，不是 context）。
     assert run.verdicts["T-04"].evidence.get("exit") == "declined", run.verdicts["T-04"].evidence
+    # ★ `#30` 的九条出口表：`decline` 由**块级**产生，采集一直读得到它 —— 这里钉住。
+    assert run.report.coverage["decline"] == "hit"
 
 
 def test_a_real_run_attributes_a_rejected_block_to_the_constraint() -> None:
@@ -828,6 +837,32 @@ def test_counter_task_refuses_to_split_and_falls_back_to_single_agent() -> None:
     assert "share one state" in plan.refusal
     # 回落之后这份计划本身是【合法】的：拒绝扇出不是"报个红就完了"
     assert report.ok, report.codes()
+
+
+def test_a_refused_split_reaches_the_exit_coverage() -> None:
+    """★★ `#30` 的反证：这两条出口在**计划层**，采集必须读到它。
+
+    同一跑里 run 级与块级信号**一条都没有**这两条出口（下面两条断言钉住这一点），
+    所以它们只可能来自 `SplitPlan.decision` / `.fallback`：
+
+    ```
+    修前采集（只读 run 级 ok + 块级 verdict）：refuse_split not_hit · single_agent not_hit
+    修后采集（加计划层）                      ：refuse_split HIT     · single_agent HIT
+    ```
+
+    ★ 判定语义一个字没动 —— 仍然是 `#25` 那条「契约声明共享状态」的判据。
+    """
+    task_dir = ACCEPTANCE / "counter" / "state-machine-task"
+    run = run_task(task_dir, task_file="party-task.yaml", env={}, offline=True)
+
+    # ① 修后：计划层的两条进了图
+    assert run.report.coverage["refuse_split"] == "hit"
+    assert run.report.coverage["single_agent"] == "hit"
+    assert run.plan_shape == "star" and len(run.blocks) == 1
+    # ② 反证的另一半：这一跑既没有门禁拒跑、块级也没有这两条出口 —— 只可能来自计划层
+    assert run.refused is None
+    reasons = {str(verdict.evidence.get("exit", "")) for verdict in run.verdicts.values()}
+    assert not (reasons & {"refuse_split", "single_agent"}), reasons
 
 
 # --------------------------------------------------------------------------- #
