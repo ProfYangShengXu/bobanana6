@@ -41,7 +41,7 @@ from ..core.assemble import AssemblyReport, check_assembly
 from ..core.capabilities import BlockSpec, Capability, WorkerCapabilities
 from ..core.checkers.base import CheckContext
 from ..core.consist import ConsistencyReport, check_consistency
-from ..core.kernel import converge
+from ..core.kernel import compare_across, converge
 from ..core.model import (
     DEFAULT_LIMITS,
     AssemblyOutcome,
@@ -287,7 +287,25 @@ class Runner:
                 gate_detail["constraint_rejected"] = True
             self._note_gate(subtask, verdict.ok, gate_detail)
 
-        convergence = self._aggregate(decisions)
+        # ★ `#63`: 装配关只拿 pieces —— 两个块的候选从来不会被放在一起，于是
+        #   "两个权威源对同一实体给出不同值"这件事在架构上测不到。这里在块跑完之后
+        #   把各块的候选按【实体键】对齐、按内核的三分法分类（口径不一致 / 真冲突），
+        #   并把结果并进这一轮的分类里 —— 调用方（报告）照旧读同一个载荷。
+        cross_block = compare_across(candidates.values(), context)
+        if not cross_block.is_empty:
+            self.event_log.record(
+                kind="gate_check",
+                task_id=self.document.contract.task_id,
+                worker_id="runner",
+                at=self.epoch(),
+                ok=False,
+                detail={
+                    "conflicts": len(cross_block.conflicts),
+                    "definition_mismatches": len(cross_block.definition_mismatches),
+                    "concepts": sorted({c.concept_id for c in cross_block.conflicts}),
+                },
+            )
+        convergence = self._aggregate(decisions, cross_block=cross_block)
         assembly = check_assembly(
             plan,
             contract,
@@ -562,17 +580,26 @@ class Runner:
             "issues": [{"issue": str(i.issue), "block": i.block_id, "detail": i.detail} for i in matched.issues],
         }
 
-    def _aggregate(self, decisions: list[Convergence]) -> Convergence:
+    def _aggregate(self, decisions: list[Convergence], *, cross_block: Classification | None = None) -> Convergence:
         if not decisions:
             return Convergence(decision=ConvergeDecision.ARBITRATE, note="no block produced a candidate")
         worst = max(decisions, key=lambda c: _DECISION_ORDER.index(c.decision))
         merged = Classification(
             blind_spots=tuple(item for c in decisions for item in c.classification.blind_spots),
-            conflicts=tuple(item for c in decisions for item in c.classification.conflicts),
-            definition_mismatches=tuple(item for c in decisions for item in c.classification.definition_mismatches),
+            conflicts=tuple(item for c in decisions for item in c.classification.conflicts)
+            + tuple(cross_block.conflicts if cross_block is not None else ()),
+            definition_mismatches=tuple(item for c in decisions for item in c.classification.definition_mismatches)
+            + tuple(cross_block.definition_mismatches if cross_block is not None else ()),
         )
+        # ★ 真冲突的处置是【记录】（`ConvergeDecision.RECORD_CONFLICT`），不是"当无事发生"：
+        #   它只在比当前最坏决策更靠后时抬上去，绝不把更重的决策降下来。
+        decision = worst.decision
+        if cross_block is not None and cross_block.conflicts:
+            recorded = ConvergeDecision.RECORD_CONFLICT
+            if _DECISION_ORDER.index(recorded) > _DECISION_ORDER.index(decision):
+                decision = recorded
         return Convergence(
-            decision=worst.decision,
+            decision=decision,
             verdicts=tuple(v for c in decisions for v in c.verdicts),
             classification=merged,
             note=worst.note,

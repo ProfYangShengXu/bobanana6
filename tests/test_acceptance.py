@@ -1159,3 +1159,187 @@ def test_a_structurally_bad_answer_is_declared_as_the_models_failure() -> None:
     # ★ 该块确实是被"答案读不出来"拦下的（不是别的失败）
     evidence = next(iter(run.verdicts.values())).evidence
     assert "CandidateFormatError" in str(evidence.get("errors")), evidence
+
+
+# --------------------------------------------------------------------------- #
+# #63 跨块（跨源）真冲突：按实体键对齐，三类分歧分开
+# --------------------------------------------------------------------------- #
+
+
+def _two_block_candidates(ontology, *, left_value: str, right_value: str, versions=()):
+    """两份部件，都带 `obligor|revenue` 两列、引用各自的快照。"""
+    from bobanana6.core.checkers.base import CheckContext
+    from bobanana6.core.model import Artifact, Candidate, Column, Provenance
+
+    def one(sid: str, ref: str, value: str, version: str | None) -> Candidate:
+        artifact = Artifact(
+            name=f"part-{ref}.csv",
+            columns=(Column(name="obligor", dtype="str"), Column(name="revenue", dtype="str")),
+            rows=({"obligor": "ENT-03", "revenue": value},),
+        )
+        return Candidate(
+            subtask_id=sid,
+            source_id=ref,
+            artifacts=(artifact,),
+            provenance=(Provenance(value_ref=f"part-{ref}.csv:row=0", snapshot_ref=ref, locator="input/" + ref),),
+            definition_versions={} if version is None else {"revenue": version},
+        )
+
+    return [
+        one("T-02", "s02", left_value, versions[0] if versions else None),
+        one("T-20", "s20", right_value, versions[1] if versions else None),
+    ], CheckContext(ontology=ontology)
+
+
+def _revenue_ontology():
+    from bobanana6.core.model import Concept, Definition, Ontology
+
+    return Ontology(
+        domain="d",
+        version="1",
+        concepts={
+            "obligor": Concept(id="obligor", label="O", kind="entity", domain="d"),
+            "revenue": Concept(id="revenue", label="R", kind="measure", domain="d"),
+        },
+        definitions={
+            "revenue:v1": Definition(concept_id="revenue", version="v1", text="t"),
+            "revenue:v4": Definition(concept_id="revenue", version="v4", text="t"),
+        },
+        units={},
+    ).freeze()
+
+
+def test_the_three_divergence_classes_stay_apart_across_blocks() -> None:
+    """★ `#63`：装配关只拿 pieces，两个块的候选从来不会被放在一起 —— 这里对齐后分类。
+
+    三条判据：同一个值（多源都这么说）→ 什么都不记；**同一口径不同值 → 记 Conflict
+    且两侧证据都留**；口径版本不同 → 记 DefinitionMismatch，**绝不记成冲突**。
+    """
+    from bobanana6.core.kernel import compare_across
+
+    ontology = _revenue_ontology()
+    agree, context = _two_block_candidates(ontology, left_value="3010000", right_value="3010000")
+    assert compare_across(agree, context).is_empty, "agreement is not a divergence"
+
+    disagree, context = _two_block_candidates(ontology, left_value="3010000", right_value="9000000")
+    result = compare_across(disagree, context)
+    assert len(result.conflicts) == 1 and not result.definition_mismatches
+    conflict = result.conflicts[0]
+    assert conflict.concept_id == "revenue"
+    assert [(source, value) for source, value, _ in conflict.claims] == [("s02", "3010000"), ("s20", "9000000")]
+
+    versions_differ, context = _two_block_candidates(
+        ontology, left_value="3010000", right_value="9000000", versions=("v1", "v4")
+    )
+    result = compare_across(versions_differ, context)
+    assert not result.conflicts, "a definition mismatch must not be recorded as a conflict"
+    assert [mismatch.versions for mismatch in result.definition_mismatches] == [("v1", "v4")]
+
+
+def test_the_conflicts_report_names_the_cross_block_pair_and_not_a_definition_drift() -> None:
+    """★ `#63` 的判据落点：CONFLICTS.md 里【出现那一对】（双方证据都留），
+    而口径不一致【不许】混进冲突那一节。"""
+    from bobanana6.core.kernel import compare_across
+    from bobanana6.core.model import ConvergeDecision, Convergence
+    from bobanana6.report import render_conflicts
+
+    ontology = _revenue_ontology()
+    disagree, context = _two_block_candidates(ontology, left_value="3010000", right_value="9000000")
+    classification = compare_across(disagree, context)
+    text = render_conflicts(
+        _plan_for(ACCEPTANCE / "main" / "panel-three-sources")[3],
+        classification,
+        convergence=Convergence(decision=ConvergeDecision.RECORD_CONFLICT),
+    )
+    assert "`revenue`" in text and "s02='3010000'" in text and "s20='9000000'" in text, text
+    assert "- 冲突 Conflict: 1" in text and "- 口径不一致 DefinitionMismatch: 0" in text
+
+
+def test_an_explicit_ontology_pin_outranks_the_lexicographic_fallback(tmp_path: Path) -> None:
+    """★ A02 后半：规范口径由【本体声明】，不靠版本号字典序猜；没有声明时要把兜底【报出来】。
+
+    ★ 反向：题侧已改过名的压力题本体（`v1-...` 排在最前）读数不变。
+    """
+    from bobanana6.core.checkers.base import CheckContext
+    from bobanana6.core.checkers.definition_pin import check as pin_check
+    from bobanana6.core.model import Candidate, Constraint
+    from bobanana6.core.ontology import pin_is_explicit, pinned_version
+    from bobanana6.ontology import load_ontology_file
+
+    base = (ACCEPTANCE / "stress" / "ontology.yaml").read_text(encoding="utf-8")
+    declared = tmp_path / "declared.yaml"
+    declared.write_text(base.replace("definitions:", "pins:\n  revenue: v4-excl-tax\ndefinitions:", 1), encoding="utf-8")
+
+    pinned = load_ontology_file(declared).freeze()
+    assert pinned_version("revenue", pinned) == "v4-excl-tax" and pin_is_explicit("revenue", pinned)
+
+    fallback = load_ontology_file(ACCEPTANCE / "stress" / "ontology.yaml").freeze()
+    assert pinned_version("revenue", fallback) == "v1-group-consolidated"
+    assert pin_is_explicit("revenue", fallback) is False, "an undeclared pin must not look declared"
+
+    candidate = Candidate(subtask_id="T-04", source_id="s02")
+    on_pin = pin_check(
+        Constraint(id="C-rev", kind="definition_pin", target="panel.csv", spec={"concept": "revenue", "version": "v4-excl-tax"}, rationale="r"),
+        candidate,
+        CheckContext(ontology=pinned),
+    )
+    assert on_pin.ok and any("declared by the ontology" in fact for fact in on_pin.facts), on_pin.facts
+
+    on_fallback = pin_check(
+        Constraint(id="C-rev", kind="definition_pin", target="panel.csv", spec={"concept": "revenue", "version": "v1-group-consolidated"}, rationale="r"),
+        candidate,
+        CheckContext(ontology=fallback),
+    )
+    assert on_fallback.ok, on_fallback.facts
+    assert any("lexicographic fallback" in fact for fact in on_fallback.facts), on_fallback.facts
+
+
+def test_rows_from_different_periods_are_never_paired() -> None:
+    """★ `#63` 的**假冲突**防线：键 = 【不是量】的列（实体 + 期间）。
+
+    只按实体对齐会在压力题上造出 15 条假冲突（`ENT-01|2021` 撞上 `ENT-01|2024`）——
+    本块真跑实测到过，这条把根因钉住。
+    """
+    from bobanana6.core.checkers.base import CheckContext
+    from bobanana6.core.kernel import compare_across
+    from bobanana6.core.model import (
+        Artifact,
+        Candidate,
+        Column,
+        Concept,
+        Ontology,
+        Provenance,
+    )
+
+    ontology = Ontology(
+        domain="d",
+        version="1",
+        concepts={
+            "obligor": Concept(id="obligor", label="O", kind="entity", domain="d"),
+            "revenue": Concept(id="revenue", label="R", kind="measure", domain="d"),
+        },
+        definitions={},
+        units={},
+    ).freeze()
+    columns = (
+        Column(name="obligor", dtype="str"),
+        Column(name="year", dtype="str"),
+        Column(name="revenue", dtype="str"),
+    )
+
+    def one(sid: str, ref: str, year: str, value: str) -> Candidate:
+        artifact = Artifact(
+            name=f"part-{ref}.csv",
+            columns=columns,
+            rows=({"obligor": "ENT-02", "year": year, "revenue": value},),
+        )
+        return Candidate(
+            subtask_id=sid,
+            source_id=ref,
+            artifacts=(artifact,),
+            provenance=(Provenance(value_ref=f"part-{ref}.csv:row=0", snapshot_ref=ref, locator="L"),),
+        )
+
+    context = CheckContext(ontology=ontology)
+    assert compare_across([one("T-11", "s11", "2021", "2000000 元"), one("T-18", "s18", "2024", "40")], context).is_empty
+    assert len(compare_across([one("T-02", "s02", "2022", "3010000"), one("T-20", "s20", "2022", "9000000")], context).conflicts) == 1

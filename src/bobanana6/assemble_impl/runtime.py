@@ -95,7 +95,19 @@ def block_bundle(
             return None
         if not declared or not _names_a_declared_field(constraint, declared, ontology):
             return None
-        return replace(constraint, id=f"{constraint.id}@{subtask.id}", target=subtask.output)
+        spec = dict(constraint.spec)
+        if constraint.kind == "schema":
+            # ★ 中间产物是【文本】：dtype（float/int）是交付物的约定，读取块交出来的
+            #   还是字符串（`#26` 的第一版把 dtype 一起投过去 → 压力题 24 个读块全挂在
+            #   `C-fields@T-xx` 上，真模型一跑就现形）。投的是**形状**（列在不在 / 能不能空），
+            #   不是最终类型 —— 类型仍由交付物那一关判。
+            spec = {
+                **spec,
+                "columns": [
+                    {**column, "dtype": "str"} for column in spec.get("columns", []) if isinstance(column, dict)
+                ],
+            }
+        return replace(constraint, id=f"{constraint.id}@{subtask.id}", target=subtask.output, spec=spec)
 
     hard = tuple(c for c in bundle.hard if keep(c)) + tuple(
         r for r in (retarget(c) for c in bundle.hard) if r is not None

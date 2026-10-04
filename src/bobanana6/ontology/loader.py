@@ -130,6 +130,26 @@ def _definitions(data: Mapping[str, Any], source: str) -> dict[str, Definition]:
     return definitions
 
 
+def _pins(data: Mapping[str, Any], source: str) -> dict[str, str]:
+    """★ A02 后半: 本体可以显式声明「哪个口径版本是规范口径」。
+
+    只在声明指向一个真实存在的版本时才收下 —— 指向不存在的版本会让判定"看起来有 pin
+    其实没有"，比不声明更糟。
+    """
+    raw = data.get("pins", {}) or {}
+    if not isinstance(raw, Mapping):
+        raise OntologyLoadError(f"{source}:$.pins: must be an object of concept -> version")
+    known = {(definition.concept_id, definition.version) for definition in _definitions(data, source).values()}
+    pins: dict[str, str] = {}
+    for concept, version in raw.items():
+        if not isinstance(version, str) or (str(concept), version) not in known:
+            raise OntologyLoadError(
+                f"{source}:$.pins['{concept}']: {version!r} names no declared definition of that concept"
+            )
+        pins[str(concept)] = version
+    return pins
+
+
 def _relations(data: Mapping[str, Any], source: str) -> tuple[Relation, ...]:
     relations: list[Relation] = []
     for index, raw in enumerate(data.get("relations", ())):
@@ -158,6 +178,7 @@ def load_ontology(text: str, *, source: str = "<string>") -> Ontology:
         version=data["version"],
         concepts=concepts,
         definitions=_definitions(data, source),
+        pins=_pins(data, source),
         units=units,
         relations=_relations(data, source),
         code_systems={key: tuple(value) for key, value in data.get("code_systems", {}).items()},

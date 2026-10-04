@@ -5,7 +5,7 @@ never a ``Conflict`` (a signal to record)."""
 from __future__ import annotations
 
 from ..model import Candidate, Constraint, DefinitionMismatch
-from ..ontology import pinned_version
+from ..ontology import pin_is_explicit, pinned_version
 from .base import CheckContext, CheckOutcome, fail, ok
 
 KIND = "definition_pin"
@@ -36,4 +36,7 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
             facts=(f"concept {concept!r} is pinned to {pin!r}, candidate declares {version!r}",),
             divergences=(mismatch,),
         )
-    return ok(constraint, f"concept {concept!r} pinned to {version!r}")
+    source = "declared by the ontology" if pin_is_explicit(concept, context.ontology) else (
+        "★ lexicographic fallback: the ontology declares no explicit pin for this concept"
+    )
+    return ok(constraint, f"concept {concept!r} pinned to {version!r} ({source})")

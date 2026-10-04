@@ -249,6 +249,21 @@ def pinned_version(concept_id: str, ontology: Ontology) -> str | None:
     )
     if not versions:
         return None
+    # ★ A02 后半: 本体【显式声明】的 pin 说了算（§5.0.1 的同源原则：权威定义在一处）。
+    declared = ontology.pins.get(concept_id)
+    if isinstance(declared, str) and declared in versions:
+        return declared
     # An ambiguous pin is a defect the caller must resolve; surfacing the first
     # sorted version keeps the judgment deterministic either way.
     return versions[0]
+
+
+def pin_is_explicit(concept_id: str, ontology: Ontology) -> bool:
+    """★ 这一条 pin 是【本体声明的】还是【字典序兜底】的？兜底要说出来，不静默。"""
+    declared = ontology.pins.get(concept_id, "")  # 与 pinned_version 的那一行刻意不同：见证变体只打前一处
+    if not isinstance(declared, str) or not declared:
+        return False
+    return any(
+        definition.concept_id == concept_id and definition.version == declared
+        for definition in ontology.definitions.values()
+    )

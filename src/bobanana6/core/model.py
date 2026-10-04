@@ -289,6 +289,9 @@ class Ontology:
     concepts: Mapping[str, Concept]  # core:ontology —— 校验/映射/层级读它
     definitions: Mapping[str, Definition]  # core:ontology —— 口径版本判定读它
     units: Mapping[str, Unit]  # core:ontology —— 单位一致性读它
+    #: ★ A02 后半: 本体【显式声明】哪个口径版本是规范口径（concept -> version）。
+    #: 缺省时退回"字典序最小"—— 但那条兜底必须在 evidence 里被报出来（不静默）。
+    pins: Mapping[str, str] = field(default_factory=dict)  # core:ontology —— pinned_version 读它
     relations: tuple[Relation, ...] = ()  # core:ontology —— 端点校验读它
     code_systems: Mapping[str, tuple[str, ...]] = field(  # core:checkers —— code_valid 读它
         default_factory=dict
@@ -325,6 +328,7 @@ class Ontology:
             version=self.version,
             concepts=_deep_freeze_mapping(self.concepts),
             definitions=_deep_freeze_mapping(self.definitions),
+            pins=_deep_freeze_mapping(self.pins),
             units=_deep_freeze_mapping(self.units),
             relations=self.relations,
             code_systems=_deep_freeze_mapping(self.code_systems),

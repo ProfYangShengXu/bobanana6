@@ -19,7 +19,8 @@ and the three classes are disjoint types.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
+from itertools import combinations
 from typing import Any
 
 from .checkers import JUDGMENT_ORDER, check_kind
@@ -277,3 +278,121 @@ def converge(
         decision = ConvergeDecision.RECORD_CONFLICT
         note = "same definition, different sources, different values; record both"
     return Convergence(decision=decision, verdicts=verdicts, classification=merged, note=note)
+
+
+def _entity_key_columns(left: Candidate, right: Candidate, context: CheckContext, override: Sequence[str] | None) -> tuple[str, ...]:
+    """Which shared columns identify a row: the ontology's entity fields."""
+    shared = {
+        column.name
+        for artifact in left.artifacts
+        for column in artifact.columns
+    } & {
+        column.name
+        for artifact in right.artifacts
+        for column in artifact.columns
+    }
+    if override is not None:
+        return tuple(name for name in override if name in shared)
+    ontology = context.ontology
+    # ★ 键 = 【不是量】的那些列：实体号 + 期间（年度）等都算身份，revenue/exposure 不算。
+    #   只按实体对齐会出事：压力题的部件是 (实体 × 年度)，ENT-01|2021 会撞上 ENT-01|2024,
+    #   于是"值不同"被记成一堆【假冲突】（本块真跑实测到 15 条）。未知概念宁可按键处理 ——
+    #   多算键只会少配对，不会把不相关的行硬凑成一对。
+    keys: list[str] = []
+    for name in sorted(shared):
+        if ontology is None:
+            keys.append(name)
+            continue
+        concept = ontology.concepts.get(map_field(name, ontology) or name)
+        if concept is None or concept.kind != "measure":
+            keys.append(name)
+    return tuple(keys)
+
+
+def _cross_differences(
+    left: Candidate,
+    right: Candidate,
+    context: CheckContext,
+    override: Sequence[str] | None,
+) -> tuple[tuple[str, tuple[str, ...], Mapping[str, Any], Mapping[str, Any]], ...]:
+    """(column, entity key, left row, right row) for rows that disagree across blocks.
+
+    Rows are matched by the entity key, **not by position**: two blocks' outputs have
+    no common order, so index pairing would invent differences that are not there.
+    """
+    keys = _entity_key_columns(left, right, context, override)
+    if not keys:
+        return ()
+    found: list[tuple[str, tuple[str, ...], Mapping[str, Any], Mapping[str, Any]]] = []
+    right_by_columns = {
+        tuple(column.name for column in artifact.columns): artifact for artifact in right.artifacts
+    }
+    for left_artifact in sorted(left.artifacts, key=lambda a: a.name):
+        columns = tuple(column.name for column in left_artifact.columns)
+        right_artifact = right_by_columns.get(columns)
+        if right_artifact is None or not set(keys) <= set(columns):
+            continue
+        right_rows = {
+            tuple(str(row.get(key)) for key in keys): row for row in right_artifact.rows
+        }
+        for left_row in left_artifact.rows:
+            key = tuple(str(left_row.get(name)) for name in keys)
+            right_row = right_rows.get(key)
+            if right_row is None:
+                continue
+            for column in columns:
+                if column in keys:
+                    continue
+                if left_row.get(column) != right_row.get(column):
+                    found.append((column, key, left_row, right_row))
+    return tuple(found)
+
+
+def compare_across(
+    candidates: Iterable[Candidate],
+    context: CheckContext,
+    *,
+    key_columns: Sequence[str] | None = None,
+) -> Classification:
+    """★ `#63`: compare what *different blocks* produced, keyed by the shared entity.
+
+    The assembly stage only ever sees artifacts, so two blocks' candidates were never
+    put side by side and a true cross-source conflict could not be recorded at all
+    (measured on the pressure task: A03 hit/hit on the main task, miss/miss there).
+
+    The three divergence classes stay apart, in the kernel's order -- **definition
+    first, conflict second** (the same rule as :func:`classify`): a pair that pinned
+    different versions is a ``DefinitionMismatch`` (normalize, then compare again),
+    never a conflict. Rows are aligned on the **entity** columns, so the same value
+    carried by several sources produces nothing (that is agreement, not a conflict).
+    """
+    ordered = sorted(candidates, key=lambda candidate: candidate.subtask_id)
+    conflicts: list[Conflict] = []
+    mismatches: list[DefinitionMismatch] = []
+    for left, right in combinations(ordered, 2):
+        for column, _key, left_row, right_row in _cross_differences(left, right, context, key_columns):
+            concept = (map_field(column, context.ontology) or column) if context.ontology is not None else column
+            versions = {
+                str(candidate.definition_versions[concept])
+                for candidate in (left, right)
+                if candidate.definition_versions.get(concept)
+            }
+            ambiguous = len(versions) > 1
+            if ambiguous:  # 口径不一致 → 归一后重比，不记为冲突
+                mismatches.append(
+                    DefinitionMismatch(
+                        concept_id=concept,
+                        versions=tuple(sorted(versions)),
+                        parties=(left.subtask_id, right.subtask_id),
+                    )
+                )
+                continue
+            conflicts.append(
+                Conflict(
+                    concept_id=concept,
+                    definition_version=next(iter(versions), ""),
+                    claims=_claims_for(left, column, left_row.get(column))
+                    + _claims_for(right, column, right_row.get(column)),
+                )
+            )
+    return Classification(conflicts=tuple(conflicts), definition_mismatches=tuple(mismatches))

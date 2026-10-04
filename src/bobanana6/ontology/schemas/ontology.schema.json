@@ -5,25 +5,71 @@
   "description": "Structural validation of an ontology file. Semantic self-consistency (dangling concept refs, unit conflicts, definition versions) is core/ontology.py's job, not this schema's.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["domain", "version", "concepts"],
+  "required": [
+    "domain",
+    "version",
+    "concepts"
+  ],
   "properties": {
-    "domain": { "type": "string", "minLength": 1 },
-    "version": { "type": "string", "minLength": 1, "not": { "const": "*" } },
+    "domain": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "const": "*"
+      }
+    },
     "concepts": {
       "type": "object",
       "minProperties": 1,
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["label", "kind"],
+        "required": [
+          "label",
+          "kind"
+        ],
         "properties": {
-          "label": { "type": "string", "minLength": 1 },
-          "kind": { "enum": ["entity", "attribute", "event", "measure"] },
-          "domain": { "type": "string", "minLength": 1 },
-          "parent": { "type": ["string", "null"] },
-          "aliases": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-          "unit": { "type": "string", "minLength": 1 },
-          "code_system": { "type": "string", "minLength": 1 }
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "entity",
+              "attribute",
+              "event",
+              "measure"
+            ]
+          },
+          "domain": {
+            "type": "string",
+            "minLength": 1
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1
+          },
+          "code_system": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
@@ -32,13 +78,35 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["version", "text"],
+        "required": [
+          "version",
+          "text"
+        ],
         "properties": {
-          "concept_id": { "type": "string", "minLength": 1 },
-          "version": { "type": "string", "minLength": 1 },
-          "text": { "type": "string", "minLength": 1 },
-          "formula": { "type": ["string", "null"] },
-          "edge_cases": { "type": "array", "items": { "type": "string" } }
+          "concept_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "formula": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "edge_cases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -47,12 +115,30 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["symbol", "scale", "base"],
+        "required": [
+          "symbol",
+          "scale",
+          "base"
+        ],
         "properties": {
-          "concept_id": { "type": "string", "minLength": 1 },
-          "symbol": { "type": "string", "minLength": 1 },
-          "scale": { "type": "number", "not": { "const": 0 } },
-          "base": { "type": "string", "minLength": 1 }
+          "concept_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "symbol": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scale": {
+            "type": "number",
+            "not": {
+              "const": 0
+            }
+          },
+          "base": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
@@ -61,19 +147,60 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["src", "dst", "kind", "cardinality"],
+        "required": [
+          "src",
+          "dst",
+          "kind",
+          "cardinality"
+        ],
         "properties": {
-          "src": { "type": "string", "minLength": 1 },
-          "dst": { "type": "string", "minLength": 1 },
-          "kind": { "enum": ["belongs_to", "subtype_of", "measured_in", "derived_from"] },
-          "cardinality": { "enum": ["1:1", "1:N", "N:1", "N:M"] }
+          "src": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dst": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "belongs_to",
+              "subtype_of",
+              "measured_in",
+              "derived_from"
+            ]
+          },
+          "cardinality": {
+            "enum": [
+              "1:1",
+              "1:N",
+              "N:1",
+              "N:M"
+            ]
+          }
         }
       }
     },
     "code_systems": {
       "type": "object",
-      "additionalProperties": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     },
-    "calendar": { "type": "object" }
+    "calendar": {
+      "type": "object"
+    },
+    "pins": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "★ A02: explicit canonical-definition pins (concept -> version)."
+    }
   }
 }

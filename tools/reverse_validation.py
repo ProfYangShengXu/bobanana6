@@ -2006,6 +2006,40 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_attacks.py::test_a08_the_global_invariant_sees_the_multi_piece_assembly",
         "a global invariant on the assembled whole goes back to 'artifact not found'",
     ),
+    # -- #63：跨块对齐 + 三分法 -- #
+    Mutation(
+        "Q12-definition-drift-recorded-as-a-conflict",
+        "core/kernel.py",
+        "            ambiguous = len(versions) > 1\n",
+        "            ambiguous = False  # mutation: a definition drift is recorded as a conflict\n",
+        "tests/test_acceptance.py::test_the_three_divergence_classes_stay_apart_across_blocks",
+        "the '口径不一致' class is folded into 'conflict' again, so the report fills with false conflicts",
+    ),
+    Mutation(
+        "Q13-cross-block-comparison-never-runs",
+        "core/kernel.py",
+        "    for left, right in combinations(ordered, 2):\n",
+        "    for left, right in []:  # mutation: two blocks are never put side by side\n",
+        "tests/test_acceptance.py::test_the_three_divergence_classes_stay_apart_across_blocks",
+        "two blocks disagreeing about one entity goes back to being unobservable",
+    ),
+    # -- A02 后半：本体的显式 pin 说了算，兜底要报出来 -- #
+    Mutation(
+        "Q14-explicit-pin-ignored",
+        "core/ontology.py",
+        "    declared = ontology.pins.get(concept_id)\n",
+        "    declared = None  # mutation: the ontology's own declaration is ignored\n",
+        "tests/test_acceptance.py::test_an_explicit_ontology_pin_outranks_the_lexicographic_fallback",
+        "the canonical definition goes back to being decided by sorting version strings",
+    ),
+    Mutation(
+        "Q15-rows-from-different-periods-are-paired",
+        "core/kernel.py",
+        "        if concept is None or concept.kind != \"measure\":\n",
+        "        if True:  # mutation: every column is a key, so periods stop separating rows\n",
+        "tests/test_acceptance.py::test_rows_from_different_periods_are_never_paired",
+        "ENT-01|2021 is compared with ENT-01|2024 and the report fills with false conflicts",
+    ),
 )
 
 
