@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
+from ..agentloop.errors import FailoverReason
 from ..agentloop.events import EventLog
 from ..agentloop.gate import GateVerdict
 from ..agentloop.loop import LoopIO, LoopState, TurnProposal
@@ -245,8 +247,15 @@ class CandidateFormatError(ValueError):
         code: str = "invalid_answer",
         got: str = "",
         expected: str = EXPECTED_SHAPE,
+        reason: str = "",
     ) -> None:
         super().__init__(problem)
+        # ★ `#41`: 「答案读不出来」是一类，但**为什么**读不出来决定了该走哪个动作：
+        #   撞上限的截断（`truncated` → reshard）与"模型在转圈"（`repetition` → reshard）
+        #   都和形状错误（`format_error` → fix_constraint）不是一回事。生产者知道是哪一种，
+        #   就由它逐条声明（实例属性覆盖类属性 `format_error`；缺省仍然沿用类属性）。
+        if reason:
+            self.reason = reason
         self._feedback: dict[str, Any] = {"code": code, "problem": problem, "got": got, "expected": expected}
 
     def feedback(self) -> Mapping[str, Any]:
@@ -329,6 +338,74 @@ def _claims(raw: Any, *, snapshot_ref: str, locator: str, reject: Reject) -> tup
             )
         )
     return tuple(claims)
+
+
+#: ★ `#41`: 「重复主导」的判据常量（阈值由 253 条归档输出实测定，见 `.bobanana6/b41/报告.md`）。
+#: 判据 = **最长的"周期 P 连续重复段"占被检段的比例**（对齐无关：窗口法会在重复单元长度
+#: 与窗口不整除时漏判 —— 实测一条周期 37 的循环窗口占比只有 0.059，这一条抓得住）。
+REPETITION_MIN_CHARS = 1000  # 短输出不参与："把整个预算花光"这件事本身就意味着长
+REPETITION_TAIL_CHARS = 2048  # 只看尾部：退化填充/循环堆在尾部（前面通常还有真内容）
+REPETITION_MAX_PERIOD = 128  # 循环单元周期上限（代价 2048×128 ≈ 26 万次比较，~25ms）
+#: 实测：正常输出最大 0.144，退化样本 0.953 / 0.996 / 1.000 ⇒ 取几何中点 0.40（两侧各 ~2.5×）。
+REPETITION_RUN_SHARE = 0.40
+#: 只作**读数**（用户量过的那个口径）：60 字符非重叠窗口里最常出现的那个占多少。
+REPETITION_WINDOW = 60
+
+
+def repetition_readings(text: str) -> dict[str, float]:
+    """把"重复"量成两个数：周期重复段占比（判据）+ 窗口重复率（读数，可对账）。"""
+    segment = text[-REPETITION_TAIL_CHARS:]
+    best = 0
+    period = 1
+    if len(segment) >= 2:
+        for candidate in range(1, min(REPETITION_MAX_PERIOD, len(segment) - 1) + 1):
+            run = 1
+            for index in range(candidate, len(segment)):
+                run = run + 1 if segment[index] == segment[index - candidate] else 1
+                if run > best:
+                    best, period = run, candidate
+    windows = [
+        segment[index : index + REPETITION_WINDOW]
+        for index in range(0, max(len(segment) - REPETITION_WINDOW + 1, 0), REPETITION_WINDOW)
+    ]
+    return {
+        "chars": len(text),
+        "checked_chars": len(segment),
+        "window_share": (max(Counter(windows).values()) / len(windows)) if windows else 0.0,
+        "period": period,
+        "periodic_run_share": (best / len(segment)) if segment else 0.0,
+        "whitespace_share": (sum(1 for char in text if char.isspace()) / len(text)) if text else 0.0,
+    }
+
+
+def repetition_dominated(text: str) -> bool:
+    """★ `#41`: 这一段输出是不是"模型在转圈"（而不是"额度真的不够、内容还有"）。"""
+    if len(text) < REPETITION_MIN_CHARS:
+        return False
+    return repetition_readings(text)["periodic_run_share"] >= REPETITION_RUN_SHARE
+
+
+def _truncation_reason(text: str, *, hit_output_cap: bool) -> str:
+    """把"截断"归到真相那一类：``repetition`` / ``truncated`` / 空串（沿用 ``format_error``）。
+
+    · 重复主导 ⇒ ``repetition``：接着续还是重复，该回切分器（`REASON_ACTION` 里本来就是
+      `RESHARD_TASK`），不该再发一次同样形状的请求；
+    · 没重复、但端点的用量说到上限了 ⇒ ``truncated``：是我们自己的输出额度不够；
+    · 没重复、也没撞上限 ⇒ 模型自己停在半途（`#38` 的 completion_tokens=107 那种）——
+      那仍然是"形状没写对"，沿用 `format_error`（fix_constraint 会把形状喂回去）。
+    """
+    if repetition_dominated(text):
+        # ★ 用词表的成员而不是字符串字面量：写错名字 Python 当场报错，
+        #   不会像字符串那样悄悄退回兜底分类（那正是词表守卫要防的事）。
+        return FailoverReason.REPETITION
+    return FailoverReason.TRUNCATED if hit_output_cap else ""
+
+
+def _hit_output_cap(usage: Mapping[str, Any] | None, cap: int) -> bool:
+    """端点报的用量说没说到上限。**没报用量就不声称撞线**（宁可少判一类，不编事实）。"""
+    if not cap:
+        return False
+    return int((usage or {}).get("completion_tokens") or 0) >= cap
 
 
 def _describe_json_failure(text: str, exc: Exception, *, output_cap: int | None) -> tuple[str, str]:
@@ -491,6 +568,7 @@ def parse_candidate(
     authorized_sources: Sequence[str] = (),
     output_cap: int | None = None,
     parts: Mapping[str, Mapping[str, Any]] | None = None,
+    hit_output_cap: bool = False,
 ) -> Candidate:
     """Read one answer into a ``Candidate``, or fail loudly.
 
@@ -506,8 +584,8 @@ def parse_candidate(
     """
     # ★ One place builds the fix, and every rejection carries it: what the model
     #   sent, which rule it broke, and the shape that would be accepted.
-    def reject(code: str, problem: str, *, expected: str = EXPECTED_SHAPE) -> NoReturn:
-        raise CandidateFormatError(problem, code=code, got=text, expected=expected)
+    def reject(code: str, problem: str, *, expected: str = EXPECTED_SHAPE, reason: str = "") -> NoReturn:
+        raise CandidateFormatError(problem, code=code, got=text, expected=expected, reason=reason)
 
     try:
         document = json.loads(text)
@@ -515,7 +593,10 @@ def parse_candidate(
         # ★ Three different breakages, three different fixes. Saying "the first
         #   character is not '{'" when it *is* '{' sends the reader to the wrong
         #   place: a truncated answer is our own output cap, not the model's shape.
-        reject(*_describe_json_failure(text, exc, output_cap=output_cap))
+        code, problem = _describe_json_failure(text, exc, output_cap=output_cap)
+        # ★ `#41`: 只有"被截断"这一支才需要再分一次 —— 是额度不够，还是模型在转圈。
+        reason = _truncation_reason(text, hit_output_cap=hit_output_cap) if code == "truncated_answer" else ""
+        reject(code, problem, reason=reason)
     if not isinstance(document, Mapping):
         reject("not_an_object", f"the answer is a JSON {type(document).__name__}, not an object")
     rows = document.get("rows", [])
@@ -810,6 +891,7 @@ class LoopIOImpl(LoopIO):
                 authorized_sources=self.authorized_sources(),
                 output_cap=cap,
                 parts=self._upstream_parts(),
+                hit_output_cap=_hit_output_cap(response.usage, cap),
             )
         except CandidateFormatError as rejected:
             # ★ `#65`: 这一类的生产者【只有模型自己】——答案的结构性错误（不是 JSON /
@@ -853,13 +935,17 @@ class LoopIOImpl(LoopIO):
         if self.log is None:
             return
         code = str(getattr(rejected, "code", "") or "")
+        detail: dict[str, Any] = {"cause": "model", "code": code, "reason": rejected.reason}
+        if str(getattr(rejected, "reason", "")) == "repetition":
+            # ★ `#41`: 判它重复就把读数一起落下（归因要能回答"凭什么这么说"）。
+            detail["repetition"] = repetition_readings(str(rejected.feedback().get("got") or ""))
         self.log.record(
             kind="produce_failure",
             task_id=self.task_id or self.subtask.id,
             worker_id=self.subtask.id,
             at=self.epoch(),
             ok=False,
-            detail={"cause": "model", "code": code, "reason": rejected.reason},
+            detail=detail,
         )
 
     def authorized_sources(self) -> tuple[str, ...]:

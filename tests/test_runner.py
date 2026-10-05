@@ -773,6 +773,67 @@ def test_a_truncated_answer_is_reported_as_truncation_not_as_the_first_character
     assert "first character" not in feedback["problem"]
 
 
+def _loop_answer(unit: str, repeats: int) -> str:
+    """开头像 JSON、结尾没闭合、中间是一段反复吐的片段。"""
+    return '{"ref": "src-1", "columns": [{"name": "obligor"}], "rows": [' + unit * repeats
+
+
+def _varied_truncation(rows: int = 400, cut: int = 9000) -> str:
+    """内容不重复、就是写不完的一条截断（反向样例）。"""
+    body = "".join(
+        f'{{"obligor": "A-{index:04d}", "amount": "{1000 + index}", "pd": "0.0{index % 90 + 10}"}},'
+        for index in range(rows)
+    )
+    text = '{"ref": "src-1", "columns": [{"name": "obligor"}], "rows": [' + body
+    return text[:cut]
+
+
+def test_a_cap_hit_answer_that_loops_is_declared_as_repetition() -> None:
+    """★ `#41`: 「撞上限」是两件事 —— 内容还有（`truncated`）vs 模型在转圈（`repetition`）。
+
+    判据看输出原文（`produce.py::repetition_dominated`）：一段连续重复的周期片段占了被检段
+    ≥0.40。真归档里那条 8460 字符 / completion=8192 的输出就是这么被判出来的。
+    """
+    from bobanana6.agentloop.errors import BobananaAction, classify_error
+
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate(_loop_answer('{"obligor": "A-1", "amount": "1"},', 400), subtask=block,
+                        source_id="T-01", output_cap=8192, hit_output_cap=True)
+    assert error.value.reason == "repetition"
+    assert error.value.feedback()["code"] == "truncated_answer"  # 形状读数没变
+    classified = classify_error(error.value)
+    assert classified.reason == "repetition" and classified.action is BobananaAction.RESHARD_TASK
+
+
+def test_a_true_truncation_is_not_mistaken_for_a_repetition_loop() -> None:
+    """反向：写不完但内容不重复 ⇒ 仍报 `truncated`；没撞上限 ⇒ 沿用 `format_error`。"""
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
+    text = _varied_truncation()
+    with pytest.raises(CandidateFormatError) as capped:
+        parse_candidate(text, subtask=block, source_id="T-01", output_cap=8192, hit_output_cap=True)
+    assert capped.value.reason == "truncated"
+    with pytest.raises(CandidateFormatError) as uncapped:
+        parse_candidate(text, subtask=block, source_id="T-01", output_cap=8192)
+    assert uncapped.value.reason == "format_error"  # 模型自己停在半途：形状问题，没变
+
+
+def test_the_repetition_reading_separates_a_loop_from_normal_output() -> None:
+    """读数本身（判据不猜）：循环段占比 1.0 vs 正常长答案 <0.15；短输出不参与判定。"""
+    from bobanana6.assemble_impl.produce import (
+        repetition_dominated,
+        repetition_readings,
+    )
+
+    loop = repetition_readings(" " * 2000)
+    assert loop["period"] == 1 and loop["periodic_run_share"] == 1.0
+    assert repetition_dominated(" " * 2000) is True
+    varied = repetition_readings(_varied_truncation())
+    assert varied["periodic_run_share"] < 0.15
+    assert repetition_dominated(_varied_truncation()) is False
+    assert repetition_dominated("   ") is False  # 短输出：那叫"空"，不叫"转圈"
+
+
 def test_the_three_json_breakages_read_differently() -> None:
     block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
 

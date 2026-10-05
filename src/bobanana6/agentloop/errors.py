@@ -115,7 +115,9 @@ _UNKNOWN_ACTION = BobananaAction.RETRY_LOCAL
 #: Discipline (1) as data: which ruler measures progress for a reason. A 413 is
 #: counted in bytes; overflow/truncation in tokens. ``none`` means "this failure
 #: says nothing about size".
-#: Reader: agentloop/loop.py's no-progress check (step 21, not built yet).
+#: ★ `#41`: 仍然**没有读者** —— 决定与理由写在 `agentloop/README.md` 的接线点清单里
+#:   （`truncated` / `repetition` 现在一分类就终止本块，没有"重试到耗尽"的场景；
+#:   `REPETITION` 故意不进表：它说的是"在转圈"，与尺寸无关）。
 PROGRESS_RULER: Mapping[FailoverReason, str] = {
     FailoverReason.PAYLOAD_TOO_LARGE: "bytes",
     FailoverReason.CONTEXT_OVERFLOW: "tokens",

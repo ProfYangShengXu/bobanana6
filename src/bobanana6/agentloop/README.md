@@ -104,9 +104,18 @@
 - [ ] `join_truncated_parts` / `continuation_overlap_length` 无调用方 —— **不接的理由：**
   loop 里根本不存在流式文本路径（`TurnProposal.text` 是一次到齐的整段），
   接上它等于先实现流式组装，那是**新机制**不是接线；本块范围外。
+  ★ `#41` 复核并加强：截断现在会被**分类**（`truncated` = 撞到我们自己的输出上限 /
+  `repetition` = 模型在转圈，见 `produce.py::repetition_dominated`），而这**两条都不该"接着写"**：
+  重复主导时接着续只会继续重复；真·额度不够时 `REASON_ACTION` 给的出口是 `reshard_task`
+  （块交回切分器），不是同一个块续写。要让某个块"接着写"，得先把出口语义改成续写优先 ——
+  那是判定语义的改动，不是接线。
 - [ ] `PROGRESS_RULER` 无读者 —— **不接的理由：** 需要「无进展检测」（跨 turn 比较候选指纹），
   属于新机制。当前 loop 用 `max_turns` / `max_restarts` / `max_retries` 封顶，不会空转到预算耗尽；
   但确实没有用正确的尺子判「有没有进展」（`AGENTS §7⑤`）。这是**已知缺口**。
+  ★ `#41` 复核：`truncated` / `repetition` 现在**一分类就终止本块**（`reshard_task` 出口），
+  不存在"同一块反复重试到耗尽"的场景，尺子在这两条上没有用武之地；其余失败仍靠 `max_*` 封顶，
+  缺口照旧记着。另外 `REPETITION` **故意不进表** —— 它说的是"模型在转圈"，与尺寸无关，
+  `progress_ruler(REPETITION)` 返回 `"none"` 正是对的。
 - [x] `attribution.BLAME_ACTIONS` 无读者 —— 接线点：`assemble_impl/runner.py::Runner._attribute`。
   失败时产出 `Attribution`，再用 `actions_for(blame)` 把结论转成动作，写进
   `summary.json` 与 `CONFLICTS.md`；归不出来就写 `blame=null, confidence=unknown`。
