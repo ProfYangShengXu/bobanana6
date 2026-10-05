@@ -862,3 +862,28 @@ def test_every_spelling_of_a_missing_cell_becomes_the_same_representation() -> N
     # 序列化出口：载荷里也不会出现 null 写法
     artifact = Artifact(name="out.csv", columns=(Column(name="amount", dtype="str"),), rows=({"amount": None},))
     assert artifact_payload(artifact)["rows"] == [{}]
+
+
+def test_the_files_channel_is_documented_where_the_model_can_see_it() -> None:
+    """★ `#35`: 代码类产物的交付通道必须【说出来】——三处缺一不可。
+
+    修前的缺口（`#34`）：判据要求工作区里有文件，而这三处一条都没提 `files`
+    ⇒ 真模型没有门（确定性读数：不写 files 的答案 → 工作区零产物、块级 0.6）。
+    """
+    from bobanana6.assemble_impl.produce import CANDIDATE_SCHEMA, EXPECTED_SHAPE
+
+    # ① 被判据拒绝时喂回去的"该长什么样"
+    assert "files" in EXPECTED_SHAPE
+    # ② 服务端 schema：`additionalProperties: False` 下必须**显式**开这一个口子
+    assert CANDIDATE_SCHEMA["additionalProperties"] is False
+    assert CANDIDATE_SCHEMA["properties"]["files"] == {
+        "type": "object",
+        "additionalProperties": {"type": "string"},
+    }
+    # ③ 系统提示里那句人话（它是模型唯一能读到的交付说明）
+    source = (Path(__file__).resolve().parents[1] / "src" / "bobanana6" / "assemble_impl" / "produce.py").read_text(
+        encoding="utf-8"
+    )
+    prompt = source[source.index("    def prompt(self, state: LoopState)") : source.index("    def _delivered_inputs(")]
+    assert "files" in prompt
+    assert "workspace-relative path" in prompt

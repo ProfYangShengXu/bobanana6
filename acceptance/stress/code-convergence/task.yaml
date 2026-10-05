@@ -70,14 +70,14 @@ constraints:
       spec:
         check: shell_command
         command: 'cd _run/workspace/input/repo && python3 -m unittest discover -s . -p "test_shop_a.py" -q'
-      rationale: "模块 a 自己的行为与'不再自带实现'都要过"
+      rationale: "块内只查行为；'不再自带实现'由 C-global-tests 断言"
     - id: C-shop-b
       kind: custom
       target: input/repo/shop_b.py
       spec:
         check: shell_command
         command: 'cd _run/workspace/input/repo && python3 -m unittest discover -s . -p "test_shop_b.py" -q'
-      rationale: "同上（模块 b）"
+      rationale: "同上（模块 b：块内只查行为）"
 
     # ── 判据（全局）：全量测试通过 + 本模块测试 ─────────────────────────────
     #   ★ 挂在【最后一块】上：那时三个模块都改完了 —— "块内过 ≠ 整体过"就在这里。

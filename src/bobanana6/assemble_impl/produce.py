@@ -97,6 +97,8 @@ def _name_of(calls: Sequence[ToolCall], call_id: str) -> str:
 EXPECTED_SHAPE = (
     '{"ref": "<source id>", "columns": [{"name": "<column>", "dtype": "str"}], '
     '"rows": [{"<column>": <value>}]}'
+    # ★ `#35`: 同一个渲染点 —— 代码类产物还要一个可选的 `files`。
+    ' -- and, when this block produces files, "files": {"<workspace-relative path>": "<file content>"}'
 )
 
 #: ``json_schema`` form. Deliberately **not** ``strict: true``: strict mode requires
@@ -133,6 +135,9 @@ CANDIDATE_SCHEMA: Mapping[str, Any] = {
             },
         },
         "rows": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        # ★ `#35`: 代码类产物的交付通道。顶层 `additionalProperties: False` 仍然生效 ——
+        #   这里只开这一个口子，别的未知字段照样被挡。
+        "files": {"type": "object", "additionalProperties": {"type": "string"}},
         "claims": {
             "type": "array",
             "items": {
@@ -677,6 +682,11 @@ class LoopIOImpl(LoopIO):
                 "content": (
                     "You are one worker in a split plan. Answer with a single JSON object "
                     'shaped {"ref": <one of the authorized source ids below>, "columns": [...], "rows": [...]}. '
+                    # ★ `#35`: 代码类产物的交付通道必须【说出来】—— 它是唯一能把文件写进工作区的
+                    #   通道，而在此之前提示里一个字都没提（`#34` 的缺口）。
+                    'If this block produces *files* (a code deliverable), add a "files" field: '
+                    '{"files": {"<workspace-relative path>": "<file content>"}}. '
+                    "Without it nothing lands on disk and the downstream compile/test cannot run. "
                     "The \"ref\" is not optional: it is how every value is traced back to a snapshot. "
                     "Use the tools you were given; you may only read what they expose."
                 ),
