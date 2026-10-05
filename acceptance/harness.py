@@ -58,6 +58,8 @@ class TaskRun:
     report: AcceptanceReport
     #: The gate that refused the run before any worker started, if any.
     refused: str | None = None
+    #: ★ `#44`: the codes that gate named (empty when nothing was refused).
+    refused_codes: tuple[str, ...] = ()
     plan_shape: str = ""
     blocks: tuple[str, ...] = ()
     verdicts: Mapping[str, Any] = field(default_factory=dict)
@@ -221,6 +223,9 @@ def run_task(
         except RunRefused as refusal:
             result = None
             refused = refusal.gate
+            refused_codes = tuple(refusal.codes)
+        else:
+            refused_codes = ()
     finally:
         os.chdir(previous)
         if original is not None:
@@ -238,6 +243,7 @@ def run_task(
                 notes=(f"the run was refused at the {refused!r} gate before any worker started",),
             ),
             refused=refused,
+            refused_codes=refused_codes,
             inputs_given=given,
             workspace=workspace_dir if workspace else None,
             observations_dir=observations_dir if observe else None,

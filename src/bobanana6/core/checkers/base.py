@@ -62,6 +62,10 @@ class CheckOutcome:
     facts: tuple[str, ...] = ()
     divergences: tuple[Disagreement, ...] = ()
     soft_score: float | None = None
+    #: ★ `#44`: 这一条失败**该记在谁头上**（空串 = 检查器没声明，交给归因的兜底顺序）。
+    #: 目前只有一种：判据命令【自己】没跑起来（解释器/包缺失）⇒ ``"tool"``。
+    #: 这是"谁来『说』自己的错"那条纪律的具体化：检查器知道，就由它声明。
+    cause: str = ""
 
 
 Checker = Callable[[Constraint, Candidate, CheckContext], CheckOutcome]
@@ -77,8 +81,8 @@ def ok(constraint: Constraint, *facts: str, divergences: tuple[Disagreement, ...
     )
 
 
-def fail(constraint: Constraint, *facts: str) -> CheckOutcome:
-    return CheckOutcome(constraint_id=constraint.id, ok=False, facts=tuple(facts))
+def fail(constraint: Constraint, *facts: str, cause: str = "") -> CheckOutcome:
+    return CheckOutcome(constraint_id=constraint.id, ok=False, facts=tuple(facts), cause=cause)
 
 
 def artifact_for(constraint: Constraint, candidate: Candidate) -> Artifact | None:

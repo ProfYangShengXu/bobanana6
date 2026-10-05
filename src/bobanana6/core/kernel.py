@@ -73,6 +73,9 @@ def admit(bundle: ConstraintBundle, candidate: Candidate, context: CheckContext)
     """
     outcomes = run_hard(bundle, candidate, context)
     failed = tuple(outcome.constraint_id for outcome in outcomes if not outcome.ok)
+    # ★ `#44`: 失败的检查器一致声明的原因，进 verdict 供上层写进事件（声明冲突 = 不声明）。
+    declared_causes = {outcome.cause for outcome in outcomes if not outcome.ok and outcome.cause}
+    cause = next(iter(declared_causes)) if len(declared_causes) == 1 else ""
     evidence: dict[str, str] = {}
     for outcome in outcomes:
         evidence[outcome.constraint_id] = "; ".join(outcome.facts)
@@ -82,7 +85,7 @@ def admit(bundle: ConstraintBundle, candidate: Candidate, context: CheckContext)
         evidence[constraint.id] = "; ".join(outcome.facts)
         if outcome.soft_score is not None:
             soft_scores[constraint.id] = outcome.soft_score
-    return Verdict(ok=not failed, failed=failed, evidence=evidence, soft_scores=soft_scores)
+    return Verdict(ok=not failed, failed=failed, evidence=evidence, soft_scores=soft_scores, cause=cause)
 
 
 def candidate_fingerprint(candidate: Candidate) -> str:

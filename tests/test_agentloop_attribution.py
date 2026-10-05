@@ -130,6 +130,26 @@ def test_two_layers_blaming_each_other_is_unknown_not_a_coin_flip() -> None:
     assert {item.kind for item in result.evidence} == {"tool_result", "gate_check"}
 
 
+def test_a_judge_that_could_not_run_blames_the_tool_not_the_constraint() -> None:
+    """★ `#44`: 「判据自己没跑起来」与「判据拒绝了产出」必须分开。
+
+    前者该修工具（`repair_tool`）；后者才是 `relax_constraint` 合理的地方。
+    判据命令【自己】跑不起来时，检查器会在事件上声明 ``cause="tool"`` —— 归因读声明，不猜字符串。
+    """
+    broken = event(
+        "gate_check", ok=False, detail={"constraint_rejected": True, "cause": "tool"}, seq=2
+    )
+    result = attribute("the judge command could not run", (broken,))
+    assert result.blame == "tool", result
+    assert "repair_tool" in actions_for(result.blame)
+
+    # ★ 反向：判据真的拒绝产出（没有 cause）⇒ relax_constraint 仍然是合理建议之一
+    rejected = event("gate_check", ok=False, detail={"constraint_rejected": True}, seq=2)
+    still = attribute("the answer was rejected", (rejected,))
+    assert still.blame == "constraint", still
+    assert actions_for(still.blame) == ("relax_constraint",)
+
+
 def test_blame_to_action_mapping_matches_the_spec_table() -> None:
     assert set(BLAME_ACTIONS) == {Blame.MODEL, Blame.TOOL, Blame.CONTEXT, Blame.CONSTRAINT}
     assert actions_for("context") == ("fix_constraint",)

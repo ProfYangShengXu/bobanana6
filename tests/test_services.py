@@ -350,21 +350,24 @@ def test_duplicate_tool_names_are_refused() -> None:
 def test_shell_command_check_records_evidence_and_passes() -> None:
     evidence = RecordedEvidence()
     check = shell_command_check(evidence, lambda: 100.0)
-    passed, facts = check(constraint(kind="custom", spec={"check": SHELL_COMMAND_CHECK, "command": PASSES}), candidate(), CheckContext())
-    assert passed is True
+    outcome = check(constraint(kind="custom", spec={"check": SHELL_COMMAND_CHECK, "command": PASSES}), candidate(), CheckContext())
+    assert outcome.ok is True and outcome.cause == ""
     assert evidence.last() is not None
     assert evidence.last().exit_code == 0  # type: ignore[union-attr]
     assert evidence.last().created_at == 100.0  # type: ignore[union-attr]
-    assert "exited 0" in facts[0]
+    assert "exited 0" in outcome.facts[0]
 
 
 def test_shell_command_check_fails_on_a_non_zero_exit() -> None:
     evidence = RecordedEvidence()
     check = shell_command_check(evidence, lambda: 1.0)
     command = f'{sys.executable} -c "import sys; sys.exit(3)"'
-    passed, facts = check(constraint(kind="custom", spec={"check": SHELL_COMMAND_CHECK, "command": command}), candidate(), CheckContext())
-    assert passed is False
-    assert "exited 3" in facts[0]
+    outcome = check(constraint(kind="custom", spec={"check": SHELL_COMMAND_CHECK, "command": command}), candidate(), CheckContext())
+    assert outcome.ok is False
+    assert "exited 3" in outcome.facts[0]
+    # ★ `#44`: 断言失败不是环境问题 —— 不许声明 cause（那会把它记成 tool）
+    assert outcome.cause == ""
+    assert "could not" not in " ".join(outcome.facts)
 
 
 def test_shell_command_check_refuses_an_unattributable_exit() -> None:
@@ -372,15 +375,91 @@ def test_shell_command_check_refuses_an_unattributable_exit() -> None:
     evidence = RecordedEvidence()
     check = shell_command_check(evidence, lambda: 1.0)
     command = f'{sys.executable} -c "print(1)" &'
-    passed, facts = check(constraint(kind="custom", spec={"check": SHELL_COMMAND_CHECK, "command": command}), candidate(), CheckContext())
-    assert passed is False
-    assert any("not attributable" in fact for fact in facts)
+    outcome = check(constraint(kind="custom", spec={"check": SHELL_COMMAND_CHECK, "command": command}), candidate(), CheckContext())
+    assert outcome.ok is False
+    assert any("not attributable" in fact for fact in outcome.facts)
 
 
 def test_shell_command_check_needs_a_command() -> None:
     check = shell_command_check(RecordedEvidence(), lambda: 1.0)
-    passed, facts = check(constraint(kind="custom", spec={}), candidate(), CheckContext())
-    assert passed is False and "spec.command" in facts[0]
+    outcome = check(constraint(kind="custom", spec={}), candidate(), CheckContext())
+    assert outcome.ok is False and "spec.command" in outcome.facts[0]
+
+
+# --------------------------------------------------------------------------- #
+# ★ `#44`: 判据命令的**执行环境** —— 派活前预检，以及"跑不起来"与"产出不合格"的分开
+# --------------------------------------------------------------------------- #
+
+
+def _shell_constraint(cid: str, command: str) -> object:
+    return constraint(cid, "custom", "*", {"check": SHELL_COMMAND_CHECK, "command": command})
+
+
+def test_judge_environment_preflight_names_a_missing_interpreter(tmp_path: Path) -> None:
+    """解释器不存在 ⇒ 具名问题（`interpreter_missing`），不是"产出不合格"。"""
+    from bobanana6.services import judge_environment_problems
+
+    problems = judge_environment_problems(
+        (_shell_constraint("C-1", "cd . && python3-does-not-exist-42 -c \"print(1)\""),), cwd=tmp_path
+    )
+    assert len(problems) == 1, problems
+    code, detail = problems[0]
+    assert code == "C-1:interpreter_missing" and "python3-does-not-exist-42" in detail
+
+
+def test_judge_environment_preflight_names_a_module_that_will_not_import(tmp_path: Path) -> None:
+    """★ 这正是 `壳问题三连` §2 那条：`python3 -m pytest` 在没装 pytest 的解释器下必然拒。"""
+    from bobanana6.services import judge_environment_problems
+
+    problems = judge_environment_problems(
+        (_shell_constraint("C-1", f'{sys.executable} -m definitely_not_installed_module_42 -q'),), cwd=tmp_path
+    )
+    assert len(problems) == 1, problems
+    code, detail = problems[0]
+    assert code == "C-1:module_missing" and "definitely_not_installed_module_42" in detail
+
+
+def test_judge_environment_preflight_is_silent_on_a_command_that_can_run(tmp_path: Path) -> None:
+    """★ 反向：能跑的命令一个字节都不许多说（否则正常题会被拒）。"""
+    from bobanana6.services import judge_environment_problems
+
+    good = _shell_constraint("C-1", f'{sys.executable} -c "print(1)"')
+    missing_dir = _shell_constraint("C-2", "cd _run/workspace/input && python3 -c \"print(1)\"")
+    assert judge_environment_problems((good,), cwd=tmp_path) == ()
+    problems = judge_environment_problems((missing_dir,), cwd=tmp_path)
+    assert [code for code, _detail in problems] == ["C-2:cwd_missing"], problems
+
+
+def test_a_failed_assertion_is_not_mistaken_for_a_broken_environment() -> None:
+    """★ `#44` 的分水岭：断言失败里出现 "No such file or directory" **不算**环境问题
+    （那可能正是产出没写出文件）。只有结构化证据（126/127 / 点名的模块导不进来）才算。"""
+    from bobanana6.services import command_unrunnable
+
+    assertion = (
+        "tests/test_a.py::test_x FAILED\n"
+        "FileNotFoundError: [Errno 2] No such file or directory: 'inventory.py'\n"
+        "1 failed, 2 passed"
+    )
+    assert command_unrunnable(f'{sys.executable} -m minitest x', assertion, 1) == ""
+    # 点名 pytest 却没装 ⇒ 环境问题
+    missing = "/usr/bin/python3: No module named pytest"
+    assert command_unrunnable("python3 -m pytest tests/x.py", missing, 1) != ""
+    # 点名的模块是别的（测试里 import 不到某个产物模块）⇒ 不是环境问题
+    other = "ModuleNotFoundError: No module named 'inventory'"
+    assert command_unrunnable("python3 -m pytest tests/x.py", other, 1) == ""
+    # POSIX 的 127
+    assert command_unrunnable("nope", "nope: command not found", 127) != ""
+
+
+def test_the_judge_declares_the_tool_layer_when_its_command_cannot_run() -> None:
+    """★ 走到判据那一步才发现"命令自己跑不起来"时，outcome 要声明 `cause="tool"`。"""
+    evidence = RecordedEvidence()
+    check = shell_command_check(evidence, lambda: 1.0)
+    # `sh -c` 里点了一个不存在的命令 ⇒ shell 用 POSIX 的 127 说"找不到"（预检看不到引号里面）
+    unrunnable = _shell_constraint("C-1", 'sh -c "definitely-missing-binary-42 -q"')
+    outcome = check(unrunnable, candidate(), CheckContext())  # type: ignore[arg-type]
+    assert outcome.ok is False and outcome.cause == "tool", outcome
+    assert any("could not run the command" in fact for fact in outcome.facts), outcome.facts
 
 
 def _judge(bundle_) -> BlockJudge:
@@ -462,7 +541,14 @@ def test_every_rejection_carries_a_fix_that_names_the_same_shape() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _produce_io(tmp_path: Path, client: object) -> object:
+def _produce_io(
+    tmp_path: Path,
+    client: object,
+    *,
+    contract_document: object | None = None,
+    judged: object | None = None,
+    block: object | None = None,
+) -> object:
     from bobanana6.assemble_impl import LoopIOImpl, ResponseFormatSupport
     from bobanana6.services import (
         BlockJudge,
@@ -471,11 +557,12 @@ def _produce_io(tmp_path: Path, client: object) -> object:
         build_toolset,
     )
 
-    block = subtask("T-01", output="out.csv", mode="write", axis="source")
+    block = block or subtask("T-01", output="out.csv", mode="write", axis="source")
+    contract_document = contract_document or contract()
     tools = build_toolset(
-        plan=plan(subtasks=(block,), interfaces={"out.csv": "s"}),
+        plan=plan(subtasks=(block,), interfaces={block.output: "s"}),
         subtask=block,
-        contract=contract(),
+        contract=contract_document,
         ontology=mini_ontology(),
         authorized=(),
         fetched={},
@@ -487,7 +574,7 @@ def _produce_io(tmp_path: Path, client: object) -> object:
         client=client,  # type: ignore[arg-type]
         toolset=tools,
         registry=build_registry(tools, store.read),
-        judge=BlockJudge(bundle=bundle(), subtask=block, context=CheckContext(ontology=mini_ontology())),
+        judge=BlockJudge(bundle=judged or bundle(), subtask=block, context=CheckContext(ontology=mini_ontology())),
         subtask=block,
         budget=Budget(max_calls=8, max_wall_s=60, max_output=4096),
         response_format=ResponseFormatSupport(),
@@ -509,6 +596,70 @@ class _SchemaRefusingClient:
         if "response_format" in kw:
             raise LLMError(f"model call failed with HTTP {self.status}: {self.message}", status_code=self.status)
         return ModelResponse(text='{"rows": [{"obn": "A-1"}]}')
+
+
+# --------------------------------------------------------------------------- #
+# ★ `#44` ①: 块级 goal 丢掉的那一层 —— 本任务的性质与验收要求（从契约派生）
+# --------------------------------------------------------------------------- #
+
+
+def _contract_for_a_fix() -> object:
+    from bobanana6.core.model import DeliverableSpec, SourceRef, TaskContract
+
+    return TaskContract(
+        task_id="inventory-fix",
+        goal="修好 input/inventory.py 里的缺陷，让 input/tests/test_inventory.py 全部通过；不许修改测试文件",
+        deliverables=(DeliverableSpec(name="input/inventory.py", required=True),),
+        sources=(SourceRef(ref="inventory-source", locator="input/inventory.py"),),
+    )
+
+
+def _fix_bundle() -> object:
+    return bundle(
+        hard=(
+            constraint("C-tests-pass", "custom", "input/inventory.py",
+                       {"check": SHELL_COMMAND_CHECK, "command": "python3 -m pytest x -q"},
+                       rationale="全部测试必须通过（起点是红的）"),
+            constraint("C-tests-frozen", "frozen_files", "*", {"sources": ["test-inventory"]},
+                       rationale="不许改测试"),
+        )
+    )
+
+
+def test_the_task_nature_is_derived_from_the_contract_not_from_the_goal_text() -> None:
+    """★ `#44` ①: 「这是一次修复 / 测试必须全过 / 测试不许改」三件事都要能到达块级提示。
+
+    派生规则：交付物路径 == 某个来源的 locator ⇒ `fix`；`shell_command` 的 rationale ⇒ 验收要求；
+    `frozen_files` 点名的载体 ⇒ 不许改。
+    """
+    from bobanana6.assemble_impl.produce import task_nature
+
+    block = subtask("T-03", output="input/inventory.py", inputs=("part-inventory-source.csv",), mode="write")
+    nature = task_nature(_contract_for_a_fix(), _fix_bundle(), block)  # type: ignore[arg-type]
+    assert nature["kind"] == "fix"
+    assert nature["acceptance"] == ["全部测试必须通过（起点是红的）"]
+    assert nature["frozen"] == ["test-inventory"]
+
+
+def test_a_report_class_block_gets_no_task_nature_at_all() -> None:
+    """★ 反向：面板类题（交付物不是来源、判据里没有命令、没有冻结载体）⇒ 提示一个字不变。"""
+    from bobanana6.assemble_impl.produce import task_nature
+
+    block = subtask("T-04", output="panel.csv", inputs=("part-panel-a.csv",), mode="write")
+    judging = bundle(hard=(constraint("C-rows", "presence", "panel.csv", {"min_rows": 1}),))
+    assert task_nature(contract(deliverables=("panel.csv",)), judging, block) == {}  # type: ignore[arg-type]
+
+
+def test_the_task_nature_reaches_the_briefing_the_model_receives(tmp_path: Path) -> None:
+    """★ AGENTS §7⑬：断言模型真正收到的那条 brief（不是"某个函数返回了字典"）。"""
+    io = _produce_io(tmp_path, _SchemaRefusingClient(), contract_document=_contract_for_a_fix(), judged=_fix_bundle(), block=subtask("T-03", output="input/inventory.py", inputs=("part.csv",), mode="write"))
+    brief = json.loads(io.prompt(_state())[1]["content"])  # type: ignore[attr-defined]
+    assert brief["subtask"]["goal"].startswith("produce") or brief["subtask"]["goal"]
+    assert brief["task"] == {
+        "kind": "fix",
+        "acceptance": ["全部测试必须通过（起点是红的）"],
+        "frozen": ["test-inventory"],
+    }
 
 
 def _state():  # type: ignore[no-untyped-def]

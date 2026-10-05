@@ -863,6 +863,9 @@ class Verdict:
     evidence: Mapping[str, str] = field(  # external:report —— 判定证据展示，core 不再读
         default_factory=dict
     )
+    #: ★ `#44`: 失败的检查器们**一致声明**的归因（空串 = 没声明 / 声明冲突）。
+    #: 由 `kernel.admit` 汇总：多个人说不同的话时不挑一个代表（那是猜）。
+    cause: str = ""  # external:agentloop —— runner 写进 gate_check 事件，归因层读声明
     soft_scores: Mapping[str, float] = field(  # external:report —— 软分展示，core 不再读
         default_factory=dict
     )

@@ -69,7 +69,13 @@ from ..core.ontology import validate_ontology
 from ..core.ports import DecomposerPort, OntologyPort, SnapshotReader, SourcePort
 from ..core.split import SplitReport, check_split
 from ..report import ReportBundle, build_reports
-from ..services import TOOL_NAMES, BoundChecks, artifact_payload, build_toolset
+from ..services import (
+    TOOL_NAMES,
+    BoundChecks,
+    artifact_payload,
+    build_toolset,
+    judge_environment_problems,
+)
 from ..sources import SnapshotStore, SourceError
 from .runtime import (
     BlockDeclined,
@@ -214,6 +220,18 @@ class Runner:
         if not consistency.start_allowed:
             raise RunRefused("consist", "the plan and its bundle are not self-consistent", consistency.codes())
 
+        # ★ `#44`: 第四道门 —— 判据命令必须能在**这个环境**里跑起来。跑不起来（解释器/包/
+        #   `cd` 目标缺失）⇒ 具名拒 + **0 次模型调用**，而不是跑完整轮之后把它记成"判据太严"
+        #   （`壳问题三连-首轮AB暴露-20261005.md` §2）。只查环境，不碰命令的输入文件。
+        judge_problems = judge_environment_problems(bundle.hard + bundle.soft, cwd=Path.cwd())
+        if judge_problems:
+            detail = "; ".join(f"{code}: {problem}" for code, problem in judge_problems)
+            raise RunRefused(
+                "judge",
+                f"a judge command cannot run in this environment -- {detail}",
+                tuple(code for code, _problem in judge_problems),
+            )
+
         # 4. run the blocks.
         context = CheckContext(
             ontology=ontology,
@@ -270,6 +288,8 @@ class Runner:
                 failure_detail: dict[str, Any] = {"exit": failed.exit_reason}
                 if failure_evidence.get("rejected_by"):
                     failure_detail["constraint_rejected"] = True
+                if failure_evidence.get("cause"):
+                    failure_detail["cause"] = failure_evidence["cause"]
                 self._note_gate(subtask, False, failure_detail)
                 # ★ 同一个 `"runtime"` 标签的第二半：这里**多半是"候选被判定器拒收"**
                 #   （`exit` 是 `degrade_single_agent` / `fix_constraint` 之类），
@@ -280,6 +300,7 @@ class Runner:
                     ok=False,
                     failed=("runtime",),
                     evidence=failure_evidence,
+                    cause=failure_evidence.get("cause", ""),
                 )
                 continue
             candidates[subtask.id] = candidate
@@ -299,6 +320,10 @@ class Runner:
             gate_detail: dict[str, Any] = {"failed": list(verdict.failed)}
             if not verdict.ok:
                 gate_detail["constraint_rejected"] = True
+                if verdict.cause:
+                    # ★ `#44`: 检查器一致声明的原因（目前只有"判据命令自己没跑起来" ⇒ tool）
+                    #   原文照录 —— 归因层读声明，不去猜字符串。
+                    gate_detail["cause"] = verdict.cause
             self._note_gate(subtask, verdict.ok, gate_detail)
 
         # ★ `#63`: 装配关只拿 pieces —— 两个块的候选从来不会被放在一起，于是
@@ -586,6 +611,10 @@ class Runner:
         withheld = judge.last_verdict if judge is not None else None
         if withheld is not None and not withheld.ok:
             evidence["rejected_by"] = ", ".join(withheld.failed)
+            if withheld.cause:
+                # ★ `#44`: 检查器一致声明的原因（例如"判据命令自己没跑起来" ⇒ tool）。
+                #   放进证据里，报告与归因都能看见，而不是只看到一个"runtime"标签。
+                evidence["cause"] = withheld.cause
             for constraint_id, fact in sorted(withheld.evidence.items()):
                 if constraint_id in withheld.failed:
                     evidence[constraint_id] = fact

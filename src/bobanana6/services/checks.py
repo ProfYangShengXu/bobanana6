@@ -18,9 +18,14 @@ The command comes from the contract (a human wrote it), never from model output:
 
 from __future__ import annotations
 
+import os
+import re
+import shlex
+import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..agentloop.gate import (
@@ -29,14 +34,151 @@ from ..agentloop.gate import (
     evaluate,
     record_evidence,
 )
-from ..core.checkers.base import CheckContext
+from ..core.checkers.base import CheckContext, CheckOutcome, fail, ok
 from ..core.kernel import admit
 from ..core.model import Candidate, Constraint, ConstraintBundle, Subtask, Verdict
 
-__all__ = ["BlockJudge", "RecordedEvidence", "shell_command_check"]
+__all__ = [
+    "BlockJudge",
+    "RecordedEvidence",
+    "command_unrunnable",
+    "judge_environment_problems",
+    "shell_command_check",
+]
 
 #: The name a host registers to let a ``custom`` constraint run a shell command.
 SHELL_COMMAND_CHECK = "shell_command"
+
+#: ★ `#44`: 判据命令【自己】没跑起来时的**结构化**证据（两条，都不猜字符串）：
+#:   · POSIX 的 126（找到但不可执行）/ 127（找不到）；
+#:   · 命令点名的那个 `-m <module>` 导不进来（`python3 -m pytest` 少了 pytest 就是这一类）。
+#: ★ 刻意**不**收 "No such file or directory" 之类的通用话术：产出没写出文件时，
+#:   测试断言里天天出现这句 —— 把它当环境问题就是冤枉了判定器。
+_UNRUNNABLE_EXITS = (126, 127)
+
+
+def _segments(command: str) -> tuple[tuple[str, ...], ...]:
+    """按操作符把一条 shell 命令切成段（认不出来就返回空 —— 宁可不预检，不误报）。"""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return ()
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in ("&&", "||", ";", "|"):
+            segments.append([])
+            continue
+        segments[-1].append(token)
+    return tuple(tuple(segment) for segment in segments if segment)
+
+
+def _named_modules(command: str) -> tuple[str, ...]:
+    """命令里显式点名的 `-m <module>`（`python3 -m pytest …`）。"""
+    modules: list[str] = []
+    for segment in _segments(command):
+        for index, token in enumerate(segment[:-1]):
+            if token == "-m":
+                modules.append(segment[index + 1])
+    return tuple(modules)
+
+
+def command_unrunnable(command: str, output: str, exit_code: int) -> str:
+    """命令【自己】没跑起来时说一句为什么（空串 = 它跑起来了，失败是产出的事）。
+
+    ★ 只认结构化证据：POSIX 的 126/127，与"我们点名的那个 `-m <module>` 导不进来"。
+    测试断言里出现 "No such file or directory" 不算 —— 那可能是产出没写出文件。
+    """
+    if exit_code in _UNRUNNABLE_EXITS:
+        return f"the shell could not run the command (exit {exit_code}): {output.strip()[:200] or '<no output>'}"
+    for module in _named_modules(command):
+        # 解释器有两种说法：`No module named pytest`（`-m` 那条路，无引号）与
+        # `ModuleNotFoundError: No module named 'pytest'`。只认**我们点名的那个**模块，
+        # 而且要卡词边界（`pytestfoo` 不算 `pytest`）。
+        if re.search(rf"no module named ['\"]?{re.escape(module)}['\"]?\b", output, re.IGNORECASE):
+            return (
+                f"the interpreter cannot import the module this command asks for ({module!r}): "
+                f"{output.strip()[:200]}"
+            )
+    return ""
+
+
+def judge_environment_problems(
+    constraints: Sequence[Constraint],
+    *,
+    cwd: Path,
+    timeout_s: float = 10.0,
+) -> tuple[tuple[str, str], ...]:
+    """★ `#44`: 派活前把"判据命令在这个环境里根本跑不起来"找出来（具名、可指到解释器）。
+
+    照 ontology 门的先例：跑不起来 ⇒ 具名拒 + **0 次模型调用**，而不是跑完整轮之后记成
+    "判据太严"。只检查**环境**：解释器/命令在不在、点名的模块导不导得进、`cd` 的目录在不在；
+    **不碰命令的输入文件**（那些正是模型要产出的）。
+    """
+    problems: list[tuple[str, str]] = []
+    for constraint in constraints:
+        if constraint.kind != "custom" or constraint.spec.get("check") != SHELL_COMMAND_CHECK:
+            continue
+        command = constraint.spec.get("command")
+        if not isinstance(command, str) or not command:
+            continue
+        for problem in _command_environment_problems(command, cwd=cwd, timeout_s=timeout_s):
+            problems.append((f"{constraint.id}:{problem[0]}", problem[1]))
+    return tuple(problems)
+
+
+def _command_environment_problems(command: str, *, cwd: Path, timeout_s: float) -> tuple[tuple[str, str], ...]:
+    problems: list[tuple[str, str]] = []
+    effective_cwd = cwd
+    for segment in _segments(command):
+        if not segment:
+            continue
+        head = os.path.expandvars(segment[0])
+        if head == "cd" and len(segment) > 1:
+            target = Path(os.path.expandvars(segment[1]))
+            resolved = target if target.is_absolute() else (effective_cwd / target)
+            if not resolved.is_dir():
+                problems.append(("cwd_missing", f"`cd {segment[1]}`: {resolved} is not a directory"))
+            else:
+                effective_cwd = resolved
+            continue
+        runnable = True
+        if "/" in head:
+            resolved = Path(head) if Path(head).is_absolute() else (effective_cwd / head)
+            if not (resolved.is_file() and os.access(resolved, os.X_OK)):
+                problems.append(("interpreter_missing", f"{head!r} is not an executable file ({resolved})"))
+                runnable = False
+            interpreter = str(resolved)
+        else:
+            found = shutil.which(head)
+            if found is None:
+                problems.append(("interpreter_missing", f"{head!r} was not found on PATH"))
+                runnable = False
+            interpreter = found or head
+        if not runnable:
+            # 解释器都不在：别再拿它去探模块（那只会再抛一次"文件不存在"）
+            continue
+        for module in _modules_in(segment):
+            probe = subprocess.run(
+                [interpreter, "-c", f"import {module}"],
+                cwd=str(effective_cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+            )
+            if probe.returncode != 0:
+                tail = ((probe.stdout or "") + (probe.stderr or "")).strip().splitlines()
+                problems.append(
+                    (
+                        "module_missing",
+                        f"the interpreter {interpreter!r} cannot import {module!r}: {tail[-1] if tail else '<no output>'}",
+                    )
+                )
+    return tuple(problems)
+
+
+def _modules_in(segment: Sequence[str]) -> tuple[str, ...]:
+    return tuple(segment[index + 1] for index, token in enumerate(segment[:-1]) if token == "-m")
 
 
 @dataclass
@@ -57,13 +199,18 @@ def shell_command_check(
     clock: Callable[[], float],
     *,
     timeout_s: float = 120.0,
-) -> Callable[[Constraint, Candidate, CheckContext], tuple[bool, list[str]]]:
-    """Build the ``custom`` check that runs a command and records what happened."""
+) -> Callable[[Constraint, Candidate, CheckContext], CheckOutcome]:
+    """Build the ``custom`` check that runs a command and records what happened.
 
-    def run(constraint: Constraint, candidate: Candidate, context: CheckContext) -> tuple[bool, list[str]]:
+    ★ `#44`: 返回 ``CheckOutcome`` 而不是 ``(bool, facts)`` 元组 —— 多出来的那一个字段是
+    ``cause``：命令**自己**没跑起来时由检查器声明 ``"tool"``（宿主检查器的两种返回都收，
+    见 `core/checkers/custom.py`）。
+    """
+
+    def run(constraint: Constraint, candidate: Candidate, context: CheckContext) -> CheckOutcome:
         command = constraint.spec.get("command")
         if not isinstance(command, str) or not command:
-            return False, ["spec.command must be a non-empty string"]
+            return fail(constraint, "spec.command must be a non-empty string")
         try:
             completed = subprocess.run(
                 command,
@@ -74,18 +221,23 @@ def shell_command_check(
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            return False, [f"command timed out after {timeout_s}s: {command}"]
+            return fail(constraint, f"command timed out after {timeout_s}s: {command}")
         output = (completed.stdout or "") + (completed.stderr or "")
         recorded = record_evidence(command, int(completed.returncode), output, created_at=clock())
         evidence.append(recorded)
         facts = [f"{command!r} exited {recorded.exit_code}"]
         if completed.returncode != 0:
-            return False, [*facts, output.strip()[:400] or "<no output>"]
+            # ★ `#44`: 命令【自己】没跑起来（解释器/包缺失）不是"产出不合格"——
+            #   把它声明成 `tool`，归因层就不会建议 `relax_constraint`。
+            unrunnable = command_unrunnable(command, output, int(completed.returncode))
+            if unrunnable:
+                return fail(constraint, *facts, unrunnable, cause="tool")
+            return fail(constraint, *facts, output.strip()[:400] or "<no output>")
         if not recorded.attributable:
             # ★ An exit status that a pipe or a background job could have donated
             #   is not evidence that this command succeeded.
-            return False, [*facts, "exit status is not attributable to a single command"]
-        return True, facts
+            return fail(constraint, *facts, "exit status is not attributable to a single command")
+        return ok(constraint, *facts)
 
     return run
 

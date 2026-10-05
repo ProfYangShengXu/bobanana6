@@ -43,6 +43,7 @@ from ..core.model import (
     Candidate,
     Claim,
     Column,
+    ConstraintBundle,
     ModelResponse,
     Provenance,
     Subtask,
@@ -51,7 +52,7 @@ from ..core.model import (
     content_digest,
 )
 from ..core.ports import LLMClient, ToolSet
-from ..services.checks import BlockJudge
+from ..services.checks import SHELL_COMMAND_CHECK, BlockJudge
 from ..services.registry import ToolRegistry
 from .answer_contract import (
     ANSWER_CONTRACT,
@@ -370,6 +371,54 @@ def _hit_output_cap(usage: Mapping[str, Any] | None, cap: int) -> bool:
     if not cap:
         return False
     return int((usage or {}).get("completion_tokens") or 0) >= cap
+
+
+def task_nature(contract: TaskContract, bundle: ConstraintBundle, subtask: Subtask) -> dict[str, Any]:
+    """★ 块级 `goal`（`produce 'X'`）丢掉的那一层：**本任务的性质与验收要求**。
+
+    从**契约**派生，不搬任务级 `goal` 原文 —— 面板类题（交付物不是来源、判据里没有要执行的
+    命令、也没有冻结载体）返回空字典，提示一个字都不变：
+
+      · `kind`：本块的产出**是不是改写一份已声明的来源**（交付物路径 == 某个 `locator`）
+        ⇒ `"fix"`；否则 `"produce"`。
+      · `acceptance`：本块判据里 `custom`+`shell_command` 的 `rationale`（任务作者写的
+        验收要求，例如"全部测试必须通过"）—— 判据要的事，提示里必须有一句。
+      · `frozen`：本块 `frozen_files` 点名的载体（"这几份不许改"）。
+
+    这样"这是一次修复 / 有测试要跑 / 测试必须全过 / 测试不许改"就都到了块手上，
+    而且没有把整句 goal 塞进每一个块（`#37` 那次"每块投 6 份源全文"的教训）。
+    """
+    locators = {source.locator for source in contract.sources}
+    kind = "fix" if subtask.output in locators else "produce"
+    applicable = [
+        constraint
+        for constraint in (*bundle.hard, *bundle.soft)
+        if constraint.target in ("*", subtask.id, subtask.output)
+    ]
+    acceptance = [
+        constraint.rationale
+        for constraint in applicable
+        if constraint.kind == "custom"
+        and constraint.spec.get("check") == SHELL_COMMAND_CHECK
+        and constraint.rationale.strip()
+    ]
+    frozen = sorted(
+        {
+            str(ref)
+            for constraint in applicable
+            if constraint.kind == "frozen_files"
+            for ref in (constraint.spec.get("sources") or [])
+            if isinstance(ref, str)
+        }
+    )
+    if kind == "produce" and not acceptance and not frozen:
+        return {}
+    nature: dict[str, Any] = {"kind": kind}
+    if acceptance:
+        nature["acceptance"] = acceptance
+    if frozen:
+        nature["frozen"] = frozen
+    return nature
 
 
 def _describe_json_failure(text: str, exc: Exception, *, output_cap: int | None) -> tuple[str, str]:
@@ -902,6 +951,11 @@ class LoopIOImpl(LoopIO):
         """
         block = self.toolset.task.mysubtask()
         authorized = list(self.authorized_sources())
+        brief: dict[str, Any] = {"subtask": dict(block), "authorized_sources": authorized}
+        nature = task_nature(self.toolset.task.contract(), self.judge.bundle, self.subtask)
+        if nature:
+            # ★ 块级 goal 只说了"产出哪个文件"；本任务的性质与验收要求由契约派生（`#44`）。
+            brief["task"] = nature
         head = [
             {
                 "role": "system",
@@ -913,7 +967,7 @@ class LoopIOImpl(LoopIO):
                     + " Use the tools you were given; you may only read what they expose."
                 ),
             },
-            {"role": "user", "content": json.dumps({"subtask": dict(block), "authorized_sources": authorized}, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps(brief, ensure_ascii=False)},
         ]
         delivered = self._delivered_inputs()
         if delivered:

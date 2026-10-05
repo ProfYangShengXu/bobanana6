@@ -6,6 +6,8 @@ from .checks import (
     SHELL_COMMAND_CHECK,
     BlockJudge,
     RecordedEvidence,
+    command_unrunnable,
+    judge_environment_problems,
     shell_command_check,
     verdict_summary,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "artifact_payload",
     "build_registry",
     "build_toolset",
+    "command_unrunnable",
+    "judge_environment_problems",
     "shell_command_check",
     "snapshot_payload",
     "verdict_summary",

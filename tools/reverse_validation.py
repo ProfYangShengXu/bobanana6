@@ -1880,16 +1880,27 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "W15-second-assembly-point",
         "services/checks.py",
-        '        command = constraint.spec.get("command")',
-        "        _offline = EchoToolResultClient()\n        command = constraint.spec.get(\"command\")",
+        # ★ `#44`：这句现在在 checks.py 出现两次（判据执行 + 派活前预检）—— 锚点加上后两句才唯一。
+        '        command = constraint.spec.get("command")\n'
+        '        if not isinstance(command, str) or not command:\n'
+        '            return fail(constraint, "spec.command must be a non-empty string")',
+        "        _offline = EchoToolResultClient()\n"
+        '        command = constraint.spec.get("command")\n'
+        "        if not isinstance(command, str) or not command:\n"
+        '            return fail(constraint, "spec.command must be a non-empty string")',
         "tests/test_arch_guard.py::test_only_the_cli_constructs_boundary_implementations",
         "a second module new-s up a boundary implementation",
     ),
     Mutation(
         "W19-second-assembly-point-unlisted-name",
         "services/checks.py",
-        '        command = constraint.spec.get("command")',
-        '        _store = SnapshotStore(root=Path("/tmp"))\n        command = constraint.spec.get("command")',
+        '        command = constraint.spec.get("command")\n'
+        '        if not isinstance(command, str) or not command:\n'
+        '            return fail(constraint, "spec.command must be a non-empty string")',
+        '        _store = SnapshotStore(root=Path("/tmp"))\n'
+        '        command = constraint.spec.get("command")\n'
+        "        if not isinstance(command, str) or not command:\n"
+        '            return fail(constraint, "spec.command must be a non-empty string")',
         "tests/test_arch_guard.py::test_only_the_cli_constructs_boundary_implementations",
         "a class the hand-written list never names still escapes the assembly-point rule",
     ),

@@ -1401,3 +1401,75 @@ def test_the_harness_can_turn_on_the_inheritance_guard_observation() -> None:
     assert Path(on.observations_dir).is_dir()
     # 观测目录由验收层建；这一跑没有继承守卫的拒收，所以里面不该有文件
     assert list(Path(on.observations_dir).glob("*")) == []
+
+
+# --------------------------------------------------------------------------- #
+# ★ `#44`: 判据命令的**执行环境** —— 派活前具名拒；走到了也要归到 tool 而不是 constraint
+# --------------------------------------------------------------------------- #
+
+
+def _task_with_a_judge_command(tmp_path: Path, command: str, *, name: str) -> Path:
+    """主验题的改造版：判据换成一条 shell 命令（`#44` 的预检 / 归因用）。"""
+    import shutil
+
+    import yaml
+
+    source = ACCEPTANCE / "main" / "panel-three-sources"
+    target = tmp_path / name / source.name
+    shutil.copytree(source, target, ignore=shutil.ignore_patterns("_run", "__pycache__", "generate.py"))
+    document = yaml.safe_load((target / "task.yaml").read_text(encoding="utf-8"))
+    document["constraints"]["hard"].append(
+        {
+            "id": "C-judge",
+            "kind": "custom",
+            "target": "panel.csv",
+            "spec": {"check": "shell_command", "command": command},
+            "rationale": "面板要过这条命令",
+        }
+    )
+    (target / "task.yaml").write_text(yaml.safe_dump(document, allow_unicode=True), encoding="utf-8")
+    return target
+
+
+class _CountingClient:
+    """数一数模型被叫了几次（`#44` 的验收标准就是"0 次模型调用"）。"""
+
+    def __init__(self, inner: object) -> None:
+        self.inner = inner
+        self.calls = 0
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        return self.inner.complete(messages, tools, max_tokens, **kw)  # type: ignore[attr-defined]
+
+
+def test_a_judge_command_that_cannot_run_refuses_the_run_before_any_worker(tmp_path: Path) -> None:
+    """★ `#44`：判据命令跑不起来 ⇒ 具名拒 `judge` + **0 次模型调用**（不再是跑完整轮）。
+
+    （改前：`python3 -m pytest` 在没装 pytest 的解释器下必然拒，却记成"产出不合格"。）
+    """
+    task = _task_with_a_judge_command(
+        tmp_path, "cd . && definitely-missing-interpreter-42 -m pytest -q", name="unrunnable"
+    )
+    client = _CountingClient(_ScriptedBlocks())
+    run = run_task(task, client=client, env={})
+
+    assert run.refused == "judge", run.refused
+    assert run.refused_codes == ("C-judge:interpreter_missing",), run.refused_codes
+    assert client.calls == 0, "判据跑不起来时一个模型都不该被叫"
+    assert run.report.block_pass_rate == 0.0
+
+
+def test_a_judge_command_that_breaks_at_run_time_blames_the_tool(tmp_path: Path) -> None:
+    """★ `#44` 的兜底：预检看不进去的命令（`sh -c` 里面）在判据那一步失败 ⇒ 归 `tool`。
+
+    改前它会记成 `blame=constraint` + 建议 `relax_constraint` —— 正确的动作是修工具。
+    """
+    task = _task_with_a_judge_command(
+        tmp_path, 'sh -c "definitely-missing-binary-42 -q"', name="breaks-at-run-time"
+    )
+    run = run_task(task, client=_ScriptedBlocks(), env={}, expected_blame="tool")
+
+    assert run.refused is None  # 预检放行（它看不进引号里面），判定那一步才失败
+    assert run.report.attribution_accuracy == 1.0, run.report.notes
+    assert run.report.block_pass_rate < 1.0
