@@ -1139,7 +1139,9 @@ def test_hundreds_of_inputs_do_not_cost_the_worker_any_turns() -> None:
     两种都不需要模型为"取回"多花一轮。
     """
     from bobanana6.assemble_impl.produce import LoopIOImpl
-    from bobanana6.core.model import Budget, Subtask
+    from bobanana6.core.checkers.base import CheckContext
+    from bobanana6.core.model import Budget, ConstraintBundle, Subtask
+    from bobanana6.services import BlockJudge
 
     class _Task:
         def __init__(self, parts):  # type: ignore[no-untyped-def]
@@ -1164,7 +1166,9 @@ def test_hundreds_of_inputs_do_not_cost_the_worker_any_turns() -> None:
             client=None,  # type: ignore[arg-type]
             toolset=_Tools(parts),  # type: ignore[arg-type]
             registry=None,  # type: ignore[arg-type]
-            judge=None,  # type: ignore[arg-type]
+            # ★ #37: 壳的投递路径要问判据（它点名了哪些参照物），所以这里给一个空包 ——
+            #   真实的 LoopIOImpl 一定带 judge（`runtime.py` 只从 `block_bundle` 造）。
+            judge=BlockJudge(bundle=ConstraintBundle(task_id="t", version=1), subtask=block, context=CheckContext()),
             subtask=block,
             budget=Budget(max_calls=1, max_wall_s=1, max_output=1),
         )

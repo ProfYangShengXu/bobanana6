@@ -1983,8 +1983,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "Q09-delivery-budget-ignored",
         "assemble_impl/produce.py",
-        "        if len(body) <= DELIVERED_INPUTS_BUDGET:\n",
-        "        if True:  # mutation: hundreds of inputs are dumped into the context whole\n",
+        "            if len(json.dumps(parts, ensure_ascii=False)) <= DELIVERED_INPUTS_BUDGET:\n",
+        "            if True:  # mutation: hundreds of inputs are dumped into the context whole\n",
         "tests/test_acceptance.py::test_hundreds_of_inputs_do_not_cost_the_worker_any_turns",
         "a 240-input task tries to paste everything and blows the context instead of indexing",
     ),

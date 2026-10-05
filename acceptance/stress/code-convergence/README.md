@@ -67,6 +67,9 @@ C-shared-compiles   custom        py_compile（④）
 C-shop-a / C-shop-b custom        块内：模块自己的行为（块级判据）
 C-global-tests      custom        全局：全量测试（②，挂在最后一块）
 C-tests-frozen      frozen_files  测试文件与接口逐字节未变（③，target="*" ⇒ 每块 + 装配关都判）
+                                  ★ `#37`：它 `spec.sources` 点名的六个冻结载体（含 `interface.py`）
+                                  也由壳**在派活前**投递到每个块手上 —— `T-01` 的 `inputs` 是空的，
+                                  在此之前它只能靠 `sources.snapshot` 自己去取（`#36` 真模型 0 次）。
 C-iface-fields      schema        interface.json 的列
 C-iface-prov        provenance    接口每一行能指回冻结的 interface.py
 ```

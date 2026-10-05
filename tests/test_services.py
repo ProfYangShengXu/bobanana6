@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fakes import (
@@ -680,3 +682,113 @@ def test_an_undeclared_clean_carrier_payload_is_unchanged(tmp_path: Path) -> Non
 
     assert "source_form" not in payload
     assert payload["rows"] == [{"a": "1", "b": "2"}]
+
+
+# --------------------------------------------------------------------------- #
+# ★ #37: 判据参照的【冻结载体】也要在派活前送到块手上（与 #25① 同一个理由）
+#   证据：`#36` 三跑 21 次调用里 `sources.snapshot` 0 次 —— 判据拿来对照的那份原文，
+#   在模型那儿根本不存在。壳知道是哪个 ref，就不该等模型自己发现。
+# --------------------------------------------------------------------------- #
+
+
+def _reference_io(
+    tmp_path: Path,
+    *,
+    spec: Mapping[str, Any],
+    target: str = "*",
+    authorized: tuple[str, ...] = ("interface",),
+    body: str = "def total(items):\n    return sum(items)\n",
+) -> Any:
+    from bobanana6.assemble_impl import LoopIOImpl, ResponseFormatSupport
+    from bobanana6.core.model import Column, Constraint, SnapshotBody
+    from bobanana6.services import build_registry
+
+    block = subtask("T-02", output="input/repo/shared.py", mode="write", axis="module")
+    tools = build_toolset(
+        plan=plan(subtasks=(block,), interfaces={"input/repo/shared.py": "text"}),
+        subtask=block,
+        contract=contract(deliverables=("input/repo/shared.py",)),
+        ontology=mini_ontology(),
+        authorized=tuple(SourceRef(ref=ref, locator=f"input/repo/{ref}.py") for ref in authorized),
+        fetched={},
+        upstream={},
+        checks=BoundChecks(block="T-02"),
+    )
+    frozen = SnapshotBody(
+        ref="interface",
+        columns=(Column(name="text", dtype="str"),),
+        rows=({"text": body},),
+    )
+    judged = bundle(
+        hard=(
+            Constraint(
+                id="C-tests-frozen",
+                kind="frozen_files",
+                target=target,
+                spec=dict(spec),
+                rationale="frozen carriers are compared verbatim",
+            ),
+        )
+    )
+    return LoopIOImpl(
+        client=_SchemaRefusingClient(),
+        toolset=tools,
+        registry=build_registry(tools, SnapshotStore(root=tmp_path / "s").read),
+        judge=BlockJudge(
+            bundle=judged,
+            subtask=block,
+            context=CheckContext(ontology=mini_ontology(), snapshot_bodies={"interface": frozen}),
+        ),
+        subtask=block,
+        budget=Budget(max_calls=8, max_wall_s=60, max_output=4096),
+        response_format=ResponseFormatSupport(),
+    )
+
+
+def test_a_judge_named_reference_reaches_the_messages_the_block_receives(tmp_path: Path) -> None:
+    """★ #36 的缺口：`frozen_files` 指名 `interface`，但原文从没到过块手上。"""
+    io = _reference_io(tmp_path, spec={"sources": ["interface"]})
+
+    delivered = io._delivered_inputs()
+    assert list(delivered["reference_sources"]) == ["interface"]
+    assert delivered["reference_sources"]["interface"]["rows"] == [
+        {"text": "def total(items):\n    return sum(items)\n"}
+    ]
+    # ★ AGENTS.md §7⑬：断言模型真正收到的那串 messages，不是断言某个字段里有内容
+    prompt = json.dumps(io.prompt(_state()), ensure_ascii=False)
+    assert "def total(items)" in prompt
+    assert "reference_sources" in prompt
+
+
+def test_a_reference_the_block_may_not_read_is_not_delivered(tmp_path: Path) -> None:
+    """反向：没授权的 ref 即便被判据点名也不送 —— 前置投递不放宽授权。"""
+    io = _reference_io(tmp_path, spec={"sources": ["secret-1"]})
+
+    assert "reference_sources" not in io._delivered_inputs()
+
+
+def test_a_reference_named_for_another_block_is_not_delivered(tmp_path: Path) -> None:
+    """反向：判据点的是别人的产物 ⇒ 不是这一块的参照物。"""
+    io = _reference_io(tmp_path, spec={"sources": ["interface"]}, target="other/thing.py")
+
+    assert "reference_sources" not in io._delivered_inputs()
+
+
+def test_an_over_budget_reference_degrades_to_names_and_a_way_to_fetch_them(tmp_path: Path) -> None:
+    """与 inputs 同一条尺子：参照物太大就退化成"名字 + 取法"，不把提示撑爆。"""
+    io = _reference_io(tmp_path, spec={"sources": ["interface"]}, body="x" * 200_000)
+
+    delivered = io._delivered_inputs()
+    assert "reference_sources" not in delivered
+    assert delivered["reference_index"] == ["interface"]
+    assert "sources.snapshot" in delivered["reference_note"]
+
+
+def test_named_source_refs_reads_nested_specs_and_only_keeps_authorized_names() -> None:
+    from bobanana6.assemble_impl.produce import named_source_refs
+
+    spec = {"sources": ["interface", "nope"], "nested": {"deeper": ["test-shop-a"]}}
+    assert named_source_refs(spec, ("interface", "test-shop-a")) == ("interface", "test-shop-a")
+    # 去重 + 只认整串相等（`interface` 出现在长文本里不算点名）
+    assert named_source_refs({"a": ["interface", "interface"], "b": "see interface.py"}, ("interface",)) == ("interface",)
+    assert named_source_refs({"a": "interface"}, ()) == ()

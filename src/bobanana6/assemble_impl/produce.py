@@ -616,6 +616,32 @@ def parse_candidate(
 DELIVERED_INPUTS_BUDGET = 120_000
 
 
+def named_source_refs(value: Any, authorized: Sequence[str]) -> tuple[str, ...]:
+    """★ `#37`: 判据 spec 里【点名了的源 ref】—— 递归扫，只认授权过的那些。
+
+    判据会在自己的 `spec` 里点名要拿来对照的东西（`frozen_files.spec.sources` 是最典型的）。
+    那些 ref 就是"这一块要照着的参照物"：**壳知道，就该在派活前送到块手上**，别让模型自己去发现
+    （`#36` 的真实读数：3 跑 21 次调用里 `sources.snapshot` **0 次**）。
+    只收 `authorized` 里的名字：没授权的名字即便出现在 spec 里也不送（不越权）。
+    """
+    allowed = {str(ref) for ref in authorized}
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, str):
+            if node in allowed:
+                found.add(node)
+        elif isinstance(node, Mapping):
+            for item in node.values():
+                walk(item)
+        elif isinstance(node, Sequence) and not isinstance(node, (str, bytes)):
+            for item in node:
+                walk(item)
+
+    walk(value)
+    return tuple(sorted(found))
+
+
 def _input_index(parts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     """够用来挑件的最小索引：名字 / schema / 列 / 行数 / 第一行。"""
     index = {}
@@ -712,25 +738,63 @@ class LoopIOImpl(LoopIO):
         2/3；E-5 证明直接把部件放进 context 是 3/3）。超出预算时退化成索引 ——
         模型仍可用 ``task.upstream`` / ``task.upstream_all`` 逐件或整批取。
         """
-        if not self.subtask.inputs:
-            return {}
-        parts = {name: dict(self.toolset.task.upstream(name)) for name in self.subtask.inputs}
-        body: str = json.dumps(parts, ensure_ascii=False)
-        if len(body) <= DELIVERED_INPUTS_BUDGET:
-            return {
-                "delivered_inputs": parts,
-                "note": (
+        delivered: dict[str, Any] = {}
+        if self.subtask.inputs:
+            parts = {name: dict(self.toolset.task.upstream(name)) for name in self.subtask.inputs}
+            if len(json.dumps(parts, ensure_ascii=False)) <= DELIVERED_INPUTS_BUDGET:
+                delivered["delivered_inputs"] = parts
+                delivered["note"] = (
                     "★ 你的输入已经由壳取好、就在这里：不必再调 task.upstream。"
                     "答案里的每一行都必须来自这些行（缺件在 missing 里点名）。"
-                ),
+                )
+            else:
+                delivered["delivered_inputs_index"] = _input_index(parts)
+                delivered["note"] = (
+                    "★ 输入太多，先给索引：用 `task.upstream_all` 一次取全部，"
+                    "或用 `task.upstream` 逐件取（每件都是完整内容 + 逐行引用）。"
+                )
+
+        # ★ `#37`: 判据参照的冻结载体也【前置送到】—— 与 #25① 同一个理由：
+        #   壳知道的东西，别让模型自己猜（`#36`：真模型 0 次去读）。
+        references = self._reference_sources()
+        if references and len(json.dumps(references, ensure_ascii=False)) <= DELIVERED_INPUTS_BUDGET:
+            delivered["reference_sources"] = references
+            delivered["reference_note"] = (
+                "★ 这是判据要拿来对照的冻结载体【原文】（逐字）：你的产出必须与它一致。"
+                "不必再调 sources.snapshot —— 它就是壳替你取来的那一份。"
+            )
+        elif references:
+            # 与 inputs 同一条尺子：超预算就退化成"名字 + 取法"，不把提示撑爆。
+            delivered["reference_index"] = sorted(references)
+            delivered["reference_note"] = (
+                "★ 判据参照的载体超过预算：上面是它们的 ref，用 `sources.snapshot` 逐件取原文"
+                "（你的产出必须与它一致）。"
+            )
+        return delivered
+
+    def _reference_sources(self) -> dict[str, Any]:
+        """本块判据 spec 里点名、且本块有权读的冻结载体（原文 + 逐行）。
+
+        `judge.bundle` 已经是**本块那一份**（`runtime.py::block_bundle` 切过片），这里再按
+        `target` 过一遍是防御性的：万一拿到的是未切片的整包，也不能把邻居的参照物塞进提示
+        （与 `block_bundle` 的 `keep` 是同一条规则；两边都依赖 `Constraint.target` 的语义）。
+        """
+        refs: set[str] = set()
+        authorized = tuple(self.authorized_sources())
+        for constraint in (*self.judge.bundle.hard, *self.judge.bundle.soft):
+            if constraint.target not in ("*", self.subtask.id, self.subtask.output):
+                continue
+            refs.update(named_source_refs(constraint.spec, authorized))
+        out: dict[str, Any] = {}
+        for ref in sorted(refs):
+            body = self.judge.context.snapshot_bodies.get(ref)
+            if body is None:
+                continue  # 没被读成数据（不是文本载体）—— 不硬塞、也不假装
+            out[ref] = {
+                "columns": [{"name": column.name, "dtype": column.dtype} for column in body.columns],
+                "rows": [dict(row) for row in body.rows],
             }
-        return {
-            "delivered_inputs_index": _input_index(parts),
-            "note": (
-                "★ 输入太多，先给索引：用 `task.upstream_all` 一次取全部，"
-                "或用 `task.upstream` 逐件取（每件都是完整内容 + 逐行引用）。"
-            ),
-        }
+        return out
 
     def produce(self, state: LoopState) -> TurnProposal:
         self.calls += 1
