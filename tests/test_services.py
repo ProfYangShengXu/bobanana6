@@ -25,6 +25,7 @@ from bobanana6.core.checkers.base import CheckContext
 from bobanana6.core.model import Budget, ModelResponse, SourceRef, Subtask
 from bobanana6.services import (
     SHELL_COMMAND_CHECK,
+    TOOL_NAMES,
     BlockJudge,
     BoundChecks,
     BoundSemantics,
@@ -33,6 +34,7 @@ from bobanana6.services import (
     RecordedEvidence,
     RegisteredTool,
     ToolRegistry,
+    build_registry,
     build_toolset,
     shell_command_check,
     snapshot_payload,
@@ -88,7 +90,7 @@ def _subtask(**kw: object) -> Subtask:
 
 
 def test_mysubtask_shows_only_this_block() -> None:
-    view = BoundTask(subtask=_subtask(), contract=contract()).mysubtask()
+    view = BoundTask(subtask=_subtask(), contract_document=contract()).mysubtask()
     assert view["id"] == "T-01"
     assert view["inputs"] == ["part-1.csv"]
     assert view["mode"] == "write"
@@ -97,7 +99,7 @@ def test_mysubtask_shows_only_this_block() -> None:
 def test_upstream_refuses_an_input_the_block_never_declared() -> None:
     task = BoundTask(
         subtask=_subtask(),
-        contract=contract(),
+        contract_document=contract(),
         upstream_parts={"part-1.csv": {"rows": 1}},
         allowed_inputs=("part-1.csv",),
     )
@@ -792,3 +794,66 @@ def test_named_source_refs_reads_nested_specs_and_only_keeps_authorized_names() 
     # 去重 + 只认整串相等（`interface` 出现在长文本里不算点名）
     assert named_source_refs({"a": ["interface", "interface"], "b": "see interface.py"}, ("interface",)) == ("interface",)
     assert named_source_refs({"a": "interface"}, ()) == ()
+
+
+# --------------------------------------------------------------------------- #
+# ★ #39: 工具体检 —— 那个 bug 只在【运行期】现形（字段遮蔽方法）
+#   `BoundTask` 的 dataclass 字段 `contract` 遮蔽了同名方法 `contract()`（实例 `__dict__`
+#   优先于类体的非数据描述符）⇒ `task.contract` 这个工具**永远**抛
+#   `TypeError: 'TaskContract' object is not callable`。静态读代码看不出来，逐个调一次才看得见。
+# --------------------------------------------------------------------------- #
+
+#: 每个工具的"像样的"参数（模型会发的那种）。
+_PLAUSIBLE_ARGS: dict[str, dict[str, Any]] = {
+    "semantics.lookup": {"term": "credit.pd"},
+    "semantics.map": {"field": "pd_3y"},
+    "semantics.check": {"usage": {"concept": "credit.pd"}},
+    "task.mysubtask": {},
+    "task.upstream": {"name": "part-1"},
+    "task.upstream_all": {},
+    "task.contract": {},
+    "check.local": {},
+    "check.provenance": {},
+    "check.assemble_dryrun": {},
+    "sources.snapshot": {"ref": "src-1"},
+}
+
+
+def _full_toolset(tmp_path: Path) -> tuple[object, object]:
+    """一个真的装配出来的工具面（所有服务都在），用来逐个调。"""
+    _store, snap = _snapshot(tmp_path)
+    block = subtask("T-01", output="out.csv", inputs=("part-1",), mode="write")
+    tools = build_toolset(
+        plan=plan(subtasks=(block,), interfaces={"out.csv": "s"}),
+        subtask=block,
+        contract=contract(),
+        ontology=mini_ontology(),
+        authorized=(SourceRef(ref="src-1", locator="input/a.csv"),),
+        fetched={"src-1": snap},
+        upstream={"part-1": {"name": "part-1", "columns": [], "rows": []}},
+        checks=BoundChecks(block="T-01"),
+    )
+    return tools, build_registry(tools, _store.read)
+
+
+def test_every_served_tool_can_actually_be_called(tmp_path: Path) -> None:
+    """★ #39 的回归守卫：任何一个工具被调用都不许抛 `TypeError`。"""
+    _tools, registry = _full_toolset(tmp_path)
+    results = {}
+    for name in registry.names():
+        call = registry.calls([_raw(f"c-{name}", name, json.dumps(_PLAUSIBLE_ARGS.get(name, {})))])[0]
+        results[name] = registry.execute((call,))[0]
+    assert [name for name, result in results.items() if result.error_type == "TypeError"] == []
+    # 那个 bug 的正面读数：`task.contract` 交的是合同本身（不是"调用一个对象"）
+    payload = json.loads(results["task.contract"].content)
+    assert payload["task_id"] == "task-1" and payload["goal"]
+
+
+def test_the_served_tool_list_matches_the_declared_inventory() -> None:
+    """★ #39: 注册表服务 11 个工具，`TOOL_NAMES` 只列了 10 个（漏 `task.upstream_all`）——
+    而 `TOOL_NAMES` 是 `runner` 喂给 `consist._tool_missing` 的"部署能服务什么"清单
+    ⇒ 一条 `spec.requires: [task.upstream_all]` 的约束会被误报成能力不可用。"""
+    from bobanana6.core.ports import _BASE_TOOL_SPECS
+
+    assert set(TOOL_NAMES) == {spec.name for spec in _BASE_TOOL_SPECS}
+    assert "task.upstream_all" in TOOL_NAMES

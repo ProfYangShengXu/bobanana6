@@ -55,6 +55,11 @@ TOOL_NAMES: tuple[str, ...] = (
     "semantics.check",
     "task.mysubtask",
     "task.upstream",
+    # ★ `#39`: 这一项原来漏了 —— 它是**注册表真的会服务**的工具（`build_registry` 里挂着
+    #   `task.upstream_all`，`core/ports.py::_BASE_TOOL_SPECS` 也声明了它），而 `TOOL_NAMES`
+    #   被 `runner.py:210` 当成"部署能服务什么"的清单喂给 `consist._tool_missing` ⇒ 一条
+    #   `spec.requires: [task.upstream_all]` 的约束会被误报成"能力不可用"。补成真的。
+    "task.upstream_all",
     "task.contract",
     "check.local",
     "check.provenance",

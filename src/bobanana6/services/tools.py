@@ -98,7 +98,12 @@ class BoundTask(TaskTools):
     """
 
     subtask: Subtask
-    contract: TaskContract
+    #: ★ `#39`: 这个字段原来叫 `contract`，把同名方法 `contract()` **遮蔽**了 —— dataclass 把字段
+    #:   写进实例 `__dict__`，而类体里的 `def` 只是非数据描述符，优先级低于实例字典。
+    #:   后果：`task.contract` 这个工具调到的是一份 `TaskContract` **实例**，于是永远抛
+    #:   `TypeError: 'TaskContract' object is not callable`（`#36`/`#38` 的归档里能看到它）。
+    #:   字段改名即可，端口 `core/ports.py::TaskTools.contract()` 与工具名都不动。
+    contract_document: TaskContract
     upstream_parts: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     allowed_inputs: tuple[str, ...] = ()
 
@@ -120,7 +125,7 @@ class BoundTask(TaskTools):
         return dict(self.upstream_parts.get(name, {}))
 
     def contract(self) -> TaskContract:
-        return self.contract
+        return self.contract_document
 
 
 @dataclass(frozen=True)
@@ -225,7 +230,7 @@ def build_toolset(
     return ToolSet(
         subtask=subtask.id,
         semantics=BoundSemantics(ontology=ontology),
-        task=BoundTask(subtask=subtask, contract=contract, upstream_parts=upstream, allowed_inputs=subtask.inputs),
+        task=BoundTask(subtask=subtask, contract_document=contract, upstream_parts=upstream, allowed_inputs=subtask.inputs),
         check=checks,
         sources=sources,
         allowed_inputs=subtask.inputs,
