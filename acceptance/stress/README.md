@@ -66,30 +66,43 @@ truth/              真值（只给判分器读；与 input/ 物理隔离）
 4. **24 块的计划需要部署声明并发**：默认 `--concurrency 8` 时装配报 `capability_short`；
    声明 32 后消失 —— 能力匹配在正常工作，压力题必须按部署真实能力跑。
 
-## 压力任务 B（代码类，`架构设计.md §15.5`）——**本块未建，缺口已定位**
+## 压力任务 B（代码类，`架构设计.md §15.5`）—— ★ `#33` 已建成
+
+**题在 `acceptance/stress/code-convergence/`**（自己的 `README.md` 写了形状/硬点/判据/怎么跑；
+读数在 `.bobanana6/b33/报告.md`）。
+
+> 下面保留 `#21` 当年"建不起来"的记录 —— 那是**当时**的事实（三条壳能力都缺）。
+
+<details>
+<summary>历史记录（`#21`，2026-10-03）：当时建不起来，缺口逐条定位</summary>
 
 指令要求"把压力集推出来"（第二道压力题：多模块仓库 → 归并重复实现为一个共享抽象）。
 查完源码事实后**建不起来**，原因是三条壳能力都缺，题侧绕不过去：
 
-| # | 缺什么 | 源码事实 | 挡住了哪条攻击面 |
+| # | 缺什么 | 源码事实（`#21` 当时） | 挡住了哪条攻击面 |
 |---|---|---|---|
 | 1 | 按模块切分的策略 | `decompose/strategies.py` 只有 `split_by_source` / `split_by_field` | ① 接口密度、`partition` 写区互斥都还在，但"按模块分"这个轴不存在 |
-| 2 | 候选答案落盘 | `produce.py:530` 是唯一写 `files={}` 的地方，没有生产者；`parse_candidate` 只把 `{ref,columns,rows,text}` 变成 `Artifact` | ④ **编译器 + 测试这个天然判官根本没得跑**；③ 没有可比对的测试文件 |
-| 3 | 冻结测试文件摘要 | 无（`sources` 门冻结的是快照，不是代码仓库的测试文件） | ③ **"测试文件本身可能被改"无法判** —— 没有指纹就没有"改没改" |
+| 2 | 候选答案落盘 | `produce.py:530` 是唯一写 `files={}` 的地方，没有生产者 | ④ **编译器 + 测试这个天然判官根本没得跑**；③ 没有可比对的测试文件 |
+| 3 | 冻结测试文件摘要 | 无（`sources` 门冻结的是快照，不是代码仓库的测试文件） | ③ **"测试文件本身可能被改"无法判** |
 
-四攻击面读数（建了 / 判了 / 读了）：
+</details>
+
+### `#33` 补上的三件（逐条对应上表）
+
+| # | `#33` 的做法 | 落点 |
+|---|---|---|
+| 1 | `split_by_module`：接口块 → 共享抽象块 → 一模块一块（`partition=module:<名>`）；模块由 `sources[].module` **声明** | `decompose/strategies.py` · `core/model.py` · `contract/parser.py` · `services/tools.py`（`SOURCE_READING_AXES`）· `cli.py --strategy module` |
+| 2 | `parse_candidate` 收 `{"files": {工作区相对路径: 原文}}`；`LoopIOImpl` 落盘到 `--workspace`，并**执行写区互斥**（越界具名拒绝） | `assemble_impl/produce.py` · `cli.py --workspace` · `acceptance/harness.py`（工作区播种） |
+| 3 | 冻结载体（内容寻址）+ **装配期比对**：新判据 `frozen_files`（第 15 种 kind），外侧算"冻结摘要 / 工作区摘要"两个值 | `core/checkers/frozen.py` · `core/checkers/base.py` · `sources/store.py::digest` · `assemble_impl/runner.py::_frozen_files` |
+
+### 四攻击面读数（`#33`，建了 / 判了 / 读了 三者分开）
 
 | 攻击面 | 建了 | 判了 | 读了 |
 |---|---|---|---|
-| ① 接口先冻结、再实现 | ❌ 无代码类载体 | — | — |
-| ② 测试是全局的（块内测试过 ≠ 整体过） | ❌ 同上 | — | — |
-| ③ 测试文件可能被改 | ❌ 需 #3（冻结摘要 + 比对） | — | — |
-| ④ 编译器 + 测试是天然判官 | ❌ 需 #2（落盘才能编译/跑） | — | — |
+| ① 接口先冻结、再实现 | ✅ | ✅ `C-shared-interface` | ✅ `exit 0` |
+| ② 测试是全局的（块内过 ≠ 整体过） | ✅ | ✅ `C-global-tests` | ✅ 块内 ok、末块 FAIL（`local` 跑） |
+| ③ 测试文件可能被改 | ✅ 冻结摘要 + `frozen_files` | ✅ `C-tests-frozen`（每块 + 装配关） | ✅ 改松测试 → 每块被点名 |
+| ④ 编译器 + 测试是天然判官 | ✅ `custom` 跑 `py_compile`/`unittest` | ✅ 退出码被记录 | ✅ 四组命令全 `exit 0` |
 
-**建成所需的三件事**（都不在本块范围：`core/` 判定语义与切分能力属下一阶段）：
-① 一个 `split_by_module` 策略（模块=写区，`partition` 互斥）；
-② 一种会落盘的 deliverable（`Candidate.files` 真被填 + 一个 code 产物判据）；
-③ 冻结测试文件的摘要并在装配期比对 + 一条"全局测试通过"的判定轴。
-
-**没有用文本假装代码类**：把代码写成 `text` 交给现判定器，读数会是"信息类题"的读数，
-那等于用读数冒充压力，本阶段不做。
+★ 已知缺口：装配关仍报 `provenance_connected`（代码类产物没有行级溯源）——
+逐字读数与切点见 `.bobanana6/b33/报告.md §6`。

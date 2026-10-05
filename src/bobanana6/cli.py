@@ -116,10 +116,12 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
     event_log = EventLog()
     # ★ One limiter, shared by the block's model call and the summarizer callback.
     gate = RuntimeGate(GateConfig(max_concurrent=1, default_timeout=0.0))
+    workspace = Path(args.workspace) if getattr(args, "workspace", "") else None
     runtime = BlockRuntime(
         client=client,
         store=store,
         contract=contract,
+        workspace=workspace,
         budget=budget,
         event_log=event_log,
         compression=CompressionPolicy(
@@ -145,6 +147,7 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
         limits=DEFAULT_LIMITS,
         budget=budget,
         event_log=event_log,
+        workspace=workspace,
         report_dir=Path(args.out),
         # ★ §6.8 的能力匹配：两个档位，各自只声明它真正提供的能力。
         #   多给一分能力就是 capability_over —— 那是成本信号，会拒绝装配。
@@ -178,7 +181,12 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--ontology", default="", help="本体文件；不给则由模型起草")
     run.add_argument("--out", default=DEFAULT_REPORTS, help="四份报告写到哪")
     run.add_argument("--snapshots", default=DEFAULT_SNAPSHOTS, help="快照落到哪")
-    run.add_argument("--strategy", default="source", choices=("source", "field", "single"), help="切分策略")
+    run.add_argument(
+        "--workspace",
+        default="",
+        help="代码类产物的落盘目录（`#33`）；不给 = 这个部署没有工作区，交代码类产物会被具名拒绝",
+    )
+    run.add_argument("--strategy", default="source", choices=("source", "field", "module", "single"), help="切分策略")
     run.add_argument("--offline", action="store_true", help="不接网络：用确定性离线模型与本地源")
     run.add_argument("--offline-script", default="", help="离线脚本（JSON），用固定响应驱动")
     run.add_argument("--max-calls", type=int, default=64)

@@ -1,0 +1,117 @@
+# ★ 压力任务 B（代码类，`架构设计.md §15.5`）—— `#33` 建成。
+#
+# 形状：多模块仓库 → 把散落在各模块的重复实现收敛到一个共享抽象。
+# 切口落在【模块边界】上（`sources[].module` 声明），不是"一个来源一块"。
+#
+# 硬点 → 落点：
+#   接口密度      模块边界由声明给出（每块读自己模块的来源）
+#   写区互斥      每块的 partition = 自己的模块；共享抽象那一块是全局的（partition=deliverable）
+#   跨块契约      共享抽象先冻结并【声明成模块块的输入】；`iface_match` 比 descriptor
+#   不可独立验证  块内测试 + 【全局测试】各一条，且测试文件被冻结摘要守着
+#
+# ★ 冻结文件（interface.py / test_*.py）是**来源**：取回阶段按内容寻址冻结，
+#   装配期由 `frozen_files` 判据比对工作区里那份还是不是原文。
+task_id: code-convergence
+goal: 把三个模块里重复实现的 total 收敛到一份共享抽象，并让全部测试通过
+version: 1
+
+deliverables:
+  # ★ 第一份交付物 = 共享抽象（`split_by_module` 的约定）
+  - name: input/repo/shared.py
+    schema: {text: str}
+  # 接口本身也是机器可判的产物（第四口径）
+  - name: interface.json
+    schema: {function: str, params: str, returns: str}
+  # 三个模块的改写结果（各自模块块的产出）
+  - name: input/repo/shop_a.py
+    schema: {text: str}
+  - name: input/repo/shop_b.py
+    schema: {text: str}
+  - name: input/repo/shop_c.py
+    schema: {text: str}
+
+sources:
+  # ├─ 三个模块：模块边界由 `module:` 声明（切口就在这里）
+  - {ref: shop-a-source, locator: input/repo/shop_a.py, module: shop_a}
+  - {ref: shop-b-source, locator: input/repo/shop_b.py, module: shop_b}
+  - {ref: shop-c-source, locator: input/repo/shop_c.py, module: shop_c}
+  # └─ 冻结载体：接口 + 四个测试文件（不属于任何模块，只做载体与比对基准）
+  - {ref: interface, locator: input/repo/interface.py}
+  - {ref: test-interface, locator: input/repo/test_interface.py}
+  - {ref: test-shop-a, locator: input/repo/test_shop_a.py}
+  - {ref: test-shop-b, locator: input/repo/test_shop_b.py}
+  - {ref: test-shop-c, locator: input/repo/test_shop_c.py}
+  - {ref: test-convergence, locator: input/repo/test_convergence.py}
+
+constraints:
+  hard:
+    # ── ① 接口先冻结、再实现：共享抽象必须与冻结接口的签名一致 ────────────────
+    - id: C-shared-interface
+      kind: custom
+      target: input/repo/shared.py
+      spec:
+        check: shell_command
+        command: 'cd _run/workspace/input/repo && python3 -m unittest discover -s . -p "test_interface.py" -q'
+      rationale: "接口先冻结：实现出来的签名必须与 interface.py 逐字一致（冻结测试守着）"
+
+    # ── ④ 编译器是天然判官（语法都不对就不必谈行为）──────────────────────────
+    - id: C-shared-compiles
+      kind: custom
+      target: input/repo/shared.py
+      spec:
+        check: shell_command
+        command: "cd _run/workspace/input/repo && python3 -m py_compile shared.py interface.py"
+      rationale: "编译不过的收敛结果没有讨论价值"
+
+    # ── 判据（块级）：各模块改完，且【本模块测试】通过 ───────────────────────
+    - id: C-shop-a
+      kind: custom
+      target: input/repo/shop_a.py
+      spec:
+        check: shell_command
+        command: 'cd _run/workspace/input/repo && python3 -m unittest discover -s . -p "test_shop_a.py" -q'
+      rationale: "模块 a 自己的行为与'不再自带实现'都要过"
+    - id: C-shop-b
+      kind: custom
+      target: input/repo/shop_b.py
+      spec:
+        check: shell_command
+        command: 'cd _run/workspace/input/repo && python3 -m unittest discover -s . -p "test_shop_b.py" -q'
+      rationale: "同上（模块 b）"
+
+    # ── 判据（全局）：全量测试通过 + 本模块测试 ─────────────────────────────
+    #   ★ 挂在【最后一块】上：那时三个模块都改完了 —— "块内过 ≠ 整体过"就在这里。
+    - id: C-global-tests
+      kind: custom
+      target: input/repo/shop_c.py
+      spec:
+        check: shell_command
+        command: "cd _run/workspace/input/repo && python3 -m unittest discover -s . -q"
+      rationale: "全局测试是跨模块的：本模块过了不代表整体过"
+
+    # ── ③ 测试文件本身未被修改：全局不变量，每个块都要过 ────────────────────
+    - id: C-tests-frozen
+      kind: frozen_files
+      target: "*"
+      spec:
+        sources: [interface, test-interface, test-shop-a, test-shop-b, test-shop-c, test-convergence]
+      rationale: "把测试改松就'通过'了 —— 冻结摘要必须在装配期比对"
+
+    # ── 第四口径：接口是机器可判的 ────────────────────────────────────────
+    - id: C-iface-fields
+      kind: schema
+      target: interface.json
+      spec: {columns: [{name: function, dtype: str}, {name: params, dtype: str}, {name: returns, dtype: str}]}
+      rationale: "接口清单要写出函数名、参数、返回"
+    - id: C-iface-prov
+      kind: provenance
+      target: interface.json
+      spec: {min_coverage: 0.95}
+      rationale: "接口的每一行都要能指回冻结的 interface.py"
+
+blind:
+  - "重复实现靠的是行为相同；本判据不比对实现风格，只要求行为一致且不再各带一份"
+
+limits: {max_rounds: 2}
+
+notes: 代码类压力题：切口必须落在模块边界上；写区互斥；共享抽象先冻结；全局测试是硬判据。

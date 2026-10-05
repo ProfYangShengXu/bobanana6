@@ -147,7 +147,13 @@ def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:
             _fail(source, f"{path}.eol", f"unknown eol {eol!r}; expected one of {EOL_MODES!r}", "source")
         try:
             sources.append(
-                SourceRef(ref=raw["ref"], locator=str(raw.get("locator", "")), encoding=encoding, eol=eol)
+                SourceRef(
+                    ref=raw["ref"],
+                    locator=str(raw.get("locator", "")),
+                    encoding=encoding,
+                    eol=eol,
+                    module=str(raw.get("module", "") or ""),
+                )
             )
         except ValueError as exc:
             _fail(source, path, str(exc), "source")

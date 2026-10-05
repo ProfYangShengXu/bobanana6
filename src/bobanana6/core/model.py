@@ -109,6 +109,8 @@ KNOWN_KINDS: frozenset[str] = frozenset(
         "definition_pin",
         "code_valid",
         "custom",
+        #: ★ `#33`: 冻结的载体在装配期还是不是原文（代码类任务的"测试文件被改"就靠它）。
+        "frozen_files",
     }
 )
 
@@ -427,6 +429,9 @@ class SourceRef:
     #: 空串 = 没声明 —— 壳按 utf-8 猜，并把"这是假设"写进投递载荷，不静默替换。
     encoding: str = ""  # external:sources —— 声明的字符编码（如 gbk / utf-8-sig）
     eol: str = ""  # external:sources —— "" / preserve 原样 · lf · crlf
+    #: ★ `#33`: 这份来源属于哪个**模块** —— 切分的切口就落在模块边界上（`split_by_module`）。
+    #: 空串 = 不属于任何模块（例如冻结的测试文件：只做载体，不参与写区）。
+    module: str = ""  # external:decompose —— 模块轴读它
 
     def __post_init__(self) -> None:
         _require_non_empty(self.ref, "SourceRef.ref must not be empty")

@@ -27,6 +27,7 @@ import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, NoReturn
 
 from ..agentloop.events import EventLog
@@ -42,6 +43,7 @@ from ..core.model import (
     ModelResponse,
     Provenance,
     Subtask,
+    TaskContract,
     canonical_row,
     content_digest,
 )
@@ -418,6 +420,64 @@ def _same_row(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
     return all(same_value(one.get(key), other.get(key)) for key in set(one) | set(other))
 
 
+#: ★ `#33`: 代码类产物能写多大（整个答案的上限由 ``model_output_cap`` 兜着）。
+MAX_CODE_BYTES = 200_000
+
+
+def write_region(contract: TaskContract, subtask: Subtask) -> tuple[str, ...]:
+    """一块能写哪些**工作区相对路径** —— 由 `partition` 决定（`#33` 的写区互斥）。
+
+    * `module:<名字>` -> 那个模块声明的来源路径（每块只改自己模块内的文件）
+    * `deliverable:<路径>` -> 那份交付物自己
+    别的 partition = 空区（不许写文件）—— ★ 空区不是"随便写"，是"没有工作区权限"。
+    """
+    partition = subtask.partition or ""
+    if partition.startswith("module:"):
+        name = partition.split(":", 1)[1]
+        return tuple(sorted(source.locator for source in contract.sources if source.module == name and source.locator))
+    if partition.startswith("deliverable:"):
+        return (partition.split(":", 1)[1],)
+    return ()
+
+
+def _file_payloads(
+    document: Mapping[str, Any],
+    reject: Callable[..., NoReturn],
+) -> Mapping[str, str]:
+    """`{"files": {相对路径: 原文}}` -> 校验过的 {path: text}（空映射 = 不是代码类答案）。
+
+    校验在这里做完：路径必须**相对**、不许 `..` 逃逸、不许指向目录、总量有上限。
+    落盘（写工作区、写区互斥）由外侧做 —— `core/` 不读盘，这里只判形状。
+    """
+    raw = document.get("files")
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping) or not raw:
+        reject("files_not_an_object", "'files' must be a non-empty object of {relative path: text}")
+    out: dict[str, str] = {}
+    total = 0
+    for name, content in raw.items():
+        path = str(name)
+        if not isinstance(content, str):
+            reject("file_not_text", f"file {path!r} is {type(content).__name__}, not text")
+        if not path or path.startswith(("/", "\\")) or ":" in path.split("/")[0]:
+            reject("file_path_not_relative", f"file path {path!r} must be relative to the workspace")
+        if ".." in Path(path).parts:
+            reject("file_path_escapes", f"file path {path!r} escapes the workspace")
+        if path.endswith("/"):
+            reject("file_path_is_a_directory", f"file path {path!r} names a directory")
+        total += len(content.encode("utf-8"))
+        if total > MAX_CODE_BYTES:
+            reject("files_too_large", f"the files payload exceeds {MAX_CODE_BYTES} bytes")
+        out[path] = content
+    return out
+
+
+def _reject_plain(code: str, problem: str, *, expected: str = "") -> NoReturn:
+    """落盘阶段复用的拒绝（形状已经在 `parse_candidate` 里拒过一次；这里是第二道）。"""
+    raise CandidateFormatError(problem, code=code, got="", expected=expected or EXPECTED_SHAPE)
+
+
 def parse_candidate(
     text: str,
     *,
@@ -467,6 +527,10 @@ def parse_candidate(
         #   shape to handle instead of guessing at ``null`` / ``""`` / a sentinel.
         #   ``0`` stays a value: a filled zero must remain distinguishable.
         clean_rows.append(canonical_row(row))
+
+    # ★ `#33`: 代码类产物走 `files`（工作区相对路径 -> 文件原文）。校验在【这里】做完：
+    #   路径必须是相对的、不许 `..` 逃逸、不许重复 —— 落盘的动作由外侧做（core 不读盘）。
+    files = _file_payloads(document, reject)
 
     # ★ ``ref`` is not optional: it is what makes the chain walkable. Filling it
     #   with the block id would look legal (a non-empty string) and then fail
@@ -533,7 +597,8 @@ def parse_candidate(
         #   field has to be the source and not the block.
         source_id=str(document.get("source_id") or document.get("ref") or source_id),
         hint=str(document.get("hint") or content_digest(text)),
-        files={},
+        # ★ `#33`: 代码类产物 —— 值是【工作区相对路径】（落盘由外侧做，core 不碰盘）。
+        files={str(path): Path(str(path)) for path in files},
         provenance=tuple(provenance),
         artifacts=(artifact,),
         claims=_claims(document.get("claims"), snapshot_ref=snapshot_ref, locator=locator, reject=reject),
@@ -589,6 +654,13 @@ class LoopIOImpl(LoopIO):
     epoch: Callable[[], float] = time.monotonic
     calls: int = 0
     failed_tools: set[str] = field(default_factory=set)
+    #: ★ `#33`: 这一跑的工作区（代码落盘到这里）。`None` = 这个部署没有工作区 ——
+    #: 那就**不许**交代码类产物（具名拒绝，不静默丢）。
+    workspace: Path | None = None
+    #: ★ 这一块能写哪些**工作区相对路径**（由 partition 决定，写区互斥的执行点）。
+    write_region: tuple[str, ...] = ()
+    #: 这一块实际落盘了哪些路径（证据；空 = 没交代码类产物）。
+    written: tuple[str, ...] = ()
 
     def prompt(self, state: LoopState) -> list[dict[str, Any]]:
         """Stable instructions first, this block next, the transcript last.
@@ -680,7 +752,34 @@ class LoopIOImpl(LoopIO):
             #   规矩先读声明，不再把这一类记成 `None`。
             self._declare_model_failure(rejected)
             raise
+        if candidate.files:
+            self._persist_files(response.text, candidate)
         return TurnProposal(candidate=candidate, text=response.text)
+
+    def _persist_files(self, text: str, candidate: Candidate) -> None:
+        """把代码类产物落到工作区 —— ★ 位置就是"派活前"约定好的工作区，写区互斥在这里执行。"""
+        if self.workspace is None:
+            raise CandidateFormatError(
+                "this deployment has no workspace: a code deliverable cannot be persisted",
+                code="no_workspace",
+                got=text[:200],
+                expected="run with --workspace <dir> so produced files have somewhere to land",
+            )
+        payload = _file_payloads(json.loads(text), _reject_plain)
+        allowed = set(self.write_region)
+        for name, content in payload.items():
+            if allowed and name not in allowed:
+                raise CandidateFormatError(
+                    f"block {self.subtask.id!r} may not write {name!r}: "
+                    f"its write region is {sorted(allowed)!r}",
+                    code="write_outside_region",
+                    got=text[:200],
+                    expected=f"write only inside {sorted(allowed)!r}",
+                )
+            target = self.workspace / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        self.written = tuple(sorted(payload))
 
     def _declare_model_failure(self, rejected: CandidateFormatError) -> None:
         """把「模型给了结构性坏答案」这件事作为【声明】写进事件流。"""

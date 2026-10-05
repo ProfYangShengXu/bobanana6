@@ -47,6 +47,9 @@ class CheckContext:
     unmapped_fields: frozenset[str] = frozenset()
     # concept_id -> unit symbol declared by a peer block, for cross-block units.
     peer_units: Mapping[str, str] = field(default_factory=dict)
+    #: ★ `#33`: `ref -> (冻结时的摘要, 工作区里那份的摘要)`，由外侧算好（core 不读盘）。
+    #: 缺一项 = 那一份没被观测过 —— `frozen_files` 判据会具名失败，不静默通过。
+    frozen_files: Mapping[str, tuple[str, str]] = field(default_factory=dict)
     now: str | None = None
     limits: Limits = DEFAULT_LIMITS
     custom_checks: Mapping[str, Callable[..., Any]] = field(default_factory=dict)

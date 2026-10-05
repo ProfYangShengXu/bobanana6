@@ -479,6 +479,35 @@ def test_an_absent_cell_is_loaded_as_missing_and_a_zero_is_left_alone() -> None:
     assert [point.source_row for point in candidate.provenance] == [0, 1, 2]
 
 
+def test_parse_candidate_reads_a_code_deliverable_as_files() -> None:
+    """★ `#33`: 代码类产物 —— `files` 的值是【工作区相对路径】，校验在解析这一关做完。"""
+    block = Subtask(id="T-01", goal="g", inputs=(), output="shared.py", contract_ref="t", axis="module", mode="write")
+    candidate = parse_candidate(
+        json.dumps({"ref": "src-1", "rows": [], "text": "def total(i):\n    return sum(i)\n",
+                    "files": {"repo/shared.py": "def total(i):\n    return sum(i)\n"}}),
+        subtask=block,
+        source_id="src-1",
+        authorized_sources=("src-1",),
+    )
+    assert list(candidate.files) == ["repo/shared.py"]
+    assert candidate.files["repo/shared.py"] == Path("repo/shared.py")
+
+
+def test_a_file_path_outside_the_workspace_is_refused() -> None:
+    """绝对路径 / 逃逸 / 目录 —— 都不许落盘，报的是能照着改的形状。"""
+    block = Subtask(id="T-01", goal="g", inputs=(), output="shared.py", contract_ref="t", axis="module", mode="write")
+    for payload, code in (
+        ({"files": {"/etc/passwd": "x"}}, "file_path_not_relative"),
+        ({"files": {"../outside.py": "x"}}, "file_path_escapes"),
+        ({"files": {"repo/": "x"}}, "file_path_is_a_directory"),
+        ({"files": {"repo/a.py": 3}}, "file_not_text"),
+        ({"files": {}}, "files_not_an_object"),
+    ):
+        with pytest.raises(CandidateFormatError) as caught:
+            parse_candidate(json.dumps({"ref": "src-1", "rows": [], **payload}), subtask=block, source_id="src-1")
+        assert caught.value.feedback()["code"] == code, payload
+
+
 def test_parse_candidate_refuses_bad_shapes_with_a_fixable_reason() -> None:
     """★ Every rejection says what was sent, which rule broke, and what is required."""
     block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")

@@ -22,6 +22,7 @@ from . import (
     custom,
     definition_pin,
     freshness,
+    frozen,
     invariant,
     presence,
     provenance,
@@ -47,6 +48,7 @@ CHECKS: dict[str, Checker] = {
     unit_consistency.KIND: unit_consistency.check,
     definition_pin.KIND: definition_pin.check,
     code_valid.KIND: code_valid.check,
+    frozen.KIND: frozen.check,
     custom.KIND: custom.check,
 }
 
@@ -64,6 +66,7 @@ JUDGMENT_ORDER: tuple[str, ...] = (
     "unit_consistency",
     "definition_pin",
     "code_valid",
+    "frozen_files",
     "custom",
 )
 

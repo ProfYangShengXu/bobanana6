@@ -17,10 +17,18 @@ from .registry import (
     build_registry,
     snapshot_payload,
 )
-from .tools import BoundChecks, BoundSemantics, BoundSources, BoundTask, build_toolset
+from .tools import (
+    SOURCE_READING_AXES,
+    BoundChecks,
+    BoundSemantics,
+    BoundSources,
+    BoundTask,
+    build_toolset,
+)
 
 __all__ = [
     "SHELL_COMMAND_CHECK",
+    "SOURCE_READING_AXES",
     "TOOL_NAMES",
     "BlockJudge",
     "BoundChecks",

@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
-from collections.abc import Mapping
+import shutil
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,8 @@ class TaskRun:
     inputs_given: tuple[str, ...] = ()
     #: ★ The fourth reading, kept apart from the three axes: is the answer *right*?
     truth: TruthVerdict | None = None
+    #: ★ `#33`: the workspace this run wrote code into (``None`` unless asked for).
+    workspace: Path | None = None
 
 
 def _materialise(task_dir: Path) -> None:
@@ -132,6 +135,8 @@ def run_task(
     offline: bool = False,
     concurrency: int | None = None,
     task_file: str = "task.yaml",
+    workspace: bool = False,
+    workspace_seed: Callable[[Path], None] | None = None,
 ) -> TaskRun:
     """Run one acceptance task through the real assembly point.
 
@@ -153,6 +158,20 @@ def run_task(
     base = Path(task_dir).resolve()
     _materialise(base)
     out = base / "_run" / "reports"
+    # ★ `#33`: 代码类任务要有工作区 —— 它是 `input/` 的一份**可写**拷贝：冻结的测试文件、
+    #   模块、接口都在里面，块只改自己写区里的那几个文件。播种在验收层（准备 fixture），
+    #   写区守卫与冻结比对在壳里。
+    workspace_dir = base / "_run" / "workspace"
+    if workspace:
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        # ★ 保持与 locator 同一套相对路径：locator 写的是 `input/...`，工作区里也就是
+        #   `<ws>/input/...` —— 冻结比对与写区检查都按这一条比较（不猜布局）。
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(base / "input", workspace_dir / "input")
+        if workspace_seed is not None:
+            # ★ 反证钩子：播种之后、开跑之前动工作区（例如把测试改松）——
+            #   "测试文件被改"必须在装配期被抓住，而不是靠没人去改。
+            workspace_seed(workspace_dir)
     snapshots = base / "_run" / "snapshots"
     argv = [
         "run",
@@ -168,6 +187,8 @@ def run_task(
     ]
     if offline:
         argv.append("--offline")
+    if workspace:
+        argv.extend(["--workspace", str(workspace_dir)])
     if concurrency is not None:
         # ★ The declared worker pool is a *deployment* fact, not a task property:
         #   a 20–40 block plan legitimately needs the deployment to say it can serve
@@ -207,6 +228,7 @@ def run_task(
             ),
             refused=refused,
             inputs_given=given,
+            workspace=workspace_dir if workspace else None,
         )
 
     exits = _exits_from_run(result)
@@ -269,4 +291,5 @@ def run_task(
         snapshot_refs=tuple(sorted(result.snapshots)),
         inputs_given=given,
         truth=verdict_truth,
+        workspace=workspace_dir if workspace else None,
     )

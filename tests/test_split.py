@@ -3,6 +3,10 @@ violations but are not."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
+ACCEPTANCE = Path(__file__).resolve().parents[1] / "acceptance"
+
 from fakes import (
     bundle,
     constraint,
@@ -15,6 +19,7 @@ from fakes import (
 
 from bobanana6.core.model import PlanCosts
 from bobanana6.core.split import CHECKS, STRUCTURAL_CHECKS, check_split
+from bobanana6.ontology import load_ontology_file
 
 
 def good_plan(**overrides):
@@ -221,3 +226,93 @@ def test_iface_complete_rejects_input_with_no_interface() -> None:
     item = subtask("T-01", output="out.csv", inputs=("ghost.csv",), output_fields=("pd_3y",))
     item_plan = good_plan(subtasks=(item,), interfaces={"out.csv": "s"})
     assert "iface_complete" in report(item=item_plan).codes()
+
+
+# --------------------------------------------------------------------------- #
+# ★ `#33`: split_by_module —— 切口落在模块边界上
+# --------------------------------------------------------------------------- #
+
+MODULE_TASK = """
+task_id: code-convergence
+goal: converge duplicate implementations into one shared abstraction
+version: 1
+deliverables:
+  - {name: input/repo/shared.py, schema: {text: str}}
+  - {name: interface.json, schema: {text: str}}
+  - {name: input/repo/shop_a.py, schema: {text: str}}
+  - {name: input/repo/shop_b.py, schema: {text: str}}
+sources:
+  - {ref: a-source, locator: input/repo/shop_a.py, module: shop_a}
+  - {ref: b-source, locator: input/repo/shop_b.py, module: shop_b}
+  - {ref: the-interface, locator: input/repo/interface.py}
+  - {ref: test-a, locator: input/repo/test_shop_a.py}
+constraints:
+  hard:
+    - {id: C-1, kind: presence, target: input/repo/shared.py, spec: {min_rows: 1}, rationale: "x"}
+    - {id: C-2, kind: presence, target: interface.json, spec: {min_rows: 1}, rationale: "x"}
+    - {id: C-3, kind: presence, target: input/repo/shop_a.py, spec: {min_rows: 1}, rationale: "x"}
+    - {id: C-4, kind: presence, target: input/repo/shop_b.py, spec: {min_rows: 1}, rationale: "x"}
+limits: {max_rounds: 2}
+"""
+
+
+def _module_plan(text: str = MODULE_TASK, strategy: str = "module"):
+    from bobanana6.contract import compile_bundle, parse_contract
+    from bobanana6.core.model import Recon
+    from bobanana6.decompose import Decomposer
+
+    document = parse_contract(text)
+    # ★ 用真题的 ontology（`text` 概念在这里）——fakes 的迷你本体没有它。
+    ontology = load_ontology_file(ACCEPTANCE / "stress" / "code-convergence" / "ontology.yaml").freeze()
+    plan = Decomposer(strategy=strategy).split(
+        document.contract, ontology, Recon(source_ids=tuple(s.ref for s in document.contract.sources))
+    )
+    bundle = compile_bundle(document, plan)
+    return plan, check_split(plan, document.contract, bundle, ontology, frozen_hash=ontology.content_hash())
+
+
+def test_the_module_strategy_cuts_on_module_boundaries() -> None:
+    """★ 一个模块一块（写区互斥），共享抽象与接口在最前面 —— 全部 11 条检查要过。"""
+    plan, report = _module_plan()
+    assert report.ok, report.codes()
+    assert plan.shape == "pipeline"
+    by_id = {block.id: block for block in plan.subtasks}
+    # 接口块 + 共享抽象块 + 两个模块块
+    assert plan.subtasks[0].output == "interface.json"
+    assert plan.subtasks[1].output == "input/repo/shared.py"
+    modules = [block for block in plan.subtasks if block.partition and block.partition.startswith("module:")]
+    assert {block.partition for block in modules} == {"module:shop_a", "module:shop_b"}
+    # 模块块把共享抽象声明成输入（"接口先冻结、再实现"）
+    assert all("input/repo/shared.py" in block.inputs for block in modules)
+    assert by_id["T-01"].partition == "deliverable:interface.json"
+
+
+def test_a_single_module_is_not_fanned_out() -> None:
+    """★ 反向之一：只有一个模块 = 切口不存在 ⇒ 不按模块扇出，回落到 split_single。
+
+    （`split_single` 的约定是"每份交付物一个写块" —— 所以块数不等于 1 也没关系，
+    要看的是**没有任何 `module:` 分区**：切口没有被按模块切开。）
+    """
+    plan, _report = _module_plan(MODULE_TASK.replace("  - {ref: b-source, locator: input/repo/shop_b.py, module: shop_b}\n", ""))
+    partitions = {block.partition for block in plan.subtasks}
+    assert not any(str(part).startswith("module:") for part in partitions), partitions
+    assert plan.refusal == ""
+
+
+def test_a_declared_shared_state_refuses_the_module_cut() -> None:
+    """★ 反向之二（§15.5 的反例形状）：来源共享同一份状态 ⇒ 拒绝按模块扇出。"""
+    plan, _report = _module_plan(MODULE_TASK.replace("version: 1", "version: 1\nsources_share_state: true"))
+    assert plan.decision == "refuse_split"
+    assert "share one state" in plan.refusal
+    assert not any(str(block.partition).startswith("module:") for block in plan.subtasks)
+
+
+def test_the_module_strategy_needs_two_deliverables_for_the_interface_block() -> None:
+    """只有一份交付物时退化成两层（共享抽象 + 模块），不多造一个接口块。"""
+    text = MODULE_TASK.replace("  - {name: interface.json, schema: {text: str}}\n", "").replace(
+        '    - {id: C-2, kind: presence, target: interface.json, spec: {min_rows: 1}, rationale: "x"}\n', ""
+    )
+    plan, report = _module_plan(text)
+    assert report.ok, report.codes()
+    assert plan.subtasks[0].output == "input/repo/shared.py"
+    assert not any(block.output == "interface.json" for block in plan.subtasks)

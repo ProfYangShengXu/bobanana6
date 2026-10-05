@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from ..agentloop.concurrency import RouteTable, RuntimeGate, SessionRegistry
@@ -48,7 +49,7 @@ from ..services.checks import BlockJudge
 from ..services.registry import build_registry
 from ..sources import SnapshotStore
 from ..sources.form import forms_for
-from .produce import LoopIOImpl, ResponseFormatSupport
+from .produce import LoopIOImpl, ResponseFormatSupport, write_region
 
 __all__ = [
     "BlockDeclined",
@@ -225,6 +226,8 @@ class BlockRuntime:
     client: LLMClient
     store: SnapshotStore
     contract: TaskContract
+    #: ★ `#33`: 工作区（代码类产物落盘在这里）；`None` = 这个部署没有工作区。
+    workspace: Path | None = None
     #: Replaced by the runner with the per-run context (snapshots, injected
     #: ``now``, limits, custom checks) as soon as they exist.
     context: CheckContext = field(default_factory=CheckContext)
@@ -278,6 +281,8 @@ class BlockRuntime:
             source_id=subtask.id,
             log=self.event_log,
             task_id=self.contract.task_id,
+            workspace=self.workspace,
+            write_region=write_region(self.contract, subtask),
             epoch=self.epoch,
             response_format=self.response_format,
         )

@@ -25,7 +25,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from ..core.model import Ontology, PlanCosts, Recon, SplitPlan, Subtask, TaskContract
+from ..core.model import (
+    Ontology,
+    PlanCosts,
+    Recon,
+    SourceRef,
+    SplitPlan,
+    Subtask,
+    TaskContract,
+)
 from ..core.ontology import map_field
 from .budget import RoundBudget, can_refine
 
@@ -38,7 +46,7 @@ __all__ = [
     "split_single",
 ]
 
-STRATEGIES: tuple[str, ...] = ("source", "field", "single")
+STRATEGIES: tuple[str, ...] = ("source", "field", "module", "single")
 
 
 def estimate_costs(block_count: int) -> PlanCosts:
@@ -125,16 +133,12 @@ def split_by_source(
     keys = _source_keys(contract, recon)
     if len(keys) < 2:
         return split_single(contract, ontology, round=round, version=version)
-    if contract.sources_share_state:
-        # ★ ③: 判据是【声明】：这些来源共享同一份状态，按来源扇出就是 fake parallelism。
-        #   注意这不是"来源数不够"—— 5 个来源也照样回落（判据换掉了的证明）。
-        return split_single(
-            contract,
-            ontology,
-            round=round,
-            version=version,
-            refusal="the contract declares the sources share one state; a split by source would cut it",
-        )
+    # ★ ③: 判据是【声明】：这些来源共享同一份状态，按来源扇出就是 fake parallelism。
+    #   注意这不是"来源数不够"—— 5 个来源也照样回落（判据换掉了的证明）。
+    #   ★ `#33`: 这一处判断与 split_by_module 共用（同一条判据只写一遍）。
+    refusal = _shared_state_refusal(contract, ontology, round=round, version=version, axis="source")
+    if refusal is not None:
+        return refusal
 
     part_fields = _deliverable_fields(contract) or ("value",)
     interfaces: dict[str, str] = {}
@@ -157,6 +161,160 @@ def split_by_source(
             )
         )
     blocks.extend(_merge_blocks(contract, ontology, parts, interfaces, first_id=len(keys) + 1, axis="source"))
+    return SplitPlan(
+        task_id=contract.task_id,
+        version=version,
+        round=round,
+        subtasks=tuple(blocks),
+        shape="pipeline",
+        interfaces=interfaces,
+        recon_evidence=recon.evidence if recon is not None else "",
+        costs=estimate_costs(len(blocks)),
+    )
+
+
+def _shared_state_refusal(
+    contract: TaskContract,
+    ontology: Ontology,
+    *,
+    round: int,
+    version: int,
+    axis: str,
+) -> SplitPlan | None:
+    """★ 判据只有一条：契约声明"这些来源共享同一份状态" → 拒绝扇出、回落单块。
+
+    ★ `#33`: 按来源与按模块两个策略**共用这一处** —— 判据写在两遍会让它自己的
+    mutation 锚点不再唯一（`tools/reverse_validation.py` 的 preflight 会当场报），
+    更糟的是两份判断迟早会长歪。
+    """
+    if contract.sources_share_state:
+        return split_single(
+            contract,
+            ontology,
+            round=round,
+            version=version,
+            refusal=(
+                "the contract declares the sources share one state; "
+                f"a split by {axis} would cut it"
+            ),
+        )
+    return None
+
+
+def _modules(contract: TaskContract) -> dict[str, tuple[SourceRef, ...]]:
+    """`{模块名: 它的来源们}` —— 只认**声明**（`sources[].module`），不猜路径/语言。"""
+    grouped: dict[str, list[SourceRef]] = {}
+    for source in contract.sources:
+        if source.module:
+            grouped.setdefault(source.module, []).append(source)
+    return {name: tuple(refs) for name, refs in grouped.items()}
+
+
+def split_by_module(
+    contract: TaskContract,
+    ontology: Ontology,
+    recon: Recon | None = None,
+    *,
+    round: int = 1,
+    version: int = 1,
+) -> SplitPlan:
+    """★ `#33`: 一个**模块**一块（写区互斥），共享抽象那一块**排在最前**。
+
+    与 `split_by_source` 的差别就是 §15.5 要的那个轴：切口落在**模块边界**上，而不是
+    "一个来源一块"。模块由契约声明（`sources[].module`），壳体不去解析路径猜包结构。
+
+    约定（写在这里，别处不重复）：**契约的第一份交付物 = 共享抽象**。
+    它先被实现（T-01），模块块**把它声明成自己的输入**（"接口先冻结、再实现"），
+    再各自改自己模块内的文件 —— 所以每块只改自己写区里的那几个文件。
+
+    ★ 全局测试挂在本轮**最后一块**上：那时所有模块都改完了，"块内过 ≠ 整体过"才有意义。
+
+    ★ 少于两个模块 → 回落单块（切口不存在，不硬拆 —— 这就是 §15.5 反例形状的挡板）。
+    """
+    modules = _modules(contract)
+    if len(modules) < 2:
+        return split_single(contract, ontology, round=round, version=version)
+    refusal = _shared_state_refusal(contract, ontology, round=round, version=version, axis="module")
+    if refusal is not None:
+        return refusal
+    if not contract.deliverables:
+        return split_single(contract, ontology, round=round, version=version)
+
+    declared = {deliverable.name: deliverable for deliverable in contract.deliverables}
+    shared = contract.deliverables[0]
+    #: ★ 约定之二：**第二份交付物 = 冻结的接口清单**（先定，再实现）。没有就只出两层。
+    #: 但它必须**【不是】任何模块的产出** —— 否则接口块会和模块块抢同一个 output
+    #: （`duplicate_output` 会当场拒绝；那说明契约里根本没有独立的接口产物）。
+    module_locations = {refs[0].locator for refs in modules.values() if refs}
+    interface_deliverable = None
+    if len(contract.deliverables) > 1 and contract.deliverables[1].name not in module_locations:
+        interface_deliverable = contract.deliverables[1]
+
+    def fields_of(name: str) -> tuple[str, ...]:
+        """这一块产出那份交付物自己的字段 —— 不是全部交付物字段的并集。"""
+        spec = declared.get(name)
+        return tuple((spec.schema if spec is not None else None) or {"text": "str"})
+
+    interfaces: dict[str, str] = {}
+    blocks: list[Subtask] = []
+    if interface_deliverable is not None:
+        # ① 接口先冻结：这一块把冻结的接口读成数据，后面每一块都拿它当输入。
+        interfaces[interface_deliverable.name] = _descriptor(fields_of(interface_deliverable.name))
+        blocks.append(
+            Subtask(
+                id="T-01",
+                goal=f"freeze the interface {interface_deliverable.name!r} the implementation must match",
+                inputs=(),
+                output=interface_deliverable.name,
+                contract_ref=contract.task_id,
+                axis="module",
+                mode="write",
+                partition=f"deliverable:{interface_deliverable.name}",
+                output_fields=_mapped(ontology, fields_of(interface_deliverable.name)),
+            )
+        )
+    frozen_input = (interface_deliverable.name,) if interface_deliverable is not None else ()
+    shared_id = f"T-{len(blocks) + 1:02d}"
+    interfaces[shared.name] = _descriptor(fields_of(shared.name))
+    blocks.append(
+        Subtask(
+            id=shared_id,
+            goal=f"implement the shared abstraction {shared.name!r} the modules will delegate to",
+            inputs=frozen_input,
+            output=shared.name,
+            contract_ref=contract.task_id,
+            axis="module",
+            mode="write",
+            partition=f"deliverable:{shared.name}",
+            expects=tuple((name, interfaces[name]) for name in frozen_input),
+            output_fields=_mapped(ontology, fields_of(shared.name)),
+        )
+    )
+    module_inputs = (*frozen_input, shared.name)
+    module_outputs: list[str] = []
+    for index, name in enumerate(sorted(modules), start=len(blocks) + 1):
+        refs = modules[name]
+        # 模块的产出 = 它第一份来源的**路径**（工作区相对）—— 与写区、交付物名字同一套。
+        output = refs[0].locator or f"{name}.source"
+        module_outputs.append(output)
+        interfaces[output] = _descriptor(("text",))
+        blocks.append(
+            Subtask(
+                id=f"T-{index:02d}",
+                goal=f"converge module {name!r} onto the shared abstraction",
+                # ★ 模块块**声明共享抽象（和冻结的接口）为输入** —— 接口因此真的被送到
+                #   它手上，而不是"库文件恰好在工作区里"。
+                inputs=module_inputs,
+                output=output,
+                contract_ref=contract.task_id,
+                axis="module",
+                mode="write",
+                # ★ 写区互斥：partition 就是模块本身 —— 同级写者不会共享它。
+                partition=f"module:{name}",
+                expects=tuple((item, interfaces[item]) for item in module_inputs),
+                output_fields=_mapped(ontology, fields_of(output)),
+            )
+        )
     return SplitPlan(
         task_id=contract.task_id,
         version=version,
@@ -298,4 +456,6 @@ class Decomposer:
             return split_by_source(contract, ontology, recon, round=round, version=version)
         if self._strategy == "field":
             return split_by_field(contract, ontology, round=round, version=version)
+        if self._strategy == "module":
+            return split_by_module(contract, ontology, recon, round=round, version=version)
         return split_single(contract, ontology, round=round, version=version)

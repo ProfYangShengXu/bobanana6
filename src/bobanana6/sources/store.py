@@ -84,6 +84,10 @@ class SnapshotStore:
         except OSError as exc:
             raise SourceError(f"snapshot {snapshot.ref!r}: cannot read {snapshot.body_path}: {exc}") from exc
 
+    def digest(self, snapshot: Snapshot) -> str:
+        """这份冻结载体的 sha256（`#33` 的装配期比对用它，另一侧是工作区里那份）。"""
+        return hashlib.sha256(self.read(snapshot)).hexdigest()
+
     def verify(self, snapshot: Snapshot) -> bool:
         """Re-hash the frozen carrier against its name. Content addressing, checked."""
         try:

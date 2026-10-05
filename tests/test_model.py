@@ -37,8 +37,8 @@ from bobanana6.core.model import (
 from bobanana6.core.ports import ToolSet
 
 
-def test_known_kinds_is_exactly_fourteen() -> None:
-    assert len(KNOWN_KINDS) == 14
+def test_known_kinds_is_exactly_fifteen() -> None:
+    assert len(KNOWN_KINDS) == 15
 
 
 def test_frozen_value_object_rejects_assignment() -> None:

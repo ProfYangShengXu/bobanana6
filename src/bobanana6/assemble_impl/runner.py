@@ -22,6 +22,7 @@ Nothing in this module decides whether a block is good -- it calls
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -145,6 +146,9 @@ class Runner:
     now: str
     #: Monotonic seconds for evidence timestamps, injected for the same reason.
     epoch: Callable[[], float]
+    #: ★ `#33`: the workspace the blocks write code into (``None`` = none declared).
+    #: The frozen-vs-workspace comparison happens outside; core only compares digests.
+    workspace: Path | None = None
     #: ★ A11: whoever turns a frozen carrier into rows core may judge. Injected at
     #: the assembly point; ``None`` means the content check cannot run and the
     #: chain honestly degrades to the name check.
@@ -215,6 +219,7 @@ class Runner:
             ontology=ontology,
             snapshots=snapshots,
             snapshot_bodies=self._snapshot_bodies(snapshots),
+            frozen_files=self._frozen_files(snapshots),
             unmapped_fields=bundle.unmapped_fields,
             now=self.now,
             limits=self.limits,
@@ -431,6 +436,29 @@ class Runner:
 
         evidence = RecordedEvidence()
         return {SHELL_COMMAND_CHECK: shell_command_check(evidence, self.epoch)}
+
+    def _frozen_files(self, snapshots: Mapping[str, Snapshot]) -> dict[str, tuple[str, str]]:
+        """★ `#33`: 冻结载体 vs 工作区里那份 —— 只算两个摘要，判定在 `core`。
+
+        只观测**契约声明了 locator 且工作区里确实存在**的那几份；没观测到的
+        不写进上下文 —— `frozen_files` 判据会为它具名失败，而不是静默放过。
+        """
+        if self.workspace is None:
+            return {}
+        locators = {source.ref: source.locator for source in self.document.contract.sources}
+        observed: dict[str, tuple[str, str]] = {}
+        for ref, snapshot in sorted(snapshots.items()):
+            locator = locators.get(ref, "")
+            if not locator:
+                continue
+            path = self.workspace / locator
+            if not path.is_file():
+                continue
+            observed[ref] = (
+                self.store.digest(snapshot),
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        return observed
 
     def _snapshot_bodies(self, snapshots: Mapping[str, Snapshot]) -> dict[str, SnapshotBody]:
         """Read every fetched snapshot's frozen rows, once, before any judgment.

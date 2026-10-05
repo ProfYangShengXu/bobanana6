@@ -193,6 +193,10 @@ class BoundChecks(CheckTools):
         }
 
 
+#: 材料来自【声明来源】的切分轴：按来源切、或按模块切（模块块读的仍是那几个来源）。
+SOURCE_READING_AXES: tuple[str, ...] = ("source", "module")
+
+
 def build_toolset(
     *,
     plan: SplitPlan,
@@ -208,11 +212,16 @@ def build_toolset(
     """Bind the tool surface to one block.
 
     ``sources.snapshot`` is granted when the block's axis says its material comes
-    from sources (``axis == "source"``); the declared-input permission is
-    ``subtask.inputs`` and nothing else. ``inherited_sources`` are the snapshots
+    from sources (``axis in SOURCE_READING_AXES`` —— ★ `#33` 加上了 `"module"`：
+    按模块切只换了**切口**，模块块读的仍然是自己那几个声明来源); the declared-input
+    permission is ``subtask.inputs`` and nothing else. ``inherited_sources`` are the snapshots
     the declared inputs came from (a merge block cites those, never its own).
     """
-    sources = BoundSources(authorized=authorized, fetched=fetched) if subtask.axis == "source" else None
+    sources = (
+        BoundSources(authorized=authorized, fetched=fetched)
+        if subtask.axis in SOURCE_READING_AXES
+        else None
+    )
     return ToolSet(
         subtask=subtask.id,
         semantics=BoundSemantics(ontology=ontology),

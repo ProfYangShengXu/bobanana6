@@ -386,7 +386,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "M37-known-kinds-drift",
         "model.py",
-        '        "custom",\n    }\n)',
+        '        "custom",\n',
         '        "customz",\n    }\n)',
         "tests/test_arch_guard.py::test_known_kinds_and_dispatch_table_agree",
         "KNOWN_KINDS silently disagrees with the dispatch table",

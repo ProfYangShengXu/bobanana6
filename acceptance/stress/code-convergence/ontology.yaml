@@ -1,0 +1,20 @@
+# 代码类压力题的本体：模块 / 符号 / 文本。
+# ★ 没有"列名""单位"这类报表概念 —— 代码类的东西在这里。
+domain: python-module-repo
+version: "2026.1"
+
+concepts:
+  module: {label: 模块, kind: entity}
+  symbol: {label: 符号（函数/类名）, kind: attribute}
+  text: {label: 源码文本, kind: attribute}
+  # 接口清单的字段（第四口径判的就是它们）
+  function: {label: 函数名, kind: attribute}
+  params: {label: 参数, kind: attribute}
+  returns: {label: 返回, kind: attribute}
+
+definitions:
+  symbol:
+    version: "2026.1"
+    text: 模块里定义的函数或类；同名符号在多个模块里各有一份实现即视为重复实现，应当收敛到共享抽象
+
+calendar: {timezone: Asia/Shanghai}

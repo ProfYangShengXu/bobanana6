@@ -37,10 +37,10 @@ def run(kind: str, spec: dict, *, target: str = "out.csv", cand=None, ctx=None):
     return check_kind(item, cand if cand is not None else candidate(artifacts=(artifact(),)), ctx or context())
 
 
-def test_registry_covers_all_fourteen_kinds() -> None:
-    assert len(CHECKS) == 14
+def test_registry_covers_all_fifteen_kinds() -> None:
+    assert len(CHECKS) == 15
     assert set(CHECKS) == set(JUDGMENT_ORDER)
-    assert len(JUDGMENT_ORDER) == 14
+    assert len(JUDGMENT_ORDER) == 15
 
 
 def test_unknown_kind_fails_closed() -> None:
@@ -601,3 +601,34 @@ def test_invariant_rejects_disallowed_operators() -> None:
     art = artifact("out.csv", ({"a": 2},))
     outcome = run("invariant", {"expr": "a @ 2"}, cand=candidate(artifacts=(art,)))
     assert not outcome.ok and "not allowed" in outcome.facts[0]
+
+
+# --------------------------------------------------------------------------- #
+# ★ `#33`: frozen_files —— 冻结的载体在装配期还是不是原文
+# --------------------------------------------------------------------------- #
+
+
+def test_frozen_files_accepts_a_byte_identical_carrier() -> None:
+    outcome = run("frozen_files", {"sources": ["test-a"]}, ctx=context(frozen_files={"test-a": ("abc123", "abc123")}))
+    assert outcome.ok, outcome.facts
+
+
+def test_frozen_files_refuses_a_modified_carrier_and_names_both_digests() -> None:
+    """★ 反证的判据侧：工作区里那份被改了 → 具名失败，且两个摘要都报出来。"""
+    outcome = run("frozen_files", {"sources": ["test-a"]}, ctx=context(frozen_files={"test-a": ("abc123", "def456")}))
+    assert not outcome.ok
+    assert "was modified in the workspace" in outcome.facts[0]
+    assert "abc123" in outcome.facts[0] and "def456" in outcome.facts[0]
+
+
+def test_frozen_files_fails_closed_when_nothing_was_observed() -> None:
+    """★ 没观测到 = 没被验证过 ⇒ 具名失败，绝不静默通过。"""
+    outcome = run("frozen_files", {"sources": ["test-a"]})
+    assert not outcome.ok
+    assert "never observed" in outcome.facts[0]
+
+
+def test_frozen_files_needs_a_named_source_when_nothing_was_observed() -> None:
+    outcome = run("frozen_files", {})
+    assert not outcome.ok
+    assert "spec.sources must name at least one" in outcome.facts[0]
