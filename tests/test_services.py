@@ -811,6 +811,82 @@ def test_named_source_refs_reads_nested_specs_and_only_keeps_authorized_names() 
     assert named_source_refs({"a": "interface"}, ()) == ()
 
 
+def _merge_io(tmp_path: Path, answer: str, observe_dir: Path | None) -> Any:
+    """一个真的 `LoopIOImpl`：合并块、手里有一件上游部件、可开观测目录（`#43`）。"""
+    from bobanana6.assemble_impl import LoopIOImpl, ResponseFormatSupport
+    from bobanana6.services import build_registry
+
+    block = subtask("T-04", output="panel.csv", inputs=("part-panel-c.csv",), mode="write", axis="field")
+    parts = {
+        "part-panel-c.csv": {
+            "name": "part-panel-c.csv",
+            "columns": [{"name": "obligor", "dtype": "str"}, {"name": "amount", "dtype": "str"}],
+            "rows": [{"obligor": "C-001", "amount": 90_000.0}],
+            "provenance": [
+                {"value_ref": "part-panel-c.csv:row=0", "snapshot_ref": "panel-c", "source_row": 0, "locator": "L"}
+            ],
+        }
+    }
+    tools = build_toolset(
+        plan=plan(subtasks=(block,), interfaces={"panel.csv": "s"}),
+        subtask=block,
+        contract=contract(deliverables=("panel.csv",)),
+        ontology=mini_ontology(),
+        authorized=(SourceRef(ref="panel-c", locator="input/panel-c.csv"),),
+        fetched={},
+        upstream=parts,
+        checks=BoundChecks(block="T-04"),
+        # ★ 合并块的 `axis` 不在只读来源那一档 ⇒ 它引用的是**上游部件带来的**快照
+        #   （`inherited_sources`）—— 真实 runner 就是这么给的。
+        inherited_sources=("panel-c",),
+    )
+    return LoopIOImpl(
+        client=_AnsweringClient(answer),
+        toolset=tools,
+        registry=build_registry(tools, SnapshotStore(root=tmp_path / "s").read),
+        judge=BlockJudge(bundle=bundle(), subtask=block, context=CheckContext(ontology=mini_ontology())),
+        subtask=block,
+        budget=Budget(max_calls=8, max_wall_s=60, max_output=4096),
+        response_format=ResponseFormatSupport(),
+        observe_dir=observe_dir,
+    )
+
+
+class _AnsweringClient:
+    """每次都答同一份文本（够用来把产出路径走到底）。"""
+
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        return ModelResponse(text=self.answer)
+
+
+def test_the_inheritance_guard_writes_its_observation_only_when_it_refuses(tmp_path: Path) -> None:
+    """★ `#43` 的端到端：真走 `LoopIOImpl.produce` —— 拒收落盘、通过不落盘。"""
+    from bobanana6.assemble_impl.produce import CandidateFormatError
+
+    refused_dir = tmp_path / "refused"
+    io = _merge_io(tmp_path, '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000000.0}]}',
+                   refused_dir)
+    with pytest.raises(CandidateFormatError):
+        io.produce(_state())
+    written = sorted(path.name for path in refused_dir.glob("*.json"))
+    assert written == ["guard-pool-T-04-1.json"], written
+    record = json.loads((refused_dir / written[0]).read_text(encoding="utf-8"))
+    assert record["pool_size"] == 1 and record["output"] == "panel.csv"
+    assert record["nearest"]["difference"] == {"amount": {"sent": 90000000.0, "pool": 90000.0}}
+    assert record["pool_diagnosis"]["overall"] == "pool_non_empty"
+
+    # ★ 反向：逐字搬运（该过）——同一个观测目录里一个文件都不许多
+    accepted_dir = tmp_path / "accepted"
+    ok_io = _merge_io(tmp_path, '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000.0}]}',
+                      accepted_dir)
+    candidate = ok_io.produce(_state()).candidate
+    assert candidate is not None and candidate.provenance
+    assert list(accepted_dir.glob("*")) == []
+
+
 def test_the_system_prompt_is_rendered_from_the_answer_contract(tmp_path: Path) -> None:
     """★ `#42`: 断言**模型真正收到的那串 messages** 里带着契约的字段名与粒度。
 

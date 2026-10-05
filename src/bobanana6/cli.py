@@ -117,11 +117,14 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
     # ★ One limiter, shared by the block's model call and the summarizer callback.
     gate = RuntimeGate(GateConfig(max_concurrent=1, default_timeout=0.0))
     workspace = Path(args.workspace) if getattr(args, "workspace", "") else None
+    # ★ `#43`: 继承守卫的观测目录（只落盘、不改判定）；不给 = 不观测。
+    observe_dir = Path(args.observe_dir) if getattr(args, "observe_dir", "") else None
     runtime = BlockRuntime(
         client=client,
         store=store,
         contract=contract,
         workspace=workspace,
+        observe_dir=observe_dir,
         budget=budget,
         event_log=event_log,
         compression=CompressionPolicy(
@@ -185,6 +188,11 @@ def _parser() -> argparse.ArgumentParser:
         "--workspace",
         default="",
         help="代码类产物的落盘目录（`#33`）；不给 = 这个部署没有工作区，交代码类产物会被具名拒绝",
+    )
+    run.add_argument(
+        "--observe-dir",
+        default="",
+        help="继承守卫拒收时把「池子 + 交上来的行」落盘到这里（`#43`，只观测、不改判定）",
     )
     run.add_argument("--strategy", default="source", choices=("source", "field", "module", "single"), help="切分策略")
     run.add_argument("--offline", action="store_true", help="不接网络：用确定性离线模型与本地源")

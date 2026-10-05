@@ -1382,3 +1382,22 @@ def test_rows_from_different_periods_are_never_paired() -> None:
     context = CheckContext(ontology=ontology)
     assert compare_across([one("T-11", "s11", "2021", "2000000 元"), one("T-18", "s18", "2024", "40")], context).is_empty
     assert len(compare_across([one("T-02", "s02", "2022", "3010000"), one("T-20", "s20", "2022", "9000000")], context).conflicts) == 1
+
+
+# --------------------------------------------------------------------------- #
+# ★ `#43`: 继承守卫的观测是【开关】—— 不开就一个字节都不写（既有读数不受影响）
+# --------------------------------------------------------------------------- #
+
+
+def test_the_harness_can_turn_on_the_inheritance_guard_observation() -> None:
+    """★ `#43`: 开了才有观测目录；不开就是 `None`（默认路径零开销、零文件）。"""
+    task = ACCEPTANCE / "smoke" / "smoke-panel-one-source"
+
+    off = run_task(task, client=EchoToolResultClient(), env={})
+    assert off.observations_dir is None
+
+    on = run_task(task, client=EchoToolResultClient(), env={}, observe=True)
+    assert on.observations_dir is not None
+    assert Path(on.observations_dir).is_dir()
+    # 观测目录由验收层建；这一跑没有继承守卫的拒收，所以里面不该有文件
+    assert list(Path(on.observations_dir).glob("*")) == []

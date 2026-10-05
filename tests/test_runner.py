@@ -953,6 +953,98 @@ def test_the_files_channel_is_documented_where_the_model_can_see_it() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# ★ `#43`: 继承守卫拒收时落观测（池子 + 交上来的行 + 逐键差异）—— 只观测，不改判定
+# --------------------------------------------------------------------------- #
+
+_MERGE_BLOCK = Subtask(
+    id="T-04", goal="merge the parts", inputs=("part-panel-c.csv",), output="panel.csv",
+    contract_ref="panel", axis="field", mode="write",
+)
+_MERGE_PARTS = {
+    "part-panel-c.csv": {
+        "rows": [{"obligor": "C-001", "amount": 90_000.0}],
+        "provenance": [
+            {"value_ref": "part-panel-c.csv:row=0", "snapshot_ref": "panel-c", "source_row": 0, "locator": "L"}
+        ],
+    }
+}
+#: 合并块把 90_000 又乘了一次 —— 它改了自己收到的东西（该拒）
+_TRANSFORMED = '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000000.0}]}'
+#: 逐字搬运（该过）
+_VERBATIM = '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000.0}]}'
+
+
+def test_a_refused_merge_row_explains_itself_with_the_pool_and_the_diff() -> None:
+    """★ `#43`: 拒收文案一个字没变，但**观测**把"它手里有什么"说清楚了。"""
+    from bobanana6.assemble_impl.produce import parse_candidate
+
+    records: list[Mapping[str, Any]] = []
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate(_TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
+                        authorized_sources=("panel-c",), parts=_MERGE_PARTS, observe=records.append)
+    # ① 判定与文案逐字不变
+    assert error.value.feedback()["code"] == "untraceable_row"
+    assert str(error.value) == (
+        "row 0 of 'panel.csv' matches no row this block was handed; "
+        "a merge may only carry values it received"
+    )
+    # ② 观测把池子、交上来的行、逐键差异都落下来
+    assert len(records) == 1
+    record = dict(records[0])
+    assert record["block"] == "T-04" and record["output"] == "panel.csv" and record["row_index"] == 0
+    assert record["pool_size"] == 1 and record["pool"] == [{"obligor": "C-001", "amount": 90000.0}]
+    assert record["pool_refs"][0]["value_ref"] == "part-panel-c.csv:row=0"
+    assert record["pool_refs"][0]["snapshot_ref"] == "panel-c"
+    assert record["pool_diagnosis"]["overall"] == "pool_non_empty"
+    assert record["sent_row"] == {"obligor": "C-001", "amount": 90000000.0}
+    assert record["all_pool_differs"] is True
+    # ③ 最接近的那行 + 逐键差异（**差在哪个键**）
+    nearest = record["nearest"]
+    assert nearest["input_name"] == "part-panel-c.csv" and nearest["keys_equal"] == 1
+    assert list(nearest["difference"]) == ["amount"]
+    assert nearest["difference"]["amount"] == {"sent": 90000000.0, "pool": 90000.0}
+
+
+def test_an_accepted_merge_row_produces_no_observation() -> None:
+    """★ 反向：逐字搬运（该过）不许产生任何观测 —— 观测只在拒收那一刻发生。"""
+    from bobanana6.assemble_impl.produce import parse_candidate
+
+    records: list[Mapping[str, Any]] = []
+    candidate = parse_candidate(_VERBATIM, subtask=_MERGE_BLOCK, source_id="T-04",
+                                authorized_sources=("panel-c",), parts=_MERGE_PARTS, observe=records.append)
+    assert candidate.provenance and records == []
+
+
+def test_a_broken_observer_never_changes_the_verdict() -> None:
+    """★ 硬要求：观测挂了（这里让它直接抛）判定照走，文案也不变。"""
+    from bobanana6.assemble_impl.produce import parse_candidate
+
+    def explode(_record: Mapping[str, Any]) -> None:
+        raise OSError("the disk is on fire")
+
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate(_TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
+                        authorized_sources=("panel-c",), parts=_MERGE_PARTS, observe=explode)
+    assert error.value.feedback()["code"] == "untraceable_row"
+    assert "matches no row this block was handed" in str(error.value)
+
+
+def test_the_three_empty_pool_diagnoses_are_told_apart() -> None:
+    """★ `#43` 的全部理由：`pool_size == 0` 时必须能回答"**为什么**是 0"（三种修法不同）。"""
+    from bobanana6.assemble_impl.produce import _pool_diagnosis
+
+    no_rows = _pool_diagnosis({"part.csv": {"rows": [], "provenance": [{"value_ref": "part.csv:row=0"}]}})
+    assert no_rows["overall"] == "no_rows_at_all"
+    no_provenance = _pool_diagnosis({"part.csv": {"rows": [{"a": 1}], "provenance": []}})
+    assert no_provenance["overall"] == "rows_without_provenance"
+    mismatch = _pool_diagnosis({"part.csv": {"rows": [{"a": 1}], "provenance": [{"value_ref": "other:row=0"}]}})
+    assert mismatch["overall"] == "value_ref_mismatch"
+    assert mismatch["parts"][0]["expected_value_refs"] == ["part.csv:row=0"]
+    assert mismatch["parts"][0]["seen_value_refs"] == ["other:row=0"]
+    assert _pool_diagnosis({})["overall"] == "no_parts"
+
+
+# --------------------------------------------------------------------------- #
 # ★ `#42`: 答案契约是一等对象 —— 六处渲染点必须与它一致，且不许出现第七处
 # --------------------------------------------------------------------------- #
 

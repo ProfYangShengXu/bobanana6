@@ -1101,7 +1101,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "B09-any-input-row-matches",
         "assemble_impl/produce.py",
-        "        matched = [entry for entry in pool if _same_row(row, entry[1])]\n",
+        # ★ `#43`：池子元组带上输入名了（`entry[2]` 才是行）—— 锚点跟着走，语义没变。
+        "        matched = [entry for entry in pool if _same_row(row, entry[2])]\n",
         "        matched = list(pool)  # mutation: any input row will do\n",
         "tests/test_attacks.py::test_a_merge_row_inherits_the_citation_of_the_row_it_was_handed",
         "an invented merge row is handed a citation from an unrelated input row",
@@ -1306,8 +1307,10 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "B19-untraceable-rows-silently-skipped",
         "assemble_impl/produce.py",
-        '        if not matched:\n            reject(\n                "untraceable_row",\n',
-        '        if not matched:\n            continue  # mutation: a row with no source is dropped\n        if False:\n            reject(\n                "untraceable_row",\n',
+        # ★ `#43`：`if not matched:` 与 `reject(` 之间插了观测块 —— 锚点改成 reject 那一句，
+        #   改法（让这一行被静默丢掉）与语义不变。
+        '            reject(\n                "untraceable_row",\n',
+        '            continue  # mutation: a row with no source is dropped\n            reject(\n                "untraceable_row",\n',
         "tests/test_acceptance.py::test_a_merge_that_transforms_is_still_refused",
         "a merge that changes what it was handed is no longer refused",
     ),

@@ -228,6 +228,8 @@ class BlockRuntime:
     contract: TaskContract
     #: ★ `#33`: 工作区（代码类产物落盘在这里）；`None` = 这个部署没有工作区。
     workspace: Path | None = None
+    #: ★ `#43`: 继承守卫的观测目录（拒收时把池子与交上来的行落盘）；`None` = 不观测。
+    observe_dir: Path | None = None
     #: Replaced by the runner with the per-run context (snapshots, injected
     #: ``now``, limits, custom checks) as soon as they exist.
     context: CheckContext = field(default_factory=CheckContext)
@@ -282,6 +284,7 @@ class BlockRuntime:
             log=self.event_log,
             task_id=self.contract.task_id,
             workspace=self.workspace,
+            observe_dir=self.observe_dir,
             write_region=write_region(self.contract, subtask),
             epoch=self.epoch,
             response_format=self.response_format,

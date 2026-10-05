@@ -72,6 +72,8 @@ class TaskRun:
     truth: TruthVerdict | None = None
     #: ★ `#33`: the workspace this run wrote code into (``None`` unless asked for).
     workspace: Path | None = None
+    #: ★ `#43`: where the inheritance guard dropped its observations (``None`` unless asked for).
+    observations_dir: Path | None = None
 
 
 def _materialise(task_dir: Path) -> None:
@@ -137,6 +139,7 @@ def run_task(
     task_file: str = "task.yaml",
     workspace: bool = False,
     workspace_seed: Callable[[Path], None] | None = None,
+    observe: bool = False,
 ) -> TaskRun:
     """Run one acceptance task through the real assembly point.
 
@@ -172,6 +175,12 @@ def run_task(
             # ★ 反证钩子：播种之后、开跑之前动工作区（例如把测试改松）——
             #   "测试文件被改"必须在装配期被抓住，而不是靠没人去改。
             workspace_seed(workspace_dir)
+    # ★ `#43`: 继承守卫的观测目录 —— 拒收时把"池子 + 交上来的行 + 逐键差异"落在这里。
+    #   只落盘、不改判定；不开这个开关就【一个字节都不写】（既有读数不受影响）。
+    observations_dir = base / "_run" / "observations"
+    if observe:
+        shutil.rmtree(observations_dir, ignore_errors=True)
+        observations_dir.mkdir(parents=True, exist_ok=True)
     snapshots = base / "_run" / "snapshots"
     argv = [
         "run",
@@ -189,6 +198,8 @@ def run_task(
         argv.append("--offline")
     if workspace:
         argv.extend(["--workspace", str(workspace_dir)])
+    if observe:
+        argv.extend(["--observe-dir", str(observations_dir)])
     if concurrency is not None:
         # ★ The declared worker pool is a *deployment* fact, not a task property:
         #   a 20–40 block plan legitimately needs the deployment to say it can serve
@@ -229,6 +240,7 @@ def run_task(
             refused=refused,
             inputs_given=given,
             workspace=workspace_dir if workspace else None,
+            observations_dir=observations_dir if observe else None,
         )
 
     exits = _exits_from_run(result)
@@ -292,4 +304,5 @@ def run_task(
         inputs_given=given,
         truth=verdict_truth,
         workspace=workspace_dir if workspace else None,
+        observations_dir=observations_dir if observe else None,
     )

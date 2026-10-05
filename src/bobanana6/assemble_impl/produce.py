@@ -23,6 +23,7 @@ say anything at all when a service ignores layers 1-2.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections import Counter
@@ -399,10 +400,138 @@ def expected_shape(authorized_sources: Sequence[str]) -> str:
     return f"{EXPECTED_SHAPE}{render_ref_domain(authorized_sources, ANSWER_CONTRACT)}"
 
 
+def _row_agreement(sent: Mapping[str, Any], pooled: Mapping[str, Any]) -> tuple[int, int, dict[str, Any]]:
+    """守卫自己怎么比的，观测就怎么报：两边先 `canonical_row`，再逐键 `same_value`。
+
+    ★ 观测不改判定 —— 它只是把 `_same_row` 的那次比较**摊开**给人看。
+    """
+    from ..core.provenance import same_value
+
+    one, other = canonical_row(sent), canonical_row(pooled)
+    keys = sorted(set(one) | set(other))
+    equal = 0
+    difference: dict[str, Any] = {}
+    for key in keys:
+        left, right = one.get(key), other.get(key)
+        if same_value(left, right):
+            equal += 1
+        else:
+            difference[key] = {"sent": left, "pool": right}
+    return equal, len(keys), difference
+
+
+def _pool_diagnosis(parts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """池子为空时**必须能回答"为什么是 0"** —— 三种修法不同的原因分开报。
+
+    (a) 输入的 parts 里压根没有 rows        -> ``no_rows_at_all``
+    (b) 有 rows 但没有 provenance            -> ``rows_without_provenance``
+    (c) 有 provenance 但 value_ref 对不上    -> ``value_ref_mismatch``
+    池子非空（行对不上是真对不上）           -> ``pool_non_empty``
+    """
+    entries: list[dict[str, Any]] = []
+    for name in sorted(parts):
+        payload = parts[name]
+        if not isinstance(payload, Mapping):
+            entries.append({"name": name, "verdict": "not_a_payload"})
+            continue
+        rows = payload.get("rows") or []
+        points = [point for point in (payload.get("provenance") or []) if isinstance(point, Mapping)]
+        expected = [f"{name}:row={index}" for index in range(len(rows))]
+        seen = [str(point.get("value_ref")) for point in points]
+        matched_rows = [ref for ref in expected if ref in set(seen)]
+        if not rows:
+            verdict = "no_rows"
+        elif not points:
+            verdict = "rows_without_provenance"
+        elif not matched_rows:
+            verdict = "value_ref_mismatch"
+        else:
+            verdict = "ok"
+        entries.append(
+            {
+                "name": name,
+                "verdict": verdict,
+                "rows": len(rows),
+                "provenance_points": len(points),
+                "matched_rows": len(matched_rows),
+                "expected_value_refs": expected[:5],
+                "seen_value_refs": seen[:5],
+            }
+        )
+    verdicts = {entry["verdict"] for entry in entries}
+    if not entries:
+        overall = "no_parts"
+    elif verdicts == {"no_rows"}:
+        overall = "no_rows_at_all"
+    elif "rows_without_provenance" in verdicts:
+        overall = "rows_without_provenance"
+    elif "value_ref_mismatch" in verdicts:
+        overall = "value_ref_mismatch"
+    elif verdicts == {"ok"}:
+        overall = "pool_non_empty"
+    else:
+        # 多个部件诊断不同：别挑一个代表（那会把"混合"说成"单一原因"）
+        overall = "mixed:" + "+".join(sorted(verdicts))
+    return {"overall": overall, "parts": entries}
+
+
+def _guard_observation(
+    *,
+    subtask_id: str,
+    artifact_name: str,
+    row_index: int,
+    sent_row: Mapping[str, Any],
+    pool: Sequence[tuple[str, int, Mapping[str, Any], Mapping[str, Any]]],
+    matched: Sequence[Any],
+    parts: Mapping[str, Mapping[str, Any]],
+    epoch: Callable[[], float],
+) -> dict[str, Any]:
+    """把"池子 + 交上来的行 + 逐键差异"攒成一条可机读记录（**只给观察用**）。"""
+    nearest: dict[str, Any] | None = None
+    for name, input_index, pooled_row, point in pool:
+        equal, total, difference = _row_agreement(sent_row, pooled_row)
+        if nearest is None or equal > nearest["keys_equal"]:
+            nearest = {
+                "input_name": name,
+                "input_row_index": input_index,
+                "value_ref": str(point.get("value_ref") or ""),
+                "keys_equal": equal,
+                "keys_total": total,
+                "difference": difference,
+            }
+    return {
+        "block": subtask_id,
+        "output": artifact_name,
+        "row_index": row_index,
+        "pool_size": len(pool),
+        "pool": [dict(row) for _name, _index, row, _point in pool],
+        "pool_refs": [
+            {
+                "input_name": name,
+                "input_row_index": input_index,
+                "value_ref": str(point.get("value_ref") or ""),
+                "snapshot_ref": str(point.get("snapshot_ref") or ""),
+                "source_row": point.get("source_row"),
+            }
+            for name, input_index, _row, point in pool
+        ],
+        "pool_diagnosis": _pool_diagnosis(parts),
+        "sent_row": dict(sent_row),
+        "nearest": nearest,
+        # 走到这条分支就是"一行都没匹配上"；留着它是为了将来守卫有别的分支时口径一致
+        "all_pool_differs": not matched,
+        "at": epoch(),
+    }
+
+
 def _inherited_provenance(
     artifact: Artifact,
     parts: Mapping[str, Mapping[str, Any]],
     reject: Reject,
+    *,
+    observe: Callable[[Mapping[str, Any]], None] | None = None,
+    subtask_id: str = "",
+    epoch: Callable[[], float] = time.monotonic,
 ) -> tuple[Provenance, ...]:
     """Cite a merge block's rows back to the rows it was handed (A11).
 
@@ -413,7 +542,7 @@ def _inherited_provenance(
     system cannot yet tell those apart -- pretending would make the chain lie.
     """
 
-    pool: list[tuple[int, Mapping[str, Any], Mapping[str, Any]]] = []
+    pool: list[tuple[str, int, Mapping[str, Any], Mapping[str, Any]]] = []
     for name in sorted(parts):
         payload = parts[name]
         if not isinstance(payload, Mapping):
@@ -428,19 +557,37 @@ def _inherited_provenance(
         for index, row in enumerate(rows or []):
             point = by_ref.get(f"{name}:row={index}")
             if isinstance(row, Mapping) and isinstance(point, Mapping):
-                pool.append((index, row, point))
+                # ★ `#43`: 池子元组带上**输入名**（观测要按名字报，判定不用它）
+                pool.append((name, index, row, point))
 
     provenance: list[Provenance] = []
     for index, row in enumerate(artifact.rows):
-        matched = [entry for entry in pool if _same_row(row, entry[1])]
+        matched = [entry for entry in pool if _same_row(row, entry[2])]
         if not matched:
+            # ★ `#43`: 先落观测（池子 + 交上来的行 + 逐键差异），**再照原样拒收**。
+            #   观测挂了不许影响判定 —— 调用点包了 try/except。
+            if observe is not None:
+                # ★ 观测挂了不许影响判定：把异常吞在这里，判定照原样走（`#43` 的硬要求）。
+                with contextlib.suppress(Exception):  # 观测不是判定的一部分
+                    observe(
+                        _guard_observation(
+                            subtask_id=subtask_id,
+                            artifact_name=artifact.name,
+                            row_index=index,
+                            sent_row=row,
+                            pool=pool,
+                            matched=matched,
+                            parts=parts,
+                            epoch=epoch,
+                        )
+                    )
             reject(
                 "untraceable_row",
                 f"row {index} of {artifact.name!r} matches no row this block was handed; "
                 "a merge may only carry values it received",
             )
         seen: set[tuple[str, int]] = set()
-        for input_index, _input_row, point in matched:
+        for _name, input_index, _input_row, point in matched:
             snapshot_ref = str(point.get("snapshot_ref") or "")
             raw_source_row = point.get("source_row")
             source_row = raw_source_row if isinstance(raw_source_row, int) else input_index
@@ -535,6 +682,7 @@ def parse_candidate(
     output_cap: int | None = None,
     parts: Mapping[str, Mapping[str, Any]] | None = None,
     hit_output_cap: bool = False,
+    observe: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> Candidate:
     """Read one answer into a ``Candidate``, or fail loudly.
 
@@ -641,7 +789,9 @@ def parse_candidate(
         # ★ A11: the block read no snapshot of its own, so its citations cannot be
         #   positional. They are inherited from the rows it was handed; a row that
         #   matches no input is refused (never given a citation it cannot support).
-        provenance = list(_inherited_provenance(artifact, parts, reject))
+        provenance = list(
+            _inherited_provenance(artifact, parts, reject, observe=observe, subtask_id=subtask.id)
+        )
     versions = document.get("definition_versions")
     return Candidate(
         subtask_id=subtask.id,
@@ -740,6 +890,8 @@ class LoopIOImpl(LoopIO):
     write_region: tuple[str, ...] = ()
     #: 这一块实际落盘了哪些路径（证据；空 = 没交代码类产物）。
     written: tuple[str, ...] = ()
+    #: ★ `#43`: 继承守卫拒收时把"池子 + 交上来的行"落盘到这里（`None` = 不观测，零开销）。
+    observe_dir: Path | None = None
 
     def prompt(self, state: LoopState) -> list[dict[str, Any]]:
         """Stable instructions first, this block next, the transcript last.
@@ -851,6 +1003,7 @@ class LoopIOImpl(LoopIO):
                 output_cap=cap,
                 parts=self._upstream_parts(),
                 hit_output_cap=_hit_output_cap(response.usage, cap),
+                observe=self._guard_observer(),
             )
         except CandidateFormatError as rejected:
             # ★ `#65`: 这一类的生产者【只有模型自己】——答案的结构性错误（不是 JSON /
@@ -863,6 +1016,30 @@ class LoopIOImpl(LoopIO):
         if candidate.files:
             self._persist_files(response.text, candidate)
         return TurnProposal(candidate=candidate, text=response.text)
+
+    def _guard_observer(self) -> Callable[[Mapping[str, Any]], None] | None:
+        """★ `#43`: 继承守卫的观测点 —— 只观测，不改判定。
+
+        写盘失败**静默跳过**（观测挂了不许影响判定）；`observe_dir` 为 `None` 时返回 `None`，
+        调用点连函数调用都不发生（零开销）。
+        """
+        if self.observe_dir is None:
+            return None
+        directory = self.observe_dir
+        block = self.subtask.id
+        seq = self.calls
+
+        def observe(record: Mapping[str, Any]) -> None:
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                target = directory / f"guard-pool-{block}-{seq}.json"
+                target.write_text(
+                    json.dumps(record, ensure_ascii=False, indent=1, default=str), encoding="utf-8"
+                )
+            except Exception:  # noqa: BLE001 — 观测不是判定的一部分
+                return
+
+        return observe
 
     def _persist_files(self, text: str, candidate: Candidate) -> None:
         """把代码类产物落到工作区 —— ★ 位置就是"派活前"约定好的工作区，写区互斥在这里执行。"""
