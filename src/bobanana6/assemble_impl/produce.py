@@ -52,6 +52,16 @@ from ..core.model import (
 from ..core.ports import LLMClient, ToolSet
 from ..services.checks import BlockJudge
 from ..services.registry import ToolRegistry
+from .answer_contract import (
+    ANSWER_CONTRACT,
+    candidate_schema,
+    contract_field,
+    render_files_requirement,
+    render_prompt_contract,
+    render_ref_domain,
+    render_reference_note,
+    render_shape,
+)
 
 __all__ = [
     "CANDIDATE_SCHEMA",
@@ -94,63 +104,16 @@ def _name_of(calls: Sequence[ToolCall], call_id: str) -> str:
     return ""
 
 
-#: The answer contract, in one place: the schema sent to the service and the text
-#: fed back on a rejected answer are two renderings of *this*.
-EXPECTED_SHAPE = (
-    '{"ref": "<source id>", "columns": [{"name": "<column>", "dtype": "str"}], '
-    '"rows": [{"<column>": <value>}]}'
-    # ★ `#35`: 同一个渲染点 —— 代码类产物还要一个可选的 `files`。
-    ' -- and, when this block produces files, "files": {"<workspace-relative path>": "<file content>"}'
-)
+#: ★ `#42`: 答案形状**不再是手写字符串** —— 它是 `answer_contract.py::render_shape()` 的
+#: 渲染结果（取值域 / 粒度 / 例子都在那个模块里，六处渲染点共用同一份）。下面两个常量与
+#: `expected_shape()` / 系统提示 / `reference_note` / `files` 要求，全部由它派生。
+EXPECTED_SHAPE = render_shape(ANSWER_CONTRACT)
 
-#: ``json_schema`` form. Deliberately **not** ``strict: true``: strict mode requires
-#: every property to be required, which would force the model to invent ``hint`` /
-#: ``text`` / ``claims`` on every answer. The tightening that matters here is the
-#: shape of ``columns`` and ``rows``.
-#:
-#: ★ ``ref`` **is** required here, because the parser requires it: the real run
-#: showed the model sending ``columns``/``rows`` and sometimes ``source_id`` --
-#: it was following this schema, which offered ``ref`` as optional and
-#: ``source_id`` as an alternative. A request that describes the answer
-#: differently from the way the answer is judged is the shell eating its own
-#: contract, so the two now say the same thing.
-CANDIDATE_SCHEMA: Mapping[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["ref", "columns", "rows"],
-    "properties": {
-        "ref": {"type": "string"},
-        "hint": {"type": "string"},
-        "text": {"type": "string"},
-        "definition_versions": {"type": "object", "additionalProperties": {"type": "string"}},
-        "columns": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["name"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "dtype": {"type": "string"},
-                    "nullable": {"type": "boolean"},
-                },
-            },
-        },
-        "rows": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-        # ★ `#35`: 代码类产物的交付通道。顶层 `additionalProperties: False` 仍然生效 ——
-        #   这里只开这一个口子，别的未知字段照样被挡。
-        "files": {"type": "object", "additionalProperties": {"type": "string"}},
-        "claims": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["field", "source_id"],
-                "properties": {"field": {"type": "string"}, "value": {}, "source_id": {"type": "string"}},
-            },
-        },
-    },
-}
+#: ★ ``json_schema`` 形式，由契约的结构化形态生成（`answer_contract.py::candidate_schema`）。
+#: 故意**不是** ``strict: true``：strict 要求每个属性都必填，那会逼模型在每次答案里编
+#: ``hint`` / ``text`` / ``claims``。真正要紧的那一处收紧（``columns`` / ``rows`` 的形状、
+#: ``ref`` 必填）都在契约里。**请求描述答案的方式必须与判定答案的方式一致**。
+CANDIDATE_SCHEMA: Mapping[str, Any] = dict(candidate_schema(ANSWER_CONTRACT))
 
 
 def candidate_response_format() -> Mapping[str, Any]:
@@ -426,11 +389,14 @@ def _describe_json_failure(text: str, exc: Exception, *, output_cap: int | None)
 
 
 def expected_shape(authorized_sources: Sequence[str]) -> str:
-    """The required shape, plus *which* snapshots may be cited when we know them."""
+    """The required shape, plus *which* snapshots may be cited when we know them.
+
+    ★ `#42`: 后半句也是渲染 —— `ref` 的**取值域**由契约给（`render_ref_domain`），
+    所以"名单变了、这句话忘了改"这种漂移不会再有。
+    """
     if not authorized_sources:
         return EXPECTED_SHAPE
-    listed = ", ".join(f'"{ref}"' for ref in authorized_sources)
-    return f'{EXPECTED_SHAPE} -- "ref" must be one of: {listed}'
+    return f"{EXPECTED_SHAPE}{render_ref_domain(authorized_sources, ANSWER_CONTRACT)}"
 
 
 def _inherited_provenance(
@@ -535,7 +501,7 @@ def _file_payloads(
     if raw is None:
         return {}
     if not isinstance(raw, Mapping) or not raw:
-        reject("files_not_an_object", "'files' must be a non-empty object of {relative path: text}")
+        reject("files_not_an_object", render_files_requirement(ANSWER_CONTRACT))
     out: dict[str, str] = {}
     total = 0
     for name, content in raw.items():
@@ -618,6 +584,7 @@ def parse_candidate(
     #   路径必须是相对的、不许 `..` 逃逸、不许重复 —— 落盘的动作由外侧做（core 不读盘）。
     files = _file_payloads(document, reject)
 
+    ref_name = contract_field("ref", ANSWER_CONTRACT).name
     # ★ ``ref`` is not optional: it is what makes the chain walkable. Filling it
     #   with the block id would look legal (a non-empty string) and then fail
     #   downstream as "unknown snapshot 'T-01'" -- a wrong place to point at.
@@ -628,7 +595,7 @@ def parse_candidate(
             keys = sorted(str(key) for key in document)
             reject(
                 "missing_ref",
-                f"the answer does not say which snapshot it came from: 'ref' is missing "
+                f"the answer does not say which snapshot it came from: {ref_name!r} is missing "
                 f"(top-level keys it did send: {keys})",
                 expected=shape_with_refs,
             )
@@ -786,16 +753,12 @@ class LoopIOImpl(LoopIO):
         head = [
             {
                 "role": "system",
+                # ★ `#42`: 这一句不再手写形状 —— 字段、取值域、粒度全部从答案契约渲染
+                #   （`answer_contract.py`）。这里只剩"这不是一次自由发挥"与工具授权两句。
                 "content": (
-                    "You are one worker in a split plan. Answer with a single JSON object "
-                    'shaped {"ref": <one of the authorized source ids below>, "columns": [...], "rows": [...]}. '
-                    # ★ `#35`: 代码类产物的交付通道必须【说出来】—— 它是唯一能把文件写进工作区的
-                    #   通道，而在此之前提示里一个字都没提（`#34` 的缺口）。
-                    'If this block produces *files* (a code deliverable), add a "files" field: '
-                    '{"files": {"<workspace-relative path>": "<file content>"}}. '
-                    "Without it nothing lands on disk and the downstream compile/test cannot run. "
-                    "The \"ref\" is not optional: it is how every value is traced back to a snapshot. "
-                    "Use the tools you were given; you may only read what they expose."
+                    "You are one worker in a split plan. "
+                    + render_prompt_contract(ANSWER_CONTRACT)
+                    + " Use the tools you were given; you may only read what they expose."
                 ),
             },
             {"role": "user", "content": json.dumps({"subtask": dict(block), "authorized_sources": authorized}, ensure_ascii=False)},
@@ -848,11 +811,7 @@ class LoopIOImpl(LoopIO):
             #   注记里【不写】"不必再调 `sources.snapshot`"：只给索引时那句话等于把唯一的取法
             #   也否掉（带那句话的那一臂取回 4 次，只给索引的这一臂取回 29 次；n=3，只作旁证）。
             delivered["reference_index"] = list(references)
-            delivered["reference_note"] = (
-                "★ 判据会拿你的产出与上面这些冻结载体对照（它们是**判据的参照物**）。"
-                "原文没有塞进来：需要哪一件就用 `sources.snapshot` 取（逐件、原文）。"
-                '答案仍然必须是 {"ref", "columns", "rows"}。'
-            )
+            delivered["reference_note"] = render_reference_note(ANSWER_CONTRACT)
         return delivered
 
     def _reference_refs(self) -> tuple[str, ...]:

@@ -5,6 +5,13 @@
 
 from __future__ import annotations
 
+from .answer_contract import (
+    ANSWER_CONTRACT,
+    AnswerField,
+    answer_contract_renderings,
+    candidate_schema,
+    contract_field,
+)
 from .produce import (
     CANDIDATE_SCHEMA,
     EXPECTED_SHAPE,
@@ -31,8 +38,10 @@ from .runtime import (
 )
 
 __all__ = [
+    "ANSWER_CONTRACT",
     "CANDIDATE_SCHEMA",
     "EXPECTED_SHAPE",
+    "AnswerField",
     "BlockDeclined",
     "BlockRuntime",
     "BlockRuntimeError",
@@ -45,8 +54,11 @@ __all__ = [
     "RunRefused",
     "RunResult",
     "Runner",
+    "answer_contract_renderings",
     "block_bundle",
     "candidate_response_format",
+    "candidate_schema",
+    "contract_field",
     "expected_shape",
     "llm_summarizer",
     "model_output_cap",

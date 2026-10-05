@@ -1532,8 +1532,9 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "V05-ref-shape-gate-without-the-valid-list",
-        "assemble_impl/produce.py",
-        '    listed = ", ".join(f\'"{ref}"\' for ref in authorized_sources)',
+        # ★ `#42`：这句渲染搬到契约模块了（`render_ref_domain`）——锚点跟着搬。
+        "assemble_impl/answer_contract.py",
+        '    listed = ", ".join(f\'"{name}"\' for name in authorized)',
         '    listed = "the authorized sources"  # mutation: the fix stops naming them',
         "tests/test_runner.py::test_the_shape_gate_names_the_snapshots_that_would_have_been_valid",
         "the model is told a ref is wrong without being told which one is right",
@@ -1548,11 +1549,38 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "V08-schema-makes-ref-optional-again",
-        "assemble_impl/produce.py",
-        '    "required": ["ref", "columns", "rows"],',
-        '    "required": ["columns", "rows"],',
+        # ★ `#42`：必填表现在由契约生成 —— 等价改法是让契约里的 ref 变成非必填。
+        "assemble_impl/answer_contract.py",
+        '        "required": [answer_field.name for answer_field in contract if answer_field.required],',
+        '        "required": [a.name for a in contract if a.required and a.name != "ref"],  # mutation: ref optional again',
         "tests/test_services.py::test_candidate_response_format_carries_the_answer_schema",
         "the request describes the answer differently from the way it is judged",
+    ),
+    # -- #42：答案契约是单一来源，六处渲染点不许再手写 ------------------------- #
+    Mutation(
+        "AC01-answer-shape-loses-the-granularity",
+        "assemble_impl/answer_contract.py",
+        """        lines.append(f'  -- "{answer_field.name}"{condition} = {answer_field.granularity}')""",
+        """        lines.append(f'  -- "{answer_field.name}"{condition}')  # mutation: 粒度不再说""",
+        "tests/test_runner.py::test_every_rendering_of_the_answer_contract_agrees_with_it",
+        "字段的粒度（最缺的那一件）从形状里消失，六处渲染点仍会看着都对",
+    ),
+    Mutation(
+        "AC02-seventh-hand-written-rendering-point",
+        "assemble_impl/produce.py",
+        "EXPECTED_SHAPE = render_shape(ANSWER_CONTRACT)",
+        'EXPECTED_SHAPE = render_shape(ANSWER_CONTRACT)\n'
+        "_HAND_WRITTEN = '{\"ref\": …, \"columns\": …, \"rows\": …}'  # mutation: 第七处手写",
+        "tests/test_runner.py::test_no_second_hand_written_source_of_the_answer_shape",
+        "契约之外又手写了一遍答案形状 —— 下一个人还得记得同步它",
+    ),
+    Mutation(
+        "AC03-reference-note-drops-the-granularity",
+        "assemble_impl/answer_contract.py",
+        '        f"答案仍然必须是 {{{names}}} —— 其中 {ref.name} 的粒度是：{ref.granularity}。"',
+        '        f"答案仍然必须是 {{{names}}}。"',
+        "tests/test_runner.py::test_every_rendering_of_the_answer_contract_agrees_with_it",
+        "把一个渲染点的粒度整句删掉（`#41` 缩水那一版的形状），守卫必须红",
     ),
     Mutation(
         "V07-runtime-invents-its-own-output-cap",

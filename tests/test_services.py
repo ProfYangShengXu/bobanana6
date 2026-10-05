@@ -811,6 +811,20 @@ def test_named_source_refs_reads_nested_specs_and_only_keeps_authorized_names() 
     assert named_source_refs({"a": "interface"}, ()) == ()
 
 
+def test_the_system_prompt_is_rendered_from_the_answer_contract(tmp_path: Path) -> None:
+    """★ `#42`: 断言**模型真正收到的那串 messages** 里带着契约的字段名与粒度。
+
+    （不 grep 源码：渲染器存在但没人调，是 `AGENTS §7⑬` 记过的那类"写下来又没人读"。）
+    """
+    from bobanana6.assemble_impl.answer_contract import ANSWER_CONTRACT
+
+    io = _produce_io(tmp_path, _SchemaRefusingClient())
+    system = next(message["content"] for message in io.prompt(_state()) if message["role"] == "system")
+    for answer_field in ANSWER_CONTRACT:
+        assert f'"{answer_field.name}"' in system, answer_field.name
+        assert answer_field.granularity in system, answer_field.name
+
+
 # --------------------------------------------------------------------------- #
 # ★ #39: 工具体检 —— 那个 bug 只在【运行期】现形（字段遮蔽方法）
 #   `BoundTask` 的 dataclass 字段 `contract` 遮蔽了同名方法 `contract()`（实例 `__dict__`

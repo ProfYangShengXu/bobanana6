@@ -926,15 +926,21 @@ def test_every_spelling_of_a_missing_cell_becomes_the_same_representation() -> N
 
 
 def test_the_files_channel_is_documented_where_the_model_can_see_it() -> None:
-    """★ `#35`: 代码类产物的交付通道必须【说出来】——三处缺一不可。
+    """★ `#35`：代码类产物的交付通道必须【说出来】——三处缺一不可。
 
     修前的缺口（`#34`）：判据要求工作区里有文件，而这三处一条都没提 `files`
     ⇒ 真模型没有门（确定性读数：不写 files 的答案 → 工作区零产物、块级 0.6）。
+
+    ★ `#42`：不再 grep 源码字符串 —— 断言**渲染出来的**三处（`AGENTS §7⑬`：断言模型
+    真正收到的东西，不断言"某个函数里写着某个词"）。
     """
+    from bobanana6.assemble_impl.answer_contract import answer_contract_renderings
     from bobanana6.assemble_impl.produce import CANDIDATE_SCHEMA, EXPECTED_SHAPE
 
-    # ① 被判据拒绝时喂回去的"该长什么样"
+    renderings = answer_contract_renderings(("interface",))
+    # ① 被判据拒绝时喂回去的"该长什么样"（`expected`）
     assert "files" in EXPECTED_SHAPE
+    assert "workspace-relative path" in renderings["shape"]
     # ② 服务端 schema：`additionalProperties: False` 下必须**显式**开这一个口子
     assert CANDIDATE_SCHEMA["additionalProperties"] is False
     assert CANDIDATE_SCHEMA["properties"]["files"] == {
@@ -942,9 +948,111 @@ def test_the_files_channel_is_documented_where_the_model_can_see_it() -> None:
         "additionalProperties": {"type": "string"},
     }
     # ③ 系统提示里那句人话（它是模型唯一能读到的交付说明）
-    source = (Path(__file__).resolve().parents[1] / "src" / "bobanana6" / "assemble_impl" / "produce.py").read_text(
-        encoding="utf-8"
+    assert "files" in renderings["prompt"]
+    assert "workspace-relative path" in renderings["prompt"]
+
+
+# --------------------------------------------------------------------------- #
+# ★ `#42`: 答案契约是一等对象 —— 六处渲染点必须与它一致，且不许出现第七处
+# --------------------------------------------------------------------------- #
+
+#: 散文渲染：这些字段的**粒度**必须逐字出现在文本里。
+_RENDERING_GRANULARITY: dict[str, tuple[str, ...]] = {
+    "shape": ("ref", "columns", "rows", "files"),
+    "prompt": ("ref", "columns", "rows", "files"),
+    "files_requirement": ("files",),
+    "reference_note": ("ref",),  # 它只讲"参照物 vs 来源"，字段名点名三个、粒度只讲 ref
+}
+
+#: 这些渲染点必须**点名**这些字段（不必复述粒度）。
+_RENDERING_NAMES: dict[str, tuple[str, ...]] = {
+    "reference_note": ("ref", "columns", "rows"),
+}
+
+#: 只渲染取值域的散文渲染点：字段名 + 取值域。
+_RENDERING_DOMAIN: dict[str, tuple[str, ...]] = {"ref_domain": ("ref",)}
+
+#: 结构化渲染：粒度没法是散文，改成按结构比对。
+_STRUCTURED_RENDERINGS: tuple[str, ...] = ("schema",)
+
+
+def test_every_rendering_of_the_answer_contract_agrees_with_it() -> None:
+    """★ `#42`: 六处渲染点，任何一处缺字段、缺粒度、或与结构化形态对不上 → 红。
+
+    这一族病复发过四次（`#34` 漏 `files`、`#37` 参照物没送到、`#41` `reference_note` 缩水、
+    现在 `ref` 粒度），每次都是"某一处漏同步"。这条测试把"同步"变成机器的事。
+    """
+    from bobanana6.assemble_impl.answer_contract import (
+        ANSWER_CONTRACT,
+        answer_contract_renderings,
+        candidate_schema,
+        contract_field,
     )
-    prompt = source[source.index("    def prompt(self, state: LoopState)") : source.index("    def _delivered_inputs(")]
-    assert "files" in prompt
-    assert "workspace-relative path" in prompt
+
+    renderings = answer_contract_renderings(("interface", "shop-a-source"))
+    expected_keys = (
+        set(_RENDERING_GRANULARITY) | set(_RENDERING_NAMES) | set(_RENDERING_DOMAIN) | set(_STRUCTURED_RENDERINGS)
+    )
+    assert set(renderings) == expected_keys, "六处渲染点，不多不少"
+
+    for rendering_name, covered in _RENDERING_GRANULARITY.items():
+        text = renderings[rendering_name]
+        for field_name in covered:
+            answer_field = contract_field(field_name)
+            assert f'"{answer_field.name}"' in text, (rendering_name, field_name, "字段名不在")
+            assert answer_field.granularity in text, (rendering_name, field_name, "粒度不在（逐字来自契约）")
+
+    for rendering_name, covered in _RENDERING_NAMES.items():
+        text = renderings[rendering_name]
+        for field_name in covered:
+            assert f'"{contract_field(field_name).name}"' in text, (rendering_name, field_name, "字段名不在")
+
+    for rendering_name, covered in _RENDERING_DOMAIN.items():
+        text = renderings[rendering_name]
+        for field_name in covered:
+            answer_field = contract_field(field_name)
+            assert f'"{answer_field.name}"' in text, (rendering_name, field_name, "字段名不在")
+            assert answer_field.domain in text, (rendering_name, field_name, "取值域不在（逐字来自契约）")
+
+    # 结构化那一份：必填表与每个属性的形态都逐字来自契约
+    schema = candidate_schema()
+    assert schema["required"] == [f.name for f in ANSWER_CONTRACT if f.required]
+    for answer_field in ANSWER_CONTRACT:
+        assert schema["properties"][answer_field.name] == dict(answer_field.json_schema)
+
+    # 取值域那一处：名单必须是这一块【逐字】的授权名单
+    assert '"interface"' in renderings["ref_domain"] and '"shop-a-source"' in renderings["ref_domain"]
+
+    # ★ 模型真正收到的那条拒绝反馈 = 形状 + 取值域拼起来：名字/取值域/粒度必须【同时】在里面
+    from bobanana6.assemble_impl.produce import expected_shape
+
+    combined = expected_shape(["interface", "shop-a-source"])
+    ref = contract_field("ref")
+    assert ref.granularity in combined and ref.domain in combined and ref.name in combined
+
+
+def test_no_second_hand_written_source_of_the_answer_shape() -> None:
+    """★ `#42`: 契约之外的任何文件里再手写一遍形状 → 红（第七处渲染点不许出现）。
+
+    机制：扫 `src/bobanana6/**` 的字符串常量，凡**同时**出现 ≥2 个契约字段名的，
+    只允许待在 `answer_contract.py` 里（那是契约本体）。
+    """
+    import ast
+
+    from bobanana6.assemble_impl.answer_contract import ANSWER_CONTRACT
+
+    root = Path(__file__).resolve().parents[1] / "src" / "bobanana6"
+    contract_module = root / "assemble_impl" / "answer_contract.py"
+    field_names = tuple(answer_field.name for answer_field in ANSWER_CONTRACT)
+    offenders: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts or path == contract_module:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                continue
+            present = [name for name in field_names if f'"{name}"' in node.value or f"'{name}'" in node.value]
+            if len(present) >= 2:
+                offenders.append(f"{path.relative_to(root)}:{node.lineno} {present}")
+    assert offenders == [], f"契约之外又出现了手写的答案形状：{offenders}"
