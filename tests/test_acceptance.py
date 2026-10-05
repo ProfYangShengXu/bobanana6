@@ -1473,3 +1473,39 @@ def test_a_judge_command_that_breaks_at_run_time_blames_the_tool(tmp_path: Path)
     assert run.refused is None  # 预检放行（它看不进引号里面），判定那一步才失败
     assert run.report.attribution_accuracy == 1.0, run.report.notes
     assert run.report.block_pass_rate < 1.0
+
+
+def test_a_fresh_task_whose_judge_cds_into_a_runtime_workspace_is_not_refused(tmp_path: Path) -> None:
+    """★ `#46`：判据命令 `cd` 到**壳在运行期才创建**的工作区 ⇒ 门必须放行。
+
+    改前这里是 `RunRefused("judge", …("C-judge:cwd_missing",))` + 0 次模型调用 —— 也就是说
+    这道题在"从没跑过"的状态下永远起不来，而**历史上跑过、`_run` 残留**的同类题却能过
+    （门在给运气放行）。
+    """
+    task = _task_with_a_judge_command(
+        tmp_path, 'cd _run/workspace && python3 -c "print(1)"', name="fresh-runtime-workspace"
+    )
+    assert not (task / "_run").exists()  # 前提：新题，没有运行期目录
+
+    client = _CountingClient(_ScriptedBlocks())
+    run = run_task(task, client=client, env={})
+
+    assert run.refused is None, (run.refused, run.refused_codes)
+    assert client.calls > 0, "门放行之后应该真的派活"
+
+
+def test_a_judge_command_referencing_a_missing_absolute_path_is_still_refused(tmp_path: Path) -> None:
+    """★ `#46` 的另一半：作者**事先写下**的绝对路径不存在 ⇒ 照样具名拒 + 0 次模型调用。
+
+    （别为了修上面那条，把"运行期不会改变的东西"也一起放松了。）
+    """
+    missing = tmp_path / "no-such-absolute-dir"
+    task = _task_with_a_judge_command(
+        tmp_path, f'cd {missing} && python3 -c "print(1)"', name="missing-absolute-dir"
+    )
+    client = _CountingClient(_ScriptedBlocks())
+    run = run_task(task, client=client, env={})
+
+    assert run.refused == "judge", run.refused
+    assert run.refused_codes == ("C-judge:cwd_missing",), run.refused_codes
+    assert client.calls == 0, "判据命令跑不起来时一个模型都不该被叫"

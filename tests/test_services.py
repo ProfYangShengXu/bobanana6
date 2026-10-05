@@ -424,10 +424,57 @@ def test_judge_environment_preflight_is_silent_on_a_command_that_can_run(tmp_pat
     from bobanana6.services import judge_environment_problems
 
     good = _shell_constraint("C-1", f'{sys.executable} -c "print(1)"')
-    missing_dir = _shell_constraint("C-2", "cd _run/workspace/input && python3 -c \"print(1)\"")
     assert judge_environment_problems((good,), cwd=tmp_path) == ()
-    problems = judge_environment_problems((missing_dir,), cwd=tmp_path)
+
+
+def test_a_runtime_created_workspace_directory_is_not_a_reason_to_refuse(tmp_path: Path) -> None:
+    """★ `#46`: `_run/workspace` 是**壳在运行期自己创建**的目录（第一次写产物才落盘）。
+
+    门在预检时要求它已经存在，就会拦死所有"从没跑过"的新题，并且只给"历史上跑过、目录残留"
+    的题放行 —— 这是拿运行期状态当判据。相对目标不判存在性。
+    """
+    from bobanana6.services import judge_environment_problems
+
+    fresh = _shell_constraint(
+        "C-2", f'cd _run/workspace/input && {sys.executable} -m pytest tests/test_x.py -q'
+    )
+    assert judge_environment_problems((fresh,), cwd=tmp_path) == ()
+
+
+def test_an_absolute_directory_that_does_not_exist_is_still_refused(tmp_path: Path) -> None:
+    """★ 另一半：作者**事先写下**的绝对路径不存在，就该拒（没人替他创建）。"""
+    from bobanana6.services import judge_environment_problems
+
+    missing = tmp_path / "no-such-absolute-dir"
+    problems = judge_environment_problems(
+        (_shell_constraint("C-2", f'cd {missing} && {sys.executable} -c "print(1)"'),), cwd=tmp_path
+    )
     assert [code for code, _detail in problems] == ["C-2:cwd_missing"], problems
+
+
+def test_a_missing_relative_interpreter_under_a_visible_cwd_is_still_refused(tmp_path: Path) -> None:
+    """★ `#46` 不许把解释器检查一起放松：相对解释器在**看得见的** cwd 下缺了，照样拒。"""
+    from bobanana6.services import judge_environment_problems
+
+    problems = judge_environment_problems(
+        (_shell_constraint("C-2", 'cd . && ./definitely-missing-binary-42 -q'),), cwd=tmp_path
+    )
+    assert [code for code, _detail in problems] == ["C-2:interpreter_missing"], problems
+    # 而藏在运行期目录里的相对解释器，此刻无从判断 ⇒ 不拒
+    hidden = _shell_constraint("C-3", 'cd _run/workspace && ./run.sh -q')
+    assert judge_environment_problems((hidden,), cwd=tmp_path) == ()
+
+
+def test_a_module_probe_still_runs_when_the_cwd_is_created_at_run_time(tmp_path: Path) -> None:
+    """★ `#46`: 丢进运行期目录不等于把"点名的模块导不进来"这条预检也丢掉
+    （第三方包能不能 import 不取决于工作区）。"""
+    from bobanana6.services import judge_environment_problems
+
+    problems = judge_environment_problems(
+        (_shell_constraint("C-2", f'cd _run/workspace && {sys.executable} -m definitely_not_installed_module_42'),),
+        cwd=tmp_path,
+    )
+    assert [code for code, _detail in problems] == ["C-2:module_missing"], problems
 
 
 def test_a_failed_assertion_is_not_mistaken_for_a_broken_environment() -> None:

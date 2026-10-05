@@ -111,8 +111,17 @@ def judge_environment_problems(
     """★ `#44`: 派活前把"判据命令在这个环境里根本跑不起来"找出来（具名、可指到解释器）。
 
     照 ontology 门的先例：跑不起来 ⇒ 具名拒 + **0 次模型调用**，而不是跑完整轮之后记成
-    "判据太严"。只检查**环境**：解释器/命令在不在、点名的模块导不导得进、`cd` 的目录在不在；
-    **不碰命令的输入文件**（那些正是模型要产出的）。
+    "判据太严"。只检查**环境**：解释器/命令在不在、点名的模块导不导得进、`cd` 的目录在不在
+    （★ 只判**绝对**目标 —— 见下条）；**不碰命令的输入文件**（那些正是模型要产出的）。
+
+    ★★ `#46`：只判**运行期不会改变的东西**。判据命令里的 `_run/workspace` 这类目录是
+    **壳在运行期自己创建**的（工作区在第一次写产物时才落盘），门在预检时要求它已经存在，
+    就会：① 拦死所有"从没跑过"的新题；② 给"历史上跑过、目录残留"的老题放行（凭运气）；
+    ③ 让「删掉 `_run` 重跑」这个正常操作失败。所以：
+
+      · 解释器/命令在不在 —— 判（`PATH` 查找，或**绝对路径**必须可执行）；
+      · **绝对** `cd` 目标 / 绝对路径 —— 判（作者事先写下的路径，没人替他创建）；
+      · **相对** `cd` 目标 —— 不判存在性（它可能正是壳运行期要创建的那个目录）。
     """
     problems: list[tuple[str, str]] = []
     for constraint in constraints:
@@ -129,23 +138,42 @@ def judge_environment_problems(
 def _command_environment_problems(command: str, *, cwd: Path, timeout_s: float) -> tuple[tuple[str, str], ...]:
     problems: list[tuple[str, str]] = []
     effective_cwd = cwd
+    #: ★ `#46`: 只有"此刻真的看得见"的目录才拿来判相对路径。`cd` 到一个运行期才会被壳
+    #:   创建出来的目录之后，相对路径无从判断 —— 宁可不判，也不拿运行期状态当判据。
+    cwd_known = True
     for segment in _segments(command):
         if not segment:
             continue
         head = os.path.expandvars(segment[0])
         if head == "cd" and len(segment) > 1:
-            target = Path(os.path.expandvars(segment[1]))
-            resolved = target if target.is_absolute() else (effective_cwd / target)
-            if not resolved.is_dir():
-                problems.append(("cwd_missing", f"`cd {segment[1]}`: {resolved} is not a directory"))
+            raw = os.path.expandvars(segment[1])
+            target = Path(raw)
+            if target.is_absolute():
+                # 作者事先写下的绝对路径：没人替他创建 ⇒ 不存在就是真问题。
+                if target.is_dir():
+                    effective_cwd, cwd_known = target, True
+                else:
+                    problems.append(("cwd_missing", f"`cd {raw}`: {target} is not a directory"))
+                    cwd_known = False
+                continue
+            resolved = effective_cwd / target
+            if resolved.is_dir():
+                effective_cwd, cwd_known = resolved, True
             else:
-                effective_cwd = resolved
+                # ★ `#46`: 相对目录可能是壳在运行期创建的（工作区第一次写产物才落盘）
+                #   ⇒ 不作为拒跑理由；但从此不再声称知道 cwd。
+                cwd_known = False
             continue
         runnable = True
         if "/" in head:
-            resolved = Path(head) if Path(head).is_absolute() else (effective_cwd / head)
-            if not (resolved.is_file() and os.access(resolved, os.X_OK)):
+            path = Path(head)
+            resolved = path if path.is_absolute() else (effective_cwd / path)
+            judgeable = path.is_absolute() or cwd_known
+            if judgeable and not (resolved.is_file() and os.access(resolved, os.X_OK)):
                 problems.append(("interpreter_missing", f"{head!r} is not an executable file ({resolved})"))
+                runnable = False
+            elif not judgeable and not resolved.is_file():
+                # 解释器藏在一个现在还看不见的目录里 ⇒ 连模块都没法探。
                 runnable = False
             interpreter = str(resolved)
         else:
@@ -160,7 +188,9 @@ def _command_environment_problems(command: str, *, cwd: Path, timeout_s: float) 
         for module in _modules_in(segment):
             probe = subprocess.run(
                 [interpreter, "-c", f"import {module}"],
-                cwd=str(effective_cwd),
+                # ★ `#46`: cwd 不可见时退到"我们确实站着的地方"探模块 —— 第三方包能不能
+                #   导入不取决于工作区，别为了一个还没创建的目录把这条预检丢掉。
+                cwd=str(effective_cwd if cwd_known else cwd),
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,

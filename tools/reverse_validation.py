@@ -1905,6 +1905,41 @@ MUTATIONS: tuple[Mutation, ...] = (
         "a class the hand-written list never names still escapes the assembly-point rule",
     ),
     Mutation(
+        "X46-relative-cwd-must-preexist-again",
+        "services/checks.py",
+        "            else:\n"
+        "                # ★ `#46`: 相对目录可能是壳在运行期创建的（工作区第一次写产物才落盘）\n"
+        "                #   ⇒ 不作为拒跑理由；但从此不再声称知道 cwd。\n"
+        "                cwd_known = False",
+        "            else:\n"
+        '                problems.append(("cwd_missing", f"`cd {raw}`: {resolved} is not a directory"))\n'
+        "                cwd_known = False",
+        "tests/test_services.py::test_a_runtime_created_workspace_directory_is_not_a_reason_to_refuse",
+        "a runtime-created directory is required to pre-exist again（原缺陷）",
+    ),
+    Mutation(
+        "X46-absolute-cwd-no-longer-checked",
+        "services/checks.py",
+        "            if target.is_absolute():\n"
+        "                # 作者事先写下的绝对路径：没人替他创建 ⇒ 不存在就是真问题。\n"
+        "                if target.is_dir():",
+        "            if target.is_absolute():\n"
+        "                # 作者事先写下的绝对路径：没人替他创建 ⇒ 不存在就是真问题。\n"
+        "                if True:",
+        "tests/test_services.py::test_an_absolute_directory_that_does_not_exist_is_still_refused",
+        "an absolute path the author wrote down is no longer checked",
+    ),
+    Mutation(
+        "X46-module-probe-dropped",
+        "services/checks.py",
+        "def _modules_in(segment: Sequence[str]) -> tuple[str, ...]:\n"
+        "    return tuple(segment[index + 1] for index, token in enumerate(segment[:-1]) if token == \"-m\")",
+        "def _modules_in(segment: Sequence[str]) -> tuple[str, ...]:\n"
+        "    return ()",
+        "tests/test_services.py::test_a_module_probe_still_runs_when_the_cwd_is_created_at_run_time",
+        "the named-module preflight is silently dropped",
+    ),
+    Mutation(
         "W16-summary-drops-the-contract-notes",
         "report/builders.py",
         '            "notes": contract.notes,',
