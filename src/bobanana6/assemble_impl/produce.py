@@ -756,24 +756,26 @@ class LoopIOImpl(LoopIO):
 
         # ★ `#37`: 判据参照的冻结载体也【前置送到】—— 与 #25① 同一个理由：
         #   壳知道的东西，别让模型自己猜（`#36`：真模型 0 次去读）。
-        references = self._reference_sources()
-        if references and len(json.dumps(references, ensure_ascii=False)) <= DELIVERED_INPUTS_BUDGET:
-            delivered["reference_sources"] = references
+        references = self._reference_refs()
+        if references:
+            # ★ `#39`：**只给索引 + 指路，不塞原文** —— 这是真模型四臂对照里读数最好的一版
+            #   （见 `.bobanana6/b39/报告.md`）。两条实测理由：
+            #   ① "给名字 + 指路"才是承重的：同一窗口里，不给指路的臂 `sources.snapshot`
+            #      取回 **0** 次，给指路的臂取回 **29** 次（三跑），T-01 也是 3/3；
+            #   ② 塞全文（且与候选同形 `{columns, rows}`）会被模型当答案抄：那一臂 7/7 次
+            #      把参照物原文塞进 `text` 列，还试过把六个载体逐个写进工作区。
+            #   注记里【不写】"不必再调 `sources.snapshot`"：只给索引时那句话等于把唯一的取法
+            #   也否掉（带那句话的那一臂取回 4 次，只给索引的这一臂取回 29 次；n=3，只作旁证）。
+            delivered["reference_index"] = list(references)
             delivered["reference_note"] = (
-                "★ 这是判据要拿来对照的冻结载体【原文】（逐字）：你的产出必须与它一致。"
-                "不必再调 sources.snapshot —— 它就是壳替你取来的那一份。"
-            )
-        elif references:
-            # 与 inputs 同一条尺子：超预算就退化成"名字 + 取法"，不把提示撑爆。
-            delivered["reference_index"] = sorted(references)
-            delivered["reference_note"] = (
-                "★ 判据参照的载体超过预算：上面是它们的 ref，用 `sources.snapshot` 逐件取原文"
-                "（你的产出必须与它一致）。"
+                "★ 判据会拿你的产出与上面这些冻结载体对照（它们是**判据的参照物**）。"
+                "原文没有塞进来：需要哪一件就用 `sources.snapshot` 取（逐件、原文）。"
+                '答案仍然必须是 {"ref", "columns", "rows"}。'
             )
         return delivered
 
-    def _reference_sources(self) -> dict[str, Any]:
-        """本块判据 spec 里点名、且本块有权读的冻结载体（原文 + 逐行）。
+    def _reference_refs(self) -> tuple[str, ...]:
+        """本块判据 `spec` 里点名、且本块有权读的**冻结载体的 ref**（只给名字，不给内容）。
 
         `judge.bundle` 已经是**本块那一份**（`runtime.py::block_bundle` 切过片），这里再按
         `target` 过一遍是防御性的：万一拿到的是未切片的整包，也不能把邻居的参照物塞进提示
@@ -785,16 +787,7 @@ class LoopIOImpl(LoopIO):
             if constraint.target not in ("*", self.subtask.id, self.subtask.output):
                 continue
             refs.update(named_source_refs(constraint.spec, authorized))
-        out: dict[str, Any] = {}
-        for ref in sorted(refs):
-            body = self.judge.context.snapshot_bodies.get(ref)
-            if body is None:
-                continue  # 没被读成数据（不是文本载体）—— 不硬塞、也不假装
-            out[ref] = {
-                "columns": [{"name": column.name, "dtype": column.dtype} for column in body.columns],
-                "rows": [dict(row) for row in body.rows],
-            }
-        return out
+        return tuple(sorted(refs))
 
     def produce(self, state: LoopState) -> TurnProposal:
         self.calls += 1

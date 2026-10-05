@@ -687,9 +687,11 @@ def test_an_undeclared_clean_carrier_payload_is_unchanged(tmp_path: Path) -> Non
 
 
 # --------------------------------------------------------------------------- #
-# ★ #37: 判据参照的【冻结载体】也要在派活前送到块手上（与 #25① 同一个理由）
-#   证据：`#36` 三跑 21 次调用里 `sources.snapshot` 0 次 —— 判据拿来对照的那份原文，
-#   在模型那儿根本不存在。壳知道是哪个 ref，就不该等模型自己发现。
+# ★ `#37` 提出、`#39` 用真模型四臂对照改写了形态：判据 `spec` 点名的**冻结载体 ref**
+#   要在派活前送到块手上 —— 但**只给名字 + 指路，不塞原文**。
+#   实测依据（`.bobanana6/b39/报告.md` §5）：同一窗口里，不给指路的那一臂 `sources.snapshot`
+#   取回 **0** 次；给"名字 + 指路"的那一臂取回 **29** 次（三跑）且 T-01 3/3；
+#   而"塞全文 + 与候选同形（`{columns, rows}`）"那一臂 7/7 次把参照物原文抄进 `text` 列。
 # --------------------------------------------------------------------------- #
 
 
@@ -747,43 +749,56 @@ def _reference_io(
     )
 
 
-def test_a_judge_named_reference_reaches_the_messages_the_block_receives(tmp_path: Path) -> None:
-    """★ #36 的缺口：`frozen_files` 指名 `interface`，但原文从没到过块手上。"""
+def _answer_shaped(payload: Any) -> bool:
+    """载荷里任何一层出现 `{"columns": …, "rows": …}` 就算"长得像候选"。"""
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if "columns" in node and "rows" in node:
+                return True
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return False
+
+
+def test_a_judge_named_reference_reaches_the_messages_as_a_name_and_a_pointer(tmp_path: Path) -> None:
+    """★ `#39` 的形态：判据点名的 ref 到块手上（名字 + 取法），**原文不塞进来**。"""
     io = _reference_io(tmp_path, spec={"sources": ["interface"]})
 
     delivered = io._delivered_inputs()
-    assert list(delivered["reference_sources"]) == ["interface"]
-    assert delivered["reference_sources"]["interface"]["rows"] == [
-        {"text": "def total(items):\n    return sum(items)\n"}
-    ]
-    # ★ AGENTS.md §7⑬：断言模型真正收到的那串 messages，不是断言某个字段里有内容
+    assert delivered["reference_index"] == ["interface"]
+    assert "sources.snapshot" in delivered["reference_note"]
+    assert "columns" in delivered["reference_note"]  # 说清答案形状
+    # ★ AGENTS.md §7⑬：断言模型真正收到的那串 messages；并且**载荷里不许有答案形状**
     prompt = json.dumps(io.prompt(_state()), ensure_ascii=False)
-    assert "def total(items)" in prompt
-    assert "reference_sources" in prompt
+    assert "reference_index" in prompt and "interface" in prompt
+    assert not _answer_shaped(delivered), delivered
+    assert "def total(items)" not in prompt  # 原文没有塞进来
 
 
 def test_a_reference_the_block_may_not_read_is_not_delivered(tmp_path: Path) -> None:
     """反向：没授权的 ref 即便被判据点名也不送 —— 前置投递不放宽授权。"""
     io = _reference_io(tmp_path, spec={"sources": ["secret-1"]})
 
-    assert "reference_sources" not in io._delivered_inputs()
+    assert "reference_index" not in io._delivered_inputs()
 
 
 def test_a_reference_named_for_another_block_is_not_delivered(tmp_path: Path) -> None:
     """反向：判据点的是别人的产物 ⇒ 不是这一块的参照物。"""
     io = _reference_io(tmp_path, spec={"sources": ["interface"]}, target="other/thing.py")
 
-    assert "reference_sources" not in io._delivered_inputs()
+    assert "reference_index" not in io._delivered_inputs()
 
 
-def test_an_over_budget_reference_degrades_to_names_and_a_way_to_fetch_them(tmp_path: Path) -> None:
-    """与 inputs 同一条尺子：参照物太大就退化成"名字 + 取法"，不把提示撑爆。"""
+def test_the_reference_delivery_is_names_only_no_matter_how_big_the_carrier_is(tmp_path: Path) -> None:
+    """只给名字 ⇒ 载体再大，投递也还是那一串名字（原来那条 120k 预算退路因此不再需要）。"""
     io = _reference_io(tmp_path, spec={"sources": ["interface"]}, body="x" * 200_000)
 
     delivered = io._delivered_inputs()
-    assert "reference_sources" not in delivered
     assert delivered["reference_index"] == ["interface"]
-    assert "sources.snapshot" in delivered["reference_note"]
+    assert len(json.dumps(delivered, ensure_ascii=False)) < 500
 
 
 def test_named_source_refs_reads_nested_specs_and_only_keeps_authorized_names() -> None:
