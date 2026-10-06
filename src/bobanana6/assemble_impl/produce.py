@@ -1031,6 +1031,44 @@ def _input_index(parts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     return index
 
 
+def _artifact_from_disk(artifact: Artifact, path: Path, content: str) -> Artifact:
+    """★ 通道 2 的**判定载荷**：把磁盘上的产物文件解析成行列。
+
+    为什么必须解析、不能像原来那样只填 `text`：
+
+      16 个 checker 读的是 `rows` / `column()` / `row_count`
+      （`core/checkers/presence.py:18`、`range.py:29`），**只有 `provenance` 读 `text`**。
+      原来那句 `replace(artifact, text=content)` 只填了 `text` ⇒ 块把表真写进了磁盘，
+      判定器读的仍是答案 JSON 里那份 rows（常常是空的）—— **通道 2 看着通了，判定没通**。
+      （实测：13f 里交空表也能过，症结之一在此。）
+
+    边界：
+      · 列的类型沿用答案里那份声明（模型声明的 `dtype`）；磁盘上多出来的列按 `str` 收。
+        壳不替模型猜类型 —— 猜错会在 `schema` 判据上变成壳的账。
+      · 空格子**不写键**（`rows` 的约定：缺键 = 缺失，不是 `""`／`null`）。
+      · 不是分隔文本 / 空文件 ⇒ 退回只填 `text`，**不抛**。判定器会照常具名失败，
+        不该在 loader 这里炸掉整块。
+
+    ★ 这只是**换判定载荷的来源**，不是换判定语义 —— `core/` 一行未改。
+    """
+    import csv
+    import io
+
+    delimiter = {".tsv": "\t", ".csv": ","}.get(path.suffix.lower())
+    if delimiter is None:
+        return replace(artifact, text=content)
+    table = [row for row in csv.reader(io.StringIO(content), delimiter=delimiter) if row]
+    if not table:
+        return replace(artifact, text=content)
+    header = [cell.strip() for cell in table[0]]
+    declared = {column.name: column for column in artifact.columns}
+    columns = tuple(declared.get(name, Column(name=name, dtype="str")) for name in header)
+    rows = tuple(
+        {name: cell for name, cell in zip(header, row) if cell != ""} for row in table[1:]
+    )
+    return replace(artifact, columns=columns, rows=rows, text=content)
+
+
 @dataclass
 class LoopIOImpl(LoopIO):
     """The loop's three collaborators: produce, execute, verify.
@@ -1307,8 +1345,13 @@ class LoopIOImpl(LoopIO):
         if output in changed:
             # ★ 交付物被直接写过 ⇒ 判定的那一份内容以**磁盘为准**，答案里那句话不算数。
             content = (root / output).read_text(encoding="utf-8")
+            # ★★ 光填 `text` 不够：16 个 checker 读的是 `rows` / `column()` / `row_count`，
+            #   只有 `provenance` 读 `text`。所以磁盘上的 CSV 必须**解析成行列**，
+            #   否则块真把表写进了磁盘，判定器照样读答案 JSON 里那份（空的）rows ——
+            #   通道 2 看着通了，判定其实没通。（实测：13f 里交空表也能过，症结之一在此。）
             artifacts = [
-                replace(artifact, text=content) if artifact.name == output else artifact for artifact in artifacts
+                _artifact_from_disk(artifact, root / output, content) if artifact.name == output else artifact
+                for artifact in artifacts
             ]
             if cited:
                 provenance.extend(
