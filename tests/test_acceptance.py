@@ -1191,7 +1191,13 @@ def test_a_structurally_bad_answer_is_declared_as_the_models_failure() -> None:
     """
     from bobanana6.adapters import ScriptedClient
 
-    client = ScriptedClient([{"text": "not json at all"}])
+    client = ScriptedClient(
+        [
+            # ★ read-before-produce：先读来源，再交那份"不是 JSON"的答案。
+            {"tool_calls": (_tool_call("r1", "sources.snapshot", {"ref": "src-1"}),)},
+            {"text": "not json at all"},
+        ]
+    )
     run = run_task(ACCEPTANCE / "smoke" / "smoke-panel-one-source", client=client, env={}, expected_blame="model")
     assert run.report.attribution_accuracy == 1.0, run.report.notes
     assert run.report.block_pass_rate == 0.0
@@ -1636,7 +1642,13 @@ class _ShellWritingClient(_ChannelTwoClient):
         self.calls += 1
         brief = _briefing(messages)
         output = str(brief.get("subtask", {}).get("output", ""))
-        if not any(message.get("role") == "tool" for message in messages):
+        # ★ read-before-produce：先读来源，再执行 shell，最后交答案。
+        answered = sum(1 for message in messages if message.get("role") == "tool")
+        if answered == 0:
+            return ModelResponse(
+                tool_calls=(_tool_call("r1", "sources.snapshot", {"ref": "seed"}),)
+            )
+        if answered == 1:
             return ModelResponse(
                 tool_calls=(
                     _tool_call("w1", "shell.run", {"command": "echo stray > elsewhere.txt"}),

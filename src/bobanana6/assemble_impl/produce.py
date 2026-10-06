@@ -1211,6 +1211,26 @@ class LoopIOImpl(LoopIO):
             # ★ The third legal exit: the worker says it cannot get this
             #   information. It is not a failure and the loop must not retry it.
             return TurnProposal(declined=True, detail=_decline_reason(response.text))
+        # ★★ read-before-produce：**先查"读没读来源"，再查格式。顺序就是反馈。**
+        #
+        # 实测（readgate 轮，T-01）：它三次交的都是
+        # `"Need to read sources first."` / `"start by reading sources"` —— **嘴上说要读，
+        # 一次都没做**；而它收到的反馈是 `'ref' is missing`，于是三次全在修 `ref`。
+        # ★ 门说什么，模型就修什么 —— 所以这条必须排在格式检查之前，
+        #   它收到的第一句才是"你还没读过任何来源"，而不是"ref 缺了"。
+        # （同族的第三种写法：`"Let me read the sources."` → `"read sources"` →
+        #   `"Need to read sources first."` —— 说与做之间断了。）
+        if self._must_read_sources() and not self.read_sources:
+            raise CandidateFormatError(
+                "this block may read its sources and has read none; an answer cannot come "
+                "from sources it never opened",
+                code="not_read",
+                got=response.text[:400],
+                expected=(
+                    "call sources.snapshot / sources.read / sources.grep to get the data first, "
+                    "then answer from what you received"
+                ),
+            )
         try:
             candidate = parse_candidate(
                 response.text,
@@ -1486,40 +1506,19 @@ class LoopIOImpl(LoopIO):
         return "context" if isinstance(payload, Mapping) and payload.get("missing") is True else ""
 
     def verify(self, candidate: Candidate) -> GateVerdict:
-        # ★★ 前置条件（不是提示词）：**只能靠来源取数的块，一次都没读就交答案 ⇒ 不受理。**
-        #
-        # 依据是模型自己在采访里给的 —— 问它"为什么一次都不调 `sources.*`"，
-        # 它答："材料中没有任何一句让我不需要调…**我违反了这条指令**"，
-        # 并建议把那句从"嘱托"改成"不读就会被拒"。
-        # §5.3.5① 说的也是同一件事：**约束改输入形态，不教模型遵守**。
-        #
-        # ★ 判据必须精确到"它有没有别的路可走"：
-        #   块有**两条**取数路 —— `task.upstream*`（上游产物）与 `sources.*`（授权来源）。
-        #   · 有上游 ⇒ 数据可以从上游来，**不逼它读来源**（合并块就是这种，
-        #     实测：用 `authorized_sources` 非空去判，会把 pipeline 的合并块
-        #     T-03 一起拦下，15 条既有测试红）；
-        #   · 没上游 + 有来源 ⇒ **只能读来源**，一次没读就是没取数 ⇒ 拒。
-        #   另外一条边界：一次**成功**的 `sources.*` 就够 —— 判"读没读过"，
-        #   不判"读全了没"（读全不全由产物自己交代）。
-        # 顺序即语义：这条在 `judge.verify` **之前** —— 没读，连判都不判。
-        if self._must_read_sources() and not self.read_sources:
-            names = list(self.authorized_sources())
-            return GateVerdict(
-                status="failed",
-                scope=self.judge.required_scope,
-                violations=(
-                    (
-                        "read-before-produce: this block declares no upstream input and may "
-                        f"read {len(names)} source(s); it has read none. Call "
-                        "sources.snapshot / sources.read / sources.grep first — the answer "
-                        "cannot be produced from sources it never opened."
-                    ),
-                ),
-            )
+        # ★ read-before-produce 不在这里判 —— 它在 `produce` 里、**排在格式检查之前**
+        #   （见那里的注记：门说什么模型就修什么，位置的先后就是反馈的先后）。
+        #   这里只保留 `_must_read_sources` 供 `produce` 使用，避免同一条规则两处实现漂移。
         return self.judge.verify(candidate)
 
     def _must_read_sources(self) -> bool:
-        """这一块【只有来源一条取数路】吗（见 `verify` 里的注记）。"""
+        """这一块【只有来源一条取数路】吗（见 `produce` 里 read-before-produce 的注记）。
+
+        块有**两条**取数路 —— `task.upstream*`（上游产物）与 `sources.*`（授权来源）：
+        · 有上游 ⇒ 数据可以从上游来，**不逼它读来源**（合并块就是这种；实测用
+          `authorized_sources` 非空去判，会把 pipeline 的合并块 T-03 一起拦下）；
+        · 没上游 + 有来源 ⇒ **只能读来源**，一次没读就是没取数。
+        """
         sources = list(self.authorized_sources())
         if not sources:
             return False

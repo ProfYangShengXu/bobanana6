@@ -744,7 +744,13 @@ def test_an_answer_that_cites_no_snapshot_fails_at_the_shape_gate(tmp_path: Path
     it is refused where it happened, and the fix names the refs that were valid.
     """
     source = _csv(tmp_path, "panel.csv", "obligor,pd,amount\nA-1,0.01,100\n")
-    client = ScriptedClient([{"text": json.dumps({"rows": [{"obligor": "A-1"}]})}])  # no "ref"
+    client = ScriptedClient(
+        [
+            # ★ read-before-produce：先读来源，再交那份"没有 ref"的答案。
+            {"tool_calls": (_tool_call("sources.snapshot", {"ref": "src-1"}, "c1"),)},
+            {"text": json.dumps({"rows": [{"obligor": "A-1"}]})},  # no "ref"
+        ]
+    )
     result = _runner(tmp_path, ONE_SOURCE.replace("SOURCE_CSV", str(source)), client).run()
 
     assert result.candidates == {}
