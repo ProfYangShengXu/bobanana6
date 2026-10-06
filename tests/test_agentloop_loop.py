@@ -24,6 +24,7 @@ from bobanana6.agentloop.loop import (
     join_truncated_parts,
     resolve_budget_fallback,
     run_phase_chain,
+    transcript_tail_problem,
 )
 from bobanana6.agentloop.state import (
     InMemoryCheckpointStore,
@@ -650,3 +651,104 @@ def test_a_failed_tool_call_still_yields_a_row_with_an_explanation() -> None:
     assert [row["tool_call_id"] for row in transcript[1:]] == ["a", "b"]
     assert all("boom" in row["content"] for row in transcript[1:])
     assert message_sequence_problem(transcript) == ""
+
+
+# --------------------------------------------------------------------------- #
+# ★ Action 契约：一轮里有一条调用的声明不可用（截断/坏 JSON）⇒ 整批都不执行
+#   （Pi 对 stopReason="length" 整批失败；Hermes 对一批里 JSON 坏的给每条回 Skipped）
+# --------------------------------------------------------------------------- #
+
+
+def _declared(call_id: str, raw: str, *, effect: str = "read") -> ToolCall:
+    return ToolCall(call_id=call_id, name="read", arguments={}, raw_arguments=raw, effect=effect)
+
+
+def test_a_truncated_declaration_holds_back_the_whole_batch() -> None:
+    """★ 反向读数的正面：坏的那条**不能**让兄弟静默跑掉，但每条仍要各得一行。"""
+    from bobanana6.agentloop.compress import message_sequence_problem
+
+    good = _declared("ok", '{"path": "good"}')
+    cut = _declared("cut", '{"path": "data/fi')  # 截断（JSON 不完整）
+    io = FakeIO([TurnProposal(tool_calls=(good, cut)), TurnProposal(text="done")])
+    WorkerLoop(io).run(task_id="t", worker_id="w")
+    transcript = _round(io)
+
+    assert io.executed == []  # ★ 一个都没执行（改前：[(good, cut)]，good 被跑了）
+    assert [row["tool_call_id"] for row in transcript[1:]] == ["ok", "cut"]
+    assert all("usable JSON object" in row["content"] for row in transcript[1:])
+    assert message_sequence_problem(transcript) == ""
+
+
+def test_a_truncated_batch_with_a_write_executes_nothing() -> None:
+    """换块类型：写调用也在同一批里 ⇒ 写也不能落地（静默执行写最危险）。"""
+    write_ok = ToolCall(
+        call_id="w",
+        name="write_file",
+        arguments={"path": "out.csv"},
+        raw_arguments='{"path": "out.csv"}',
+        effect="write",
+    )
+    cut = _declared("cut", "{broken")
+    io = FakeIO([TurnProposal(tool_calls=(write_ok, cut)), TurnProposal(text="done")])
+    WorkerLoop(io).run(task_id="t", worker_id="w")
+    assert io.executed == []
+
+
+def test_a_usable_batch_still_executes_every_call() -> None:
+    """★ 正向（不许误伤）：全好的批按原样执行，规模 1 / 2 / 5 都不变。"""
+    for count in (1, 2, 5):
+        calls = tuple(_declared(f"c{i}", '{"path": "x"}') for i in range(count))
+        io = FakeIO([TurnProposal(tool_calls=calls), TurnProposal(text="done")])
+        WorkerLoop(io).run(task_id="t", worker_id="w")
+        executed = [call.call_id for batch in io.executed for call in batch]
+        assert executed == [f"c{i}" for i in range(count)]
+
+
+# --------------------------------------------------------------------------- #
+# ★ 收尾不变式：交付候选的**每一条**路径都要闭合 transcript 尾巴
+#   （`close_transcript_tail` 原来只在 `passed` 那条分支上跑）
+# --------------------------------------------------------------------------- #
+
+
+def test_transcript_tail_problem_names_an_open_tail() -> None:
+    assert transcript_tail_problem(()) == ""
+    closed = ({"role": "tool", "content": "r"}, {"role": "assistant", "content": "a", "candidate": True})
+    assert transcript_tail_problem(closed) == ""
+    assert "tool row" in transcript_tail_problem(({"role": "tool", "content": "r"},))
+    assert "unanswered" in transcript_tail_problem(({"role": "assistant", "tool_calls": [{"id": "a"}]},))
+    assert "without a closing" in transcript_tail_problem(({"role": "user", "content": "u"},))
+
+
+def test_the_budget_exit_closes_the_tail_it_delivers() -> None:
+    """★ turn 1 是工具轮（尾巴是 tool 行），turn 2/3 的候选都被拒 ⇒ 预算出口交付 withheld。
+
+    改前：`result.messages` 停在 tool 行（交付了候选却没有收尾行）。
+    改后：收尾行由 `run` 在**唯一交付点**补上。
+    """
+    io = FakeIO(
+        [
+            TurnProposal(tool_calls=(read("a"),)),
+            TurnProposal(candidate=candidate("v1")),
+            TurnProposal(candidate=candidate("v2")),
+        ],
+        gates=[GateVerdict("failed", "full"), GateVerdict("failed", "full")],
+    )
+    loop = WorkerLoop(io, config=LoopConfig(max_turns=3, max_retries=9, max_reflections=9))
+    result = loop.run(task_id="t", worker_id="w")
+
+    assert result.exit_reason == "budget_exhausted_withheld_candidate"
+    assert result.candidate is not None
+    assert [row["role"] for row in result.messages] == ["assistant", "tool", "assistant"]
+    assert result.messages[-1].get("candidate") is True
+    assert transcript_tail_problem(result.messages) == ""
+
+
+def test_the_passing_exit_still_closes_the_tail_once() -> None:
+    """★ 反向：通过出口**不许**因为搬家而补两条收尾行（幂等）。"""
+    io = FakeIO([TurnProposal(candidate=candidate())])
+    result = WorkerLoop(io).run(task_id="t", worker_id="w")
+    assert result.exit_reason == "passed"
+    assert [row.get("candidate") for row in result.messages] == [True]
+    assert transcript_tail_problem(result.messages) == ""
+
+

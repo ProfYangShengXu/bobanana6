@@ -12,6 +12,7 @@ from bobanana6.agentloop.tools import (
     ToolResult,
     blocked_tool_result,
     call_signature,
+    declared_arguments_problem,
     invalid_arguments_result,
     order_results,
     parse_tool_arguments,
@@ -53,6 +54,40 @@ def test_blocked_result_is_synthesized_so_no_call_dangles() -> None:
     result = blocked_tool_result("call-2", "policy")
     assert result.blocked is True and result.ok is False
     assert result.call_id == "call-2"
+
+
+# --------------------------------------------------------------------------- #
+# ★ Action 契约：一条参数不可解析 ⇒ 整批不执行（截断的兄弟调用不能静默跑）
+# --------------------------------------------------------------------------- #
+
+
+def _raw_call(call_id: str, raw: str, name: str = "read") -> ToolCall:
+    return ToolCall(call_id=call_id, name=name, arguments={}, raw_arguments=raw)
+
+
+def test_a_usable_declaration_has_no_problem() -> None:
+    assert declared_arguments_problem((_raw_call("a", '{"path": "x"}'), _raw_call("b", "{}"))) == ""
+
+
+def test_a_call_without_raw_bytes_is_usable() -> None:
+    """★ 进程内构造的调用没有模型原文；`execute` 会把 `arguments` 序列化后再解析。"""
+    assert declared_arguments_problem((read("a", path="x"),)) == ""
+
+
+@pytest.mark.parametrize("raw", ["{not json", '{"path": "data/fi', "[]", "null"])
+def test_one_unusable_declaration_names_the_whole_batch(raw: str) -> None:
+    """★ 不是"这一个调用坏了"，是"这一批都不可执行" —— 截断会同时伤到兄弟。"""
+    problem = declared_arguments_problem((_raw_call("good", '{"path": "g"}'), _raw_call("cut", raw)))
+    assert "cut" in problem
+    assert "not a usable JSON object" in problem
+
+
+def test_the_batch_problem_is_empty_for_every_usable_size() -> None:
+    """换规模：1 / 2 / 5 条全好 ⇒ 都没有问题（不许误伤）。"""
+    for count in (1, 2, 5):
+        calls = tuple(_raw_call(f"c{i}", '{"path": "x"}') for i in range(count))
+        assert declared_arguments_problem(calls) == ""
+
 
 
 # --------------------------------------------------------------------------- #

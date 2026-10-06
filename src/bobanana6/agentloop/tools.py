@@ -12,6 +12,9 @@ are copied as-is:
      request is rejected outright by the provider.
   3. **guardrails are pure logic, and ``reset_for_turn`` must run every turn** --
      per-turn state that leaks across turns misjudges a fresh call as a repeat.
+  4. **one unusable declaration holds back the whole batch**
+     (``declared_arguments_problem``): a truncated / short argument on one call
+     means a sibling's arguments may be silently short too, so none of them run.
 
 Plus the call-level concurrency rule from 架构设计 §7.6 ⑤: parallelisability is a
 property of *this call*, not of the tool. Reads may overlap; a write is a barrier.
@@ -34,6 +37,7 @@ __all__ = [
     "ToolResult",
     "blocked_tool_result",
     "call_signature",
+    "declared_arguments_problem",
     "invalid_arguments_result",
     "order_results",
     "parse_tool_arguments",
@@ -103,6 +107,36 @@ def invalid_arguments_result(call_id: str, message: str = "") -> ToolResult:
     """
     detail = message or "Tool arguments must be a valid JSON object; the tool was not executed."
     return ToolResult(call_id=call_id, ok=False, content=detail, error_type="invalid_tool_arguments", cause="model")
+
+
+def declared_arguments_problem(calls: Sequence[ToolCall]) -> str:
+    """Why this round of declarations must not be executed (``""`` = it may).
+
+    ★ **One unusable declaration holds back the whole batch.** A call whose own
+    argument text does not parse is an *incomplete* declaration -- the model's
+    output was cut off, or it emitted junk. Executing its siblings is not safe:
+    the same cut can leave a sibling's arguments complete-looking but silently
+    short, and a silently short argument still runs. Pi fails every call of a
+    length-truncated message for exactly this reason
+    (``failToolCallsFromTruncatedMessage``); Hermes answers every call of a batch
+    whose JSON is invalid with "Skipped: other tool call in this response had
+    invalid JSON" instead of running the rest.
+
+    Empty ``raw_arguments`` is **not** a problem: a call built in-process carries
+    its parsed ``arguments`` and :meth:`ToolRegistry.execute` re-serializes them
+    for the parser. Only the model's own bytes can be malformed.
+    """
+    for call in calls:
+        if not call.raw_arguments:
+            continue
+        try:
+            parse_tool_arguments(call.raw_arguments)
+        except ToolCallError:
+            return (
+                f"call {call.call_id!r} declared arguments that are not a usable JSON object; "
+                "the response may have been truncated, so no call in this round was executed"
+            )
+    return ""
 
 
 def blocked_tool_result(call_id: str, reason: str, *, error_type: str = "guardrail_block") -> ToolResult:

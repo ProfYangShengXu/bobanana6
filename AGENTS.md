@@ -99,6 +99,28 @@
 - ✅ `#16` 已收口的四条判定缺口：缺失成为一等状态 `MISSING`（A04）· 单位检查读**值里的单位**（A10）·
   归因读**自带病因**、两层互相指认则 `unknown`（A07）· 溯源经 `SnapshotReader` 端口逐点重放
   —— 引用的行要在、值要对得上（A11）。四条都有修前/修后对照读数。
+- ✅ `#49` **把 ReAct 三件套核到齐：Thought / Action / Observation 逐条读数 + 补上两个"不被命名"的循环契约**
+  （数据 `.bobanana6/b49/报告.md`）。核读（确定性、零真模型，带 file:line 与两份参考对照）：
+  **① Thought** 三条边界都成立 —— (a) 非 thinking 端点把"打算"写进 `content`，`assistant_tool_row`
+  把它带进 assistant 行（`loop.py:323-337`），压缩后仍在（探针逐字 `"I will read a"`）；
+  (b) `carry_back` 随 assistant 行整体搬运，压缩以**整轮**为单位丢弃（`compress._round_units`）
+  ⇒ 不会出现"行在、reasoning 丢"的 400 形态（探针 `kept-without-reasoning=False`）；
+  (c) 一轮只建**一条** assistant 行，并行调用全在那一条里，`carry_back` 只出现一次
+  （探针 `reasoning-occurrences=1`）。**② Action** 顺序/数量一致（写屏障分段后仍 `declared == answered`）；
+  ★ 但查出一个**漏掉的契约**：一条调用参数不可解析（截断/坏 JSON）时，同批**参数完好**的兄弟
+  **照样被执行**（Pi 对 `stopReason="length"` 整批失败；Hermes 对 JSON 坏的一批给每条回 `Skipped`；
+  `agentloop/README.md` 的「C 直接删」清单里没有它 ⇒ 不是决定不抄，是漏了）。
+  **③ Observation** 成立：压缩丢弃以工具轮为单位，规模 1/2/3/5/9 × 3 种体积零违例。
+  修法（两处，都在"循环里放什么"的契约内）：① 新增 `tools.declared_arguments_problem()`，
+  `_tool_round` 据此**整批不执行**（坏的那条仍各得一条 tool 行，顺序/数量不变，模型能自纠）；
+  ② `close_transcript_tail` 原来只在 `passed` 分支上跑 —— 移到 `run()` 的**唯一交付点**，
+  恢复/预算出口也闭合尾巴；新增 `loop.transcript_tail_problem()` 把"交付候选 ⇒ 有收尾行"写成断言，
+  `LoopResult.messages` 暴露交付时的 transcript 供外部断言（不许只靠 digest）。
+  读数（改前 = 把两处守卫关掉、复跑同一探针）：① Action `executed-batches` `[["ok","cut"]]` → `[]`；
+  ② Tail `roles` `["assistant","tool"]`（`tail-problem` 非空）→ `["assistant","tool","assistant"]`（空）；
+  ③ ★ 反向：探针里 Thought/Observation 读数**逐字不变**、既有 878 条测试两臂同结果。
+  反证：关掉守卫 → 新增 2+2 条测试红；还原 → 绿。
+  读数：ruff 绿 · arch_guard 37 · **891 passed** · 冒烟 2。★ 本轮按用户要求**未跑变异与跨种子**（没跑就是没跑）。
 - ✅ `#48` **工具轮补上带 `tool_calls` 的 assistant 行**（数据 `.bobanana6/b48/报告.md`）。
   `loop.py::_tool_round` 原来只追加 `role:"tool"` 的结果行 ⇒ 送出去的历史是
   `[system, user, tool, tool, …]`，严格端点直接 400（`Messages with role 'tool' must be a response

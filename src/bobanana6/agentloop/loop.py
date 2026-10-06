@@ -50,6 +50,8 @@ from .tools import (
     ToolCall,
     ToolCallGuardrailController,
     ToolResult,
+    declared_arguments_problem,
+    invalid_arguments_result,
     order_results,
     plan_tool_segments,
 )
@@ -73,6 +75,7 @@ __all__ = [
     "join_truncated_parts",
     "resolve_budget_fallback",
     "run_phase_chain",
+    "transcript_tail_problem",
 ]
 
 T = TypeVar("T")
@@ -217,6 +220,31 @@ def close_transcript_tail(
         return tuple(rows)
     rows.append({"role": "assistant", "content": candidate.hint, "candidate": True})
     return tuple(rows)
+
+
+def transcript_tail_problem(messages: Sequence[Mapping[str, Any]]) -> str:
+    """Why a transcript that handed back a candidate is not closed (``""`` = it is).
+
+    ``close_transcript_tail`` is the repair; this is the check. It is meaningful
+    only at **delivery**: mid-loop a transcript may legally end on a ``tool`` row,
+    and that is exactly the state a recovery exit must not persist while claiming
+    the candidate is the answer.
+
+    * ending on a ``tool`` row: the delivered answer has no closing row, so a
+      durable tail keeps the tool round as the last thing the model said;
+    * ending on an unanswered ``assistant(tool_calls)`` row: a candidate cannot
+      also be an open tool round (the sequence checker names this one too).
+    """
+    if not messages:
+        return ""
+    tail = messages[-1]
+    if tail.get("role") == "assistant" and tail.get("candidate") is True:
+        return ""
+    if tail.get("role") == "tool":
+        return "the transcript ends on a tool row; the delivered candidate has no closing assistant row"
+    if tail.get("role") == "assistant" and tail.get("tool_calls"):
+        return "the transcript ends on an unanswered assistant tool-call row"
+    return "the transcript ends without a closing assistant row for the delivered candidate"
 
 
 def guarded(label: str, fn: Callable[[], T], errors: list[str]) -> T | None:
@@ -382,6 +410,10 @@ class LoopResult:
     restarts: int
     errors: tuple[str, ...]
     declined: bool = False
+    #: The transcript the run ended on, after the closing row was applied. Exposed
+    #: so the loop's own sequence/tail invariants can be asserted from outside
+    #: instead of only through a digest.
+    messages: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass
@@ -475,6 +507,11 @@ class WorkerLoop:
             state = turn.state
             last_gate = turn.gate or last_gate
             if outcome.action is PhaseAction.RETURN:
+                # ★ Single point: **any** path that hands back a candidate closes the
+                #   tail. Closing it only on the `passed` branch left the recovery
+                #   exits (a declined gate verdict) persisting an open tail.
+                state = replace(state, messages=close_transcript_tail(state.messages, turn.final_candidate))
+                turn.state = state
                 status = "ok" if (turn.final_candidate is not None or turn.declined) else "failed"
                 self._persist(turn, status=status)
                 if self._log is not None:
@@ -487,6 +524,7 @@ class WorkerLoop:
                     restarts=state.restarts,
                     errors=state.errors,
                     declined=turn.declined,
+                    messages=state.messages,
                 )
             if outcome.action is PhaseAction.BREAK:
                 # A turn that was throttled never started; anything else failed.
@@ -498,12 +536,17 @@ class WorkerLoop:
                     turns=state.turn,
                     restarts=state.restarts,
                     errors=state.errors,
+                    messages=state.messages,
                 )
             # CONTINUE -> another turn.
 
         # Budget exhausted. ★ Prefer the candidate the gate withheld over one more call.
         withheld = state.withheld
         candidate = resolve_budget_fallback(withheld)
+        # ★ The budget exit delivers a candidate too, so it closes the tail at the
+        #   same single point as the RETURN path above.
+        if candidate is not None:
+            state = replace(state, messages=close_transcript_tail(state.messages, candidate))
         self._persist(
             _Turn(state=state, task_id=task_id, worker_id=worker_id),
             status="failed",
@@ -515,6 +558,7 @@ class WorkerLoop:
             turns=state.turn,
             restarts=state.restarts,
             errors=state.errors,
+            messages=state.messages,
         )
 
     # -- phases ------------------------------------------------------------ #
@@ -571,7 +615,8 @@ class WorkerLoop:
             return self._classify_and_recover(turn, exc)
         turn.gate = gate
         if can_complete(gate, self._config.required_scope):
-            turn.state = replace(turn.state, messages=close_transcript_tail(turn.state.messages, proposal.candidate))
+            # The closing row is applied by ``run`` (the single delivery point),
+            # so the recovery exits close their tail the same way this one does.
             turn.final_candidate = proposal.candidate
             turn.exit_reason = "passed"
             return PhaseResult.done("passed")
@@ -648,35 +693,47 @@ class WorkerLoop:
         proposal = turn.proposal
         if proposal is None or not proposal.tool_calls:
             return PhaseResult.fallthrough()
-        segments = plan_tool_segments(proposal.tool_calls)
-        results: list[ToolResult] = []
-        for kind, calls in segments:
-            allowed: list[ToolCall] = []
-            for call in calls:
-                blocked = self._guardrails.before_call(call)
-                if blocked is not None:
-                    results.append(blocked)
-                    self._guardrails.observe(call, blocked)
+        # ★ Action 契约：一次工具轮要么全部执行、要么一个都不执行。声明的参数只要
+        #   有一个不可解析（模型输出被截断 / 吐了坏 JSON），整批就不可执行 —— 同一次
+        #   截断可能让**别的**调用看起来完整、其实已经缺了一截，而它照样会被跑。Pi 对
+        #   `stopReason="length"` 的消息就是整批失败；Hermes 对一批里 JSON 坏的调用
+        #   也是给每条回 "Skipped: other tool call in this response had invalid JSON"。
+        #   被拦下的调用**仍然各得一条 tool 行**（顺序/数量不变，模型能自纠）。
+        unusable = declared_arguments_problem(proposal.tool_calls)
+        if unusable:
+            turn.results = tuple(
+                invalid_arguments_result(call.call_id, unusable) for call in proposal.tool_calls
+            )
+        else:
+            segments = plan_tool_segments(proposal.tool_calls)
+            results: list[ToolResult] = []
+            for kind, calls in segments:
+                allowed: list[ToolCall] = []
+                for call in calls:
+                    blocked = self._guardrails.before_call(call)
+                    if blocked is not None:
+                        results.append(blocked)
+                        self._guardrails.observe(call, blocked)
+                        continue
+                    allowed.append(call)
+                if not allowed:
                     continue
-                allowed.append(call)
-            if not allowed:
-                continue
-            produced: tuple[ToolResult, ...] = ()
-            if kind == "parallel":
-                batch, _exc = self._attempt(turn, "execute", lambda allowed=tuple(allowed): self._io.execute(allowed))
-                produced = tuple(batch or ())
-            else:
-                collected: list[ToolResult] = []
-                for call in allowed:
-                    one, _exc = self._attempt(turn, "execute", lambda call=call: self._io.execute((call,)))
-                    collected.extend(one or ())
-                produced = tuple(collected)
-            ordered = order_results(tuple(allowed), produced)
-            results.extend(ordered)
-            for call, result in zip(allowed, ordered):
-                self._guardrails.observe(call, result)
-                self._taint.observe(call.name, result.ok)
-        turn.results = order_results(proposal.tool_calls, results)
+                produced: tuple[ToolResult, ...] = ()
+                if kind == "parallel":
+                    batch, _exc = self._attempt(turn, "execute", lambda allowed=tuple(allowed): self._io.execute(allowed))
+                    produced = tuple(batch or ())
+                else:
+                    collected: list[ToolResult] = []
+                    for call in allowed:
+                        one, _exc = self._attempt(turn, "execute", lambda call=call: self._io.execute((call,)))
+                        collected.extend(one or ())
+                    produced = tuple(collected)
+                ordered = order_results(tuple(allowed), produced)
+                results.extend(ordered)
+                for call, result in zip(allowed, ordered):
+                    self._guardrails.observe(call, result)
+                    self._taint.observe(call.name, result.ok)
+            turn.results = order_results(proposal.tool_calls, results)
         completed = tuple(f"tool:{call.call_id}" for call in proposal.tool_calls)
         turn.state = replace(
             turn.state,
