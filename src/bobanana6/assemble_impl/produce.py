@@ -287,6 +287,13 @@ def tool_schemas(toolset: ToolSet) -> list[dict[str, Any]]:
     so an omitted argument keeps its default instead of forcing the caller to
     invent one. For every pre-existing tool ``optional`` is empty, so the
     advertised schema is byte-identical to before.
+
+    ★★ ``description`` 现在取 ``spec.description``（**决策信息**：何时用 /
+    输入什么 / 何时不用），而不是 ``spec.returns``（返回值的类型标签）。
+    这条曾经是 ``spec.returns or spec.name`` —— 模型看到的全部信息是
+    ``sources.snapshot → "Snapshot"`` 八个字符，于是它每次都选 snapshot
+    而不是 read，把 261 KB 的来源整份灌进上下文。
+    ``returns`` 保留在 ``ToolSpec`` 里给测试与清单用，不再是发给模型的那句话。
     """
     schemas: list[dict[str, Any]] = []
     for spec in toolset.specs():
@@ -296,7 +303,7 @@ def tool_schemas(toolset: ToolSet) -> list[dict[str, Any]]:
                 "type": "function",
                 "function": {
                     "name": spec.name,
-                    "description": spec.returns or spec.name,
+                    "description": spec.description or spec.returns or spec.name,
                     "parameters": {
                         "type": "object",
                         "properties": properties,
