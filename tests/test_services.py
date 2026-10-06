@@ -1331,3 +1331,22 @@ def test_a_workspace_path_may_not_climb_out_of_the_workspace() -> None:
     assert relative_parts("a/b.txt") == ("a", "b.txt")
     assert relative_parts("./a//b.txt") == ("a", "b.txt")
     assert relative_parts("a\\b.txt") == ("a", "b.txt")
+
+
+def test_a_repeated_model_call_id_is_made_unique() -> None:
+    """★ 协议要求"一条 assistant 行声明的每个 id 恰好一条 tool 行" ⇒ id 空间必须一一对应。
+
+    模型把同一个 id 报两次时，重复的那个拿一个确定性的后缀 —— 调用本身（工具名/参数）不动。
+    """
+    from bobanana6.services.registry import RegisteredTool, ToolRegistry
+
+    registry = ToolRegistry(tools=(RegisteredTool(name="read", parameters=("path",), handler=lambda _a: "r"),))
+    raw = [
+        {"id": "dup", "type": "function", "function": {"name": "read", "arguments": '{"path": "a"}'}},
+        {"id": "dup", "type": "function", "function": {"name": "read", "arguments": '{"path": "b"}'}},
+        {"type": "function", "function": {"name": "read", "arguments": "{}"}},
+        {"type": "function", "function": {"name": "read", "arguments": "{}"}},
+    ]
+    calls = registry.calls(raw)
+    assert [call.call_id for call in calls] == ["dup", "dup-2", "call-3", "call-4"]
+    assert [call.arguments.get("path") for call in calls[:2]] == ["a", "b"]

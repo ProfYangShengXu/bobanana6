@@ -213,7 +213,7 @@ def test_the_old_shape_is_exactly_the_400_the_endpoint_returns() -> None:
 def test_a_tool_row_whose_id_is_not_declared_is_named() -> None:
     broken = _round(("a", "b"), ("ra", "rb"))
     broken = (*broken[:3], {"role": "tool", "tool_call_id": "c", "content": "stray"})
-    assert "'c' is not declared" in message_sequence_problem(broken)
+    assert "is not declared by the preceding assistant row" in message_sequence_problem(broken)
 
 
 def test_an_unanswered_declared_call_is_named() -> None:
@@ -290,5 +290,5 @@ def test_a_sanitizer_backstop_keeps_the_sequence_legal() -> None:
         {"role": "tool", "tool_call_id": "kept", "content": "r"},
         {"role": "tool", "tool_call_id": "orphan", "content": "r"},
     )
-    assert "no preceding assistant row" in message_sequence_problem(broken)
+    assert "is not declared by the preceding assistant row" in message_sequence_problem(broken)
     assert message_sequence_problem(sanitize_tool_pairs(broken)) == ""

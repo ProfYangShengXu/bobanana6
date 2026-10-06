@@ -545,12 +545,78 @@ def test_the_wire_messages_satisfy_the_sequence_the_endpoints_enforce() -> None:
     assert "no preceding assistant row" in message_sequence_problem(without)
 
 
-def test_a_transcript_message_without_tool_calls_is_copied_verbatim() -> None:
-    """普通消息原样过（除记账键外不改形状）。"""
+def test_a_transcript_message_without_tool_calls_keeps_its_shape() -> None:
+    """普通消息原样过 —— 只有**壳自己的记账键**在边界上掉下去。
+
+    `pinned` 是压缩器的"把这一行钉在末尾"标记（`compress._pin_instruction`），
+    不是 chat schema 的字段；严格端点有权拒收未知字段，所以与 `candidate` 一样丢掉。
+    壳内部照旧看得见它（压缩行为不变）。
+    """
     client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
     opener = _RecordingOpener(_FakeResponse(_reply("ok")))
     client.opener = opener
     client.complete([{"role": "user", "content": "hi", "pinned": True}], [], 8)
-    assert json.loads(opener.requests[0].data.decode())["messages"] == [
-        {"role": "user", "content": "hi", "pinned": True}
-    ]
+    assert json.loads(opener.requests[0].data.decode())["messages"] == [{"role": "user", "content": "hi"}]
+
+
+# --------------------------------------------------------------------------- #
+# ★ 思考模型：端点给的 reasoning 必须原样带回；没给的端点不许凭空造一个
+# --------------------------------------------------------------------------- #
+
+
+def _reasoning_reply(text: str = "", *, reasoning: str = "let me think") -> bytes:
+    message: dict[str, Any] = {"role": "assistant", "content": text, "reasoning_content": reasoning}
+    return json.dumps({"choices": [{"message": message}], "usage": {"total_tokens": 7}}).encode()
+
+
+def test_the_endpoints_reasoning_field_is_parsed_into_the_response() -> None:
+    """★ 响应里给了 ⇒ 取出来（壳不解释它，只是原样拿着）。"""
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    client.opener = _RecordingOpener(_FakeResponse(_reasoning_reply("hi")))
+    response = client.complete([{"role": "user", "content": "x"}], [], 8)
+    assert response.carry_back == {"reasoning_content": "let me think"}
+
+
+def test_an_endpoint_that_gives_no_reasoning_yields_an_empty_carry_back() -> None:
+    """★ 反向：没给就是空 —— 不许凭空造一个空值（宽松端点的报文必须一字不变）。"""
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    client.opener = _RecordingOpener(_FakeResponse(_reply("hi")))
+    response = client.complete([{"role": "user", "content": "x"}], [], 8)
+    assert dict(response.carry_back) == {}
+
+
+def test_the_assistant_row_carries_the_reasoning_back_byte_for_byte() -> None:
+    """★ 往返：att+tool_calls+reasoning 再发出去，`reasoning_content` 一字不差。"""
+    from bobanana6.agentloop.loop import TurnProposal, assistant_tool_row
+    from bobanana6.agentloop.tools import ToolCall
+
+    proposal = TurnProposal(
+        tool_calls=(ToolCall(call_id="call-1", name="semantics.lookup", arguments={}),),
+        text="",
+        carry_back={"reasoning_content": "let me think"},
+    )
+    row = assistant_tool_row(proposal)
+    assert row["reasoning_content"] == "let me think"
+
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    opener = _RecordingOpener(_FakeResponse(_reply("ok")))
+    client.opener = opener
+    client.complete(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}, row,
+         {"role": "tool", "tool_call_id": "call-1", "content": "r"}],
+        _real_menu(),
+        8,
+    )
+    sent = json.loads(opener.requests[0].data.decode())["messages"]
+    assert sent[2]["reasoning_content"] == "let me think"
+    assert sent[2]["tool_calls"][0]["function"]["name"] == "semantics_lookup"
+
+
+def test_a_row_without_carry_back_gets_no_reasoning_key_at_all() -> None:
+    """★ 反向的第二半：没有内容就**不出这个键**（`""` / `null` 都不行）。"""
+    from bobanana6.agentloop.loop import TurnProposal, assistant_tool_row
+    from bobanana6.agentloop.tools import ToolCall
+
+    row = assistant_tool_row(TurnProposal(tool_calls=(ToolCall(call_id="c1", name="sources.read", arguments={}),)))
+    assert "reasoning_content" not in row
+    assert set(row) == {"role", "content", "tool_calls"}

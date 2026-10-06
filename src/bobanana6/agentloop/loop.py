@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Protocol, TypeVar
 
@@ -299,6 +299,9 @@ class TurnProposal:
     text: str = ""
     declined: bool = False
     detail: str = ""
+    #: ★ 端点要求原样带回的 assistant 字段（思考模型的 `reasoning_content`）。循环不解释它，
+    #: 只把它存进自己建的那条 assistant 行；端点没给就是空 —— 不许凭空造一个空值。
+    carry_back: Mapping[str, Any] = field(default_factory=dict)
 
 
 def assistant_tool_row(proposal: TurnProposal) -> dict[str, Any]:
@@ -313,8 +316,11 @@ def assistant_tool_row(proposal: TurnProposal) -> dict[str, Any]:
     ``arguments`` is emitted as the text the caller sent when we have it (the model's
     exact bytes), falling back to a serialization of the parsed mapping so a call
     built without raw text is still replayable.
+
+    ``carry_back`` rides along verbatim: a thinking-mode endpoint refuses this row
+    without its reasoning text, and only the endpoint knows which fields those are.
     """
-    return {
+    row: dict[str, Any] = {
         "role": "assistant",
         "content": proposal.text or "",
         "tool_calls": [
@@ -329,6 +335,9 @@ def assistant_tool_row(proposal: TurnProposal) -> dict[str, Any]:
             for call in proposal.tool_calls
         ],
     }
+    # 端点的字段跟着协议字段走；同名不许覆盖（那是壳自己的行形状）。
+    row.update({key: value for key, value in proposal.carry_back.items() if key not in row})
+    return row
 
 
 class LoopIO(Protocol):

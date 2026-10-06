@@ -1052,7 +1052,9 @@ class LoopIOImpl(LoopIO):
         response = self._complete(state, cap)
         calls = self.registry.calls(response.tool_calls)
         if calls:
-            return TurnProposal(tool_calls=calls, text=response.text)
+            # ★ 端点要求原样带回的 assistant 字段（思考模型的 reasoning_content）跟着这次工具轮
+            #   一起存进循环建的 assistant 行；端点没给就是空映射，一个键都不加。
+            return TurnProposal(tool_calls=calls, text=response.text, carry_back=dict(response.carry_back or {}))
         if not response.text.strip():
             return TurnProposal(text="", detail="the model returned neither text nor a tool call")
         if _declined(response.text):

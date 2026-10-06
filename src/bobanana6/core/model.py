@@ -803,6 +803,12 @@ class ModelResponse:
     usage: Mapping[str, int] = field(  # external:metrics —— 计量读它；core 不读
         default_factory=dict
     )
+    #: ★ 端点**要求原样带回**的 assistant 字段（思考模式的 `reasoning_content` 就是这一族）。
+    #: 壳不解释它的内容：适配器负责认出"哪些字段必须带回去"，循环负责把它们存进它建的那条
+    #: assistant 行、出站再原样送回。没给就是空映射 —— **不许凭空造一个空值塞进去**。
+    carry_back: Mapping[str, Any] = field(  # external:agentloop —— 循环把它放进 assistant 行
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)

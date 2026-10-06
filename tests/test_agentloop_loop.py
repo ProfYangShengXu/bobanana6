@@ -600,3 +600,53 @@ def test_an_empty_tool_call_list_appends_nothing() -> None:
     io = FakeIO([TurnProposal(tool_calls=()), TurnProposal(text="done")])
     WorkerLoop(io).run(task_id="t", worker_id="w")
     assert io.states[-1].messages == ()
+
+
+# --------------------------------------------------------------------------- #
+# ★ 每个 tool_call_id 恰好一条 tool 行（不少：补错误结果；不多：重复 id 也不重复答）
+# --------------------------------------------------------------------------- #
+
+
+def test_every_declared_id_gets_exactly_one_tool_row() -> None:
+    """★ 断言"不少不多"：声明的每个 id 在紧随的 tool 行里**恰好出现一次**。"""
+    from bobanana6.agentloop.compress import message_sequence_problem
+
+    io = FakeIO([TurnProposal(tool_calls=(read("a"), read("b"), read("c"))), TurnProposal(text="done")])
+    WorkerLoop(io).run(task_id="t", worker_id="w")
+    transcript = _round(io)
+    declared = [call["id"] for call in transcript[0]["tool_calls"]]
+    answered = [row["tool_call_id"] for row in transcript[1:]]
+    assert sorted(declared) == answered
+    assert len(answered) == len(set(answered))
+    assert message_sequence_problem(transcript) == ""
+
+
+def test_a_duplicate_tool_row_is_a_named_sequence_problem() -> None:
+    """「不能多」的那一半：同一个 id 回两次 ⇒ 具名（不是"没声明"）。"""
+    from bobanana6.agentloop.compress import message_sequence_problem
+
+    transcript = (
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "u"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
+        {"role": "tool", "tool_call_id": "a", "content": "r"},
+        {"role": "tool", "tool_call_id": "a", "content": "r again"},
+    )
+    assert "was already answered by an earlier tool row" in message_sequence_problem(transcript)
+
+
+def test_a_failed_tool_call_still_yields_a_row_with_an_explanation() -> None:
+    """★「不少」的那一半：执行失败 / 没有结果时补一条**说清为什么**的 tool 行。"""
+    from bobanana6.agentloop.compress import message_sequence_problem
+
+    class FailingIO(FakeIO):
+        def execute(self, calls):  # type: ignore[no-untyped-def]
+            self.executed.append(tuple(calls))
+            return tuple(ToolResult(call_id=c.call_id, ok=False, content="boom: the tool raised") for c in calls)
+
+    io = FailingIO([TurnProposal(tool_calls=(read("a"), read("b"))), TurnProposal(text="done")])
+    WorkerLoop(io).run(task_id="t", worker_id="w")
+    transcript = _round(io)
+    assert [row["tool_call_id"] for row in transcript[1:]] == ["a", "b"]
+    assert all("boom" in row["content"] for row in transcript[1:])
+    assert message_sequence_problem(transcript) == ""

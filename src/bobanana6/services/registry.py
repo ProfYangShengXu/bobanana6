@@ -144,10 +144,24 @@ class ToolRegistry:
         An unparseable argument list is kept as a call with empty arguments, so
         it still gets a result later: a dangling tool call is not allowed to
         exist (AGENTS §7①).
+
+        ★ `call_id` is made **unique within the response**. The protocol's key space
+        has to be one-to-one: an endpoint requires the assistant row to be followed by
+        *exactly one* ``tool`` message per declared id, so a model that repeats an id
+        would make two calls answerable by one row (and two answers indistinguishable
+        from a duplicate). A repeated id gets a deterministic suffix -- the call
+        itself (name/arguments) is untouched, which is the part the model must fix.
         """
         calls: list[ToolCall] = []
+        used: set[str] = set()
         for index, raw in enumerate(raw_calls):
-            call_id = str(raw.get("id") or f"call-{index + 1}")
+            base = str(raw.get("id") or f"call-{index + 1}")
+            call_id = base
+            suffix = 2
+            while call_id in used:
+                call_id = f"{base}-{suffix}"
+                suffix += 1
+            used.add(call_id)
             function = raw.get("function")
             if not isinstance(function, Mapping):
                 calls.append(ToolCall(call_id=call_id, name="<malformed>", arguments={}, raw_arguments=""))

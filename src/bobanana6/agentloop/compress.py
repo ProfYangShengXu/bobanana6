@@ -175,6 +175,7 @@ def message_sequence_problem(messages: Sequence[Mapping[str, Any]]) -> str:
     loop itself does not need to call it (it builds the rows in one place).
     """
     pending: set[str] = set()
+    declared: set[str] = set()
     for index, message in enumerate(messages):
         role = message.get("role")
         if role == "assistant":
@@ -184,17 +185,21 @@ def message_sequence_problem(messages: Sequence[Mapping[str, Any]]) -> str:
                     f"{sorted(pending)!r}"
                 )
             calls = message.get("tool_calls") or ()
-            pending = {str(call.get("id", "")) for call in calls if isinstance(call, Mapping)}
+            declared = {str(call.get("id", "")) for call in calls if isinstance(call, Mapping)}
+            pending = set(declared)
         elif role == "tool":
             call_id = str(message.get("tool_call_id", ""))
-            if not pending:
+            if not declared:
                 return f"message {index}: role 'tool' has no preceding assistant row with tool_calls"
-            if call_id not in pending:
+            if call_id in pending:
+                pending.discard(call_id)
+            elif call_id in declared:
+                return f"message {index}: tool_call_id {call_id!r} was already answered by an earlier tool row"
+            else:
                 return (
                     f"message {index}: tool_call_id {call_id!r} is not declared by the preceding assistant row "
-                    f"(it declares {sorted(pending)!r})"
+                    f"(it declares {sorted(declared)!r})"
                 )
-            pending.discard(call_id)
         elif pending:
             return (
                 f"message {index}: role {role!r} interrupts a tool round "

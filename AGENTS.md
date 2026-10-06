@@ -122,6 +122,24 @@
   序列问题为空。**缺口**：本机没有真端点凭据 ⇒ ②③ 用的是逐字实现同一条规则的本地假端点
   （报告 §8 写清，并给了有凭据时的闭合命令）。
   读数：ruff 绿 · arch_guard 37 · **870 passed** · 冒烟 2 · 变异 **253/253 caught** · 42 种子 0/42。
+  · ★ **追加（同一块，任务书同批）：端点实测的【三条】协议要求**（数据同报告 §11）。用户在
+    `api.deepseek.com`（`deepseek-flash`）上逐条复现：① tool 必须有前驱 `assistant(tool_calls)`；
+    ② **思考模型**：带 `tool_calls` 的 assistant 行**必须把 `reasoning_content` 一起带回去**；
+    ③ 一条 assistant 声明的**每个** `tool_call_id` 必须**恰好**一条 tool 行（不少不多）。
+    三臂读数（同一道 13f 题 + 逐字实现这三条规则的本地假端点）：
+    `arm-prev`（三条全没做）① **400×7**；`arm-head`（只做①）② **400×7**、③ **400×7**；
+    主仓 三条全 **0×400**（21 次调用）。★ `arm-prev` 在 ②③ 上的 0 是**空过**（它连那种行都没有）。
+    修法：② 在 `core/model.py::ModelResponse.carry_back` + `adapters::ECHO_BACK_MESSAGE_FIELDS`
+    （**字段白名单，不是 provider 分支、不硬编码模型名**）+ `loop.assistant_tool_row` 并进 assistant 行；
+    **端点没给就一个键都不加**（不许造空的 `reasoning_content`）。③ `services/registry.py` 把
+    `call_id` 做成**响应内唯一**（重复的加确定性后缀），并新增
+    `compress.message_sequence_problem()` 把"每个 id 恰好一条"写成断言（"不少"由 `order_results`
+    早已保证，本追加把它断言下来）。顺带审计第四个：`pinned`（压缩器的钉尾标记，与 `candidate`
+    同类）**已并入 `INTERNAL_MESSAGE_KEYS`** 边界丢掉；`content: ""` vs `null` / `tool_call_id`
+    长度上限标注 `[待验]`；`tool_choice`（无调用方、名字已映射）/ `parallel_tool_calls`（从不发送）
+    不适用。
+  · 读数（含两次追加）：ruff 绿 · arch_guard 37 · **878 passed** · 冒烟 2 · 变异 **256/256 caught** ·
+    42 种子 0/42。
 - ✅ `#47` **把通用文件/终端工具抄进块级工具面**（数据 `.bobanana6/b47/报告.md`）。抄的是**行为契约**，
   不是那 13,129 行：`sources.read`（带行号分页）· `sources.grep`（正则/上下文/分页/按名）·
   `files.write`（整份覆盖 + `append`）· `files.patch`（精确替换、非唯一即拒）· `shell.run`（cwd+超时+后台）·

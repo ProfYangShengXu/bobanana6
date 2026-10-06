@@ -2143,6 +2143,34 @@ MUTATIONS: tuple[Mutation, ...] = (
         "a workspace write can point outside the workspace again",
     ),
     Mutation(
+        "X48R-reasoning-not-parsed",
+        "adapters/openai_compat.py",
+        "        carry_back = {name: message[name] for name in ECHO_BACK_MESSAGE_FIELDS if name in message}\n",
+        "        carry_back = {}  # mutation: the endpoint's echo-back fields are dropped\n",
+        "tests/test_adapters.py::test_the_endpoints_reasoning_field_is_parsed_into_the_response",
+        "a thinking-mode endpoint's reasoning text is never taken out of the response",
+    ),
+    Mutation(
+        "X48R-reasoning-not-applied-to-the-row",
+        "agentloop/loop.py",
+        '    row.update({key: value for key, value in proposal.carry_back.items() if key not in row})\n',
+        "    pass  # mutation: the echo-back fields never reach the assistant row\n",
+        "tests/test_adapters.py::test_the_assistant_row_carries_the_reasoning_back_byte_for_byte",
+        "the assistant row goes back without the reasoning text the endpoint requires",
+    ),
+    Mutation(
+        "X48R-duplicate-ids-not-made-unique",
+        "services/registry.py",
+        "            while call_id in used:\n"
+        '                call_id = f"{base}-{suffix}"\n'
+        "                suffix += 1\n",
+        "            if False:  # mutation: repeated ids collides in the protocol key space\n"
+        '                call_id = f"{base}-{suffix}"\n'
+        "                suffix += 1\n",
+        "tests/test_services.py::test_a_repeated_model_call_id_is_made_unique",
+        "two calls share one id, so one tool row cannot answer exactly one declared id",
+    ),
+    Mutation(
         "X48-assistant-row-forgotten",
         "agentloop/loop.py",
         "        appended = (\n            assistant_tool_row(proposal),\n            *(\n",

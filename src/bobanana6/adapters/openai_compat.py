@@ -70,11 +70,22 @@ PROTECTED_PAYLOAD_KEYS: tuple[str, ...] = ("model", "messages")
 
 #: Message keys that are **the shell's own bookkeeping**, not part of the chat
 #: schema. ``candidate`` is the loop's "this row closes a delivered answer" marker
-#: (``agentloop/loop.py::close_transcript_tail``); a strict endpoint has every
-#: right to refuse an unknown field, so the boundary drops it. The shell keeps it
-#: internally -- dropping happens on the way out, exactly like the tool-name
-#: translation.
-INTERNAL_MESSAGE_KEYS: tuple[str, ...] = ("candidate",)
+#: (``agentloop/loop.py::close_transcript_tail``); ``pinned`` is the compressor's
+#: "keep this row at the tail" marker (``agentloop/compress.py::_pin_instruction``).
+#: A strict endpoint has every right to refuse an unknown field, so the boundary
+#: drops them. The shell keeps them internally -- dropping happens on the way out,
+#: exactly like the tool-name translation.
+INTERNAL_MESSAGE_KEYS: tuple[str, ...] = ("candidate", "pinned")
+
+#: ★ Assistant-message fields a thinking-mode endpoint returns **and requires back
+#: verbatim** on the row that carries its tool calls. Measured on a strict endpoint:
+#: an assistant row with ``tool_calls`` but without the reasoning text is refused
+#: with "The `reasoning_content` in the thinking mode must be passed back to the API."
+#:
+#: This is a *field* whitelist, never a model-name branch (a vendor that spells the
+#: field differently just adds its spelling here). An endpoint that does not return
+#: it gets a request with no such key -- nothing is fabricated to fill the slot.
+ECHO_BACK_MESSAGE_FIELDS: tuple[str, ...] = ("reasoning_content",)
 
 DEFAULT_TIMEOUT_S = 60.0
 
@@ -287,8 +298,12 @@ class OpenAICompatibleClient:
         #   （交给既有的 unknown tool 路径，不在这里猜）。
         restored = names.internal_calls(calls) if names is not None else tuple(dict(call) for call in calls)
         usage = document.get("usage")
+        # ★ 端点要求带回去的字段，原文捞出来交给循环存进它建的那条 assistant 行。
+        #   端点没给 ⇒ 空映射 ⇒ 出站一个键都不加（宽松端点读数一字不变）。
+        carry_back = {name: message[name] for name in ECHO_BACK_MESSAGE_FIELDS if name in message}
         return ModelResponse(
             text=str(message.get("content") or ""),
             tool_calls=restored,
             usage=dict(usage) if isinstance(usage, Mapping) else {},
+            carry_back=carry_back,
         )
