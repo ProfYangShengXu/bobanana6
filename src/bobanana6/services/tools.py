@@ -212,8 +212,11 @@ class BoundChecks(CheckTools):
         }
 
 
-#: 材料来自【声明来源】的切分轴：按来源切、或按模块切（模块块读的仍是那几个来源）。
-SOURCE_READING_AXES: tuple[str, ...] = ("source", "module")
+#: ★ 块拿不拿得到 `sources`，由【契约声明了来源】决定，与 `axis` 的名字无关。
+#: 曾经这里是一张按轴名写的白名单（`("source", "module")`），于是每新增一个切分维度
+#: 都要回来补一次 —— `#33` 补过 `"module"`，加 `"product"` 时又漏了，而漏掉的后果是
+#: **静默的**：块照常派下去，只是模型手上没有任何来源，只能交空表（13f 实测 0/8）。
+#: 轴名是**切口**，权限是**能力**，两者本来就不该互相决定。删除白名单即治本。
 
 
 def build_toolset(
@@ -231,9 +234,10 @@ def build_toolset(
 ) -> ToolSet:
     """Bind the tool surface to one block.
 
-    ``sources.snapshot`` is granted when the block's axis says its material comes
-    from sources (``axis in SOURCE_READING_AXES`` —— ★ `#33` 加上了 `"module"`：
-    按模块切只换了**切口**，模块块读的仍然是自己那几个声明来源); the declared-input
+    ``sources.snapshot`` is granted whenever the contract declares any source
+    (``authorized`` is non-empty) —— ★ 它**不再**看 ``axis``：轴名只说明块是怎么切出来的
+    （切口），不说明它该不该有读来源的能力。按 ``axis`` 过滤曾让新维度（``field`` / ``product``）
+    的块静默失去权限 —— 照着被派活，手上却没有任何素材。the declared-input
     permission is ``subtask.inputs`` and nothing else. ``inherited_sources`` are the snapshots
     the declared inputs came from (a merge block cites those, never its own).
 
@@ -241,11 +245,10 @@ def build_toolset(
     deployment declared none) -- the write/execute tools are advertised only when
     it is present, so a capability the deployment never granted cannot be asked for.
     """
-    sources = (
-        BoundSources(authorized=authorized, fetched=fetched)
-        if subtask.axis in SOURCE_READING_AXES
-        else None
-    )
+    # ★ 判据 = 【契约声明了来源】。与 `axis` 无关 —— 理由见本文件上方那段注记。
+    #   一个块的素材只有两个来处：声明的来源、或上游产物。白名单按轴名放行时，
+    #   新维度的块两个都拿不到，而它【照样会被派活】。
+    sources = BoundSources(authorized=authorized, fetched=fetched) if authorized else None
     return ToolSet(
         subtask=subtask.id,
         semantics=BoundSemantics(ontology=ontology),

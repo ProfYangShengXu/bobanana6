@@ -171,33 +171,86 @@ def test_snapshot_payload_parses_csv_and_json(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_build_toolset_grants_snapshot_only_on_the_source_axis(tmp_path: Path) -> None:
+def test_build_toolset_grants_snapshot_whenever_the_contract_declares_sources(
+    tmp_path: Path,
+) -> None:
+    """★ 判据是【契约声明了来源】，不是轴的别名。
+
+    这条原先叫 ``..._only_on_the_source_axis``：白名单只放行 ``source`` / ``module``，
+    于是 ``field`` 与 ``product`` 的块静默拿不到来源 —— 其中 ``inputs=()`` 的**读块**
+    两个来处都没有，却照常被派活，手上空的只能交空表（13f 实测块级 0/8）。
+    轴名是**切口**，权限是**能力**；两者不该互相决定。
+    """
     _store, snap = _snapshot(tmp_path)
     checks = BoundChecks(block="T-01")
-    on_source = build_toolset(
-        plan=plan(),
-        subtask=subtask("T-01", axis="source"),
-        contract=contract(),
-        ontology=mini_ontology(),
-        authorized=(SourceRef(ref="src-1"),),
-        fetched={"src-1": snap},  # type: ignore[dict-item]
-        upstream={},
-        checks=checks,
-    )
-    off_source = build_toolset(
-        plan=plan(),
-        subtask=subtask("T-02", axis="field"),
-        contract=contract(),
-        ontology=mini_ontology(),
-        authorized=(SourceRef(ref="src-1"),),
-        fetched={"src-1": snap},  # type: ignore[dict-item]
-        upstream={},
-        checks=checks,
-    )
-    assert on_source.sources is not None
-    assert "sources.snapshot" in {spec.name for spec in on_source.specs()}
-    assert off_source.sources is None
-    assert "sources.snapshot" not in {spec.name for spec in off_source.specs()}
+
+    def bound(block_id: str, axis: str, sources: tuple[SourceRef, ...]):
+        return build_toolset(
+            plan=plan(),
+            subtask=subtask(block_id, axis=axis),
+            contract=contract(),
+            ontology=mini_ontology(),
+            authorized=sources,
+            fetched={"src-1": snap},  # type: ignore[dict-item]
+            upstream={},
+            checks=checks,
+        )
+
+    declared = bound("T-0X", "source", (SourceRef(ref="src-1"),))
+    assert declared.sources is not None
+    assert "sources.snapshot" in {spec.name for spec in declared.specs()}
+
+    # 契约没声明来源 ⇒ 谁都拿不到（能力跟着声明走，不跟着轴走）
+    bare = bound("T-0X", "source", ())
+    assert bare.sources is None
+    assert "sources.snapshot" not in {spec.name for spec in bare.specs()}
+
+
+def test_every_subtask_axis_can_read_its_declared_sources(tmp_path: Path) -> None:
+    """★ 反第三次：轴的集合从【实现】里读，不是手写名单 —— 手写的必然过时。
+
+    ``#33`` 补 ``"module"``、加 ``"product"`` 时又漏，两次都是同一种死法。本条把
+    两处权威各扫一遍：``core/model.py`` 里**合法**的轴（``Subtask.axis`` 的取值域）、
+    ``decompose/strategies.py`` 里**实际用到**的轴。任何一处新增而没接线，这条就红。
+
+    ★ 写这条时现场验证过「别手写」：初版把轴名列在测试里，其中 ``"single"`` 根本
+    不是合法轴、又漏了 ``entity`` / ``window`` —— 手写的那一刻就已经错了。
+    """
+    import re
+
+    from bobanana6.core import model as core_model
+    from bobanana6.decompose import strategies
+
+    model_src = Path(core_model.__file__).read_text(encoding="utf-8")
+    found = re.search(r"self\.axis in \{([^}]*)\}", model_src)
+    assert found, "没在 core/model.py 里找到 Subtask.axis 的合法集合 —— 断言本身失效了"
+    legal = {piece.strip().strip("\"'") for piece in found.group(1).split(",") if piece.strip()}
+
+    strategies_src = Path(strategies.__file__).read_text(encoding="utf-8")
+    used = set(re.findall(r'axis="([a-z_]+)"', strategies_src))
+
+    axes = sorted(legal | used)
+    assert axes == sorted(legal), f"切分器用了未声明的轴：{sorted(used - legal)}"
+
+    _store, snap = _snapshot(tmp_path)
+    for axis in axes:
+        toolset = build_toolset(
+            plan=plan(),
+            subtask=subtask("T-0X", axis=axis),
+            contract=contract(),
+            ontology=mini_ontology(),
+            authorized=(SourceRef(ref="src-1"),),
+            fetched={"src-1": snap},  # type: ignore[dict-item]
+            upstream={},
+            checks=BoundChecks(block="T-0X"),
+        )
+        assert toolset.sources is not None, (
+            f"axis={axis!r} 是合法轴，契约也声明了来源，块却拿不到 sources —— "
+            "块的素材只有两个来处（声明来源 / 上游产物），两个都没有就只能交空表"
+        )
+        assert "sources.snapshot" in {spec.name for spec in toolset.specs()}, (
+            f"axis={axis!r}：来源拿到了，但没有出现在工具面上"
+        )
 
 
 def test_build_toolset_binds_inputs_to_the_subtask() -> None:

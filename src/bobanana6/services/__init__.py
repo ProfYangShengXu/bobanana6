@@ -21,7 +21,6 @@ from .registry import (
 )
 from .textops import DEFAULT_LIMIT, line_window, search_lines
 from .tools import (
-    SOURCE_READING_AXES,
     BoundChecks,
     BoundSemantics,
     BoundSources,
@@ -39,7 +38,6 @@ from .workspace import (
 __all__ = [
     "DEFAULT_LIMIT",
     "SHELL_COMMAND_CHECK",
-    "SOURCE_READING_AXES",
     "TOOL_NAMES",
     "BlockJudge",
     "BoundChecks",
