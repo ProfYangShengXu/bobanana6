@@ -1152,15 +1152,39 @@ class LoopIOImpl(LoopIO):
         head = [
             {
                 "role": "system",
-                # ★ `#42`: 这一句不再手写形状 —— 字段、取值域、粒度全部从答案契约渲染
-                #   （`answer_contract.py`）。这里只剩"这不是一次自由发挥"与工具授权两句。
+                # ★★ 主体对齐 Hermes 子代理（`tools/delegate_tool.py:1230`
+                #   `_build_child_system_prompt`）：**任务在前、汇报在中、格式最后**。
+                #   它的骨架是：你是谁 / `YOUR TASK:` / `CONTEXT:` / `WORKSPACE PATH:` /
+                #   "Complete this task... When finished, provide a clear, concise summary of:
+                #    What you did / What you found / Any files you created / Any issues"。
+                #
+                #   实测代价（13f 五轮）：bb6 原来是「你是 worker + 格式规格 + 限制」开头，
+                #   任务本身排在那 900 字符之后 ⇒ 模型读到的第一件事是"我要输出一个 JSON"，
+                #   而不是"我要干什么"。Hermes 第一步就是 `YOUR TASK`。
+                #
+                #   ★ 更要害的是那条「你做了什么」的位置：bb6 的产物是一张纯数据表
+                #   （ref/columns/rows），**没有任何一格放"过程"** ⇒ 模型想汇报"我在读来源"，
+                #   只能往数据格里塞。五轮原文（`"Let me read the sources."` → `"read sources"`
+                #   → `"Need to read sources first."` → 「Reading authorized sources: …」）
+                #   全是这么来的：**给它一个写汇报的地方，这一族症状就没了出处。**
+                #
+                #   ★ 同时删掉原来那句 "Use the tools you were given; you may only read what
+                #   they expose." —— 它抄自 Hermes **主 agent** 的 tool-use 段，而 Hermes
+                #   **子代理**没有这句。而且它是**减气**的：暗示"你能拿到的东西就这么多"
+                #   （`架构设计.md §5.3.5` 的判据：harness 说的和做的不一致，
+                #   都会在模型身上表现为"模型不行"）。
                 "content": (
-                    "You are one worker in a split plan. "
+                    "You are a focused subagent working on a specific delegated task.\n\n"
+                    "YOUR TASK:\n"
+                    + (self.subtask.goal or self.subtask.output)
+                    + ("\n\nCONTEXT:\n" + contract.goal if contract.goal.strip() else "")
+                    + "\n\nComplete this task using the tools available to you. "
+                    "When finished, provide a clear, concise summary of:\n"
+                    "- What you did\n"
+                    "- What you found or accomplished\n"
+                    "- Any files you created or modified\n"
+                    "- Any issues encountered\n\n"
                     + render_prompt_contract(ANSWER_CONTRACT)
-                    + " Use the tools you were given; you may only read what they expose."
-                    # ★ 上面两句是【限制】（你能读什么、答案长什么样）。
-                    #   下面三段是【动作与目标】——限制不会自己变成行为，
-                    #   实测：只给限制时，块会交形状正确、内容全空的答案。
                     + BLOCK_COMPLETION_GUIDANCE
                     + TOOL_USE_ENFORCEMENT_GUIDANCE
                     + EXECUTION_DISCIPLINE
