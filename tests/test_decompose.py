@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from bobanana6.contract import compile_bundle, parse_contract
 from bobanana6.core.model import AssemblyOutcome, Recon
-from bobanana6.core.split import check_split
+from bobanana6.core.split import check_split, subtask_layers
 from bobanana6.decompose import (
     Decomposer,
     RoundBudget,
@@ -243,3 +244,210 @@ def test_an_unmapped_output_field_is_flagged_by_split() -> None:
     bundle = compile_bundle(document, plan)
     broken = replace(plan, subtasks=tuple(replace(block, output_fields=("ghost_field",)) for block in plan.subtasks))
     assert "concept_mapped" in check_split(broken, document.contract, bundle, ontology()).codes()
+
+
+# --------------------------------------------------------------------------- #
+# ★ 层次切分：契约声明产物依赖 -> 一份产物一块、按声明接线
+# --------------------------------------------------------------------------- #
+
+AB = Path(__file__).resolve().parents[1] / "acceptance" / "ab" / "13f-crowding"
+
+CHAIN = """
+task_id: task-chain
+goal: a chain of products
+version: 1
+deliverables:
+  - {name: a.csv, schema: {pd: float}}
+  - {name: b.csv, schema: {pd: float}, depends_on: [a.csv]}
+  - {name: c.csv, schema: {pd: float}, depends_on: [b.csv]}
+  - {name: d.csv, schema: {pd: float}, depends_on: [b.csv]}
+  - {name: e.csv, schema: {pd: float}, depends_on: [c.csv, d.csv]}
+sources:
+  - {ref: src-1}
+  - {ref: src-2}
+constraints:
+  hard:
+    - {id: C-1, kind: presence, target: a.csv, spec: {min_rows: 1}, rationale: "x"}
+"""
+
+
+def _chain_plan(strategy: str = "field"):
+    document = parse_contract(CHAIN)
+    plan = Decomposer(strategy=strategy).split(document.contract, ontology())
+    bundle = compile_bundle(document, plan)
+    report = check_split(plan, document.contract, bundle, ontology(), frozen_hash=ontology().content_hash())
+    return plan, report
+
+
+def test_declared_dependencies_produce_a_layered_plan() -> None:
+    plan, report = _chain_plan()
+    assert report.ok, report.codes()
+    assert plan.shape == "layered"
+    assert [block.inputs for block in plan.subtasks] == [
+        (),
+        ("a.csv",),
+        ("b.csv",),
+        ("b.csv",),
+        ("c.csv", "d.csv"),
+    ]
+    assert {block.axis for block in plan.subtasks} == {"product"}
+    assert len({block.partition for block in plan.subtasks}) == len(plan.subtasks)
+
+
+def test_declared_dependencies_beat_the_selected_strategy() -> None:
+    """声明了链，`source` 策略也不许把它拆成"读层 + 写层"的零依赖扇出。"""
+    source_plan, report = _chain_plan(strategy="source")
+    assert report.ok, report.codes()
+    assert source_plan.shape == "layered"
+    assert source_plan.subtasks[1].inputs == ("a.csv",)
+
+
+def test_the_layered_capability_can_be_switched_off() -> None:
+    """★ 反证：同一条输入，把「层间可依赖」关掉 ⇒ inputs 回到全空。"""
+    from bobanana6.decompose import strategies
+
+    document = parse_contract(CHAIN)
+    on = Decomposer(strategy="field").split(document.contract, ontology())
+    assert any(block.inputs for block in on.subtasks)
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(strategies, "LAYERED_SPLIT", False)
+        off = Decomposer(strategy="field").split(document.contract, ontology())
+    finally:
+        monkey.undo()
+    assert off.shape == "star"
+    assert all(not block.inputs for block in off.subtasks)
+
+
+def test_the_layered_capability_is_read_at_call_time() -> None:
+    from bobanana6.decompose import strategies as strategies_module
+
+    assert strategies_module.LAYERED_SPLIT is True  # the gate `_build` reads
+
+
+def test_a_chain_without_declarations_is_unchanged() -> None:
+    """④ 反向：产物彼此独立 ⇒ 原样 star，一个 input 都不许多出来。"""
+    text = CHAIN.replace(", depends_on: [a.csv]", "").replace(", depends_on: [b.csv]", "").replace(
+        ", depends_on: [c.csv, d.csv]", ""
+    )
+    document = parse_contract(text)
+    plan = Decomposer(strategy="field").split(document.contract, ontology())
+    assert plan.shape == "star"
+    assert all(block.inputs == () for block in plan.subtasks)
+    # 逐字等于改动前的 split_single
+    baseline = split_single(document.contract, ontology())
+    assert plan.subtasks == baseline.subtasks
+    assert plan.shape == baseline.shape
+
+
+def test_a_single_deliverable_is_unchanged() -> None:
+    """④ 单产物任务逐字不变：仍然按字段扇出（field 策略的老行为），没有多出任何输入。"""
+    single = parse_contract(CONTRACT).contract
+    plan = Decomposer(strategy="field").split(single, ontology())
+    baseline = split_by_field(single, ontology())
+    assert plan.shape == baseline.shape == "pipeline"
+    assert plan.subtasks == baseline.subtasks
+    assert all(block.inputs == () for block in plan.subtasks if block.mode == "read")
+
+
+def _linear_chain(length: int) -> str:
+    rows = ["  - {name: p00.csv, schema: {pd: float}}"]
+    for index in range(1, length):
+        rows.append(f"  - {{name: p{index:02d}.csv, schema: {{pd: float}}, depends_on: [p{index - 1:02d}.csv]}}")
+    return (
+        "task_id: task-linear\ngoal: a linear chain\nversion: 1\ndeliverables:\n"
+        + "\n".join(rows)
+        + "\n"
+    )
+
+
+@pytest.mark.parametrize("length", [3, 8, 20])
+def test_chain_lengths_layer_correctly(length: int) -> None:
+    document = parse_contract(_linear_chain(length))
+    plan = Decomposer(strategy="field").split(document.contract, ontology())
+    depth, cycle = subtask_layers(plan)
+    assert cycle == ()
+    assert plan.shape == "layered"
+    assert [depth[block.id] for block in plan.subtasks] == list(range(length))
+    for index, block in enumerate(plan.subtasks):
+        expected = () if index == 0 else (f"p{index - 1:02d}.csv",)
+        assert block.inputs == expected
+    bundle = compile_bundle(document, plan)
+    report = check_split(plan, document.contract, bundle, ontology(), frozen_hash=ontology().content_hash())
+    assert report.ok, report.codes()
+
+
+def test_a_wide_chain_only_declares_its_own_edges() -> None:
+    """§2.4 的接口数算术：链长 8、每层宽 2。
+
+    两条并肩的链（每块只声明自己那条上游）：层内零边、层间 2 条/层 ⇒ 14 条。
+    同一张图若"把上层全部产物都当输入"，每块 2 条 ⇒ 28 条；全平铺则 120 条。
+    14/28 都是 O(N·w)，120 是 O(N²) —— 纪律把接口数压在层量级。
+    """
+    rows = []
+    for layer in range(8):
+        for lane in range(2):
+            name = f"L{layer}N{lane}.csv"
+            if layer == 0:
+                rows.append(f"  - {{name: {name}, schema: {{pd: float}}}}")
+            else:
+                rows.append(
+                    f"  - {{name: {name}, schema: {{pd: float}}, depends_on: [L{layer - 1}N{lane}.csv]}}"
+                )
+    document = parse_contract("task_id: task-wide\ngoal: wide\ndeliverables:\n" + "\n".join(rows) + "\n")
+    plan = Decomposer(strategy="field").split(document.contract, ontology())
+    blocks = len(plan.subtasks)
+    edges = sum(len(block.inputs) for block in plan.subtasks)
+    assert blocks == 16
+    assert edges == 14  # 7 transitions x 2 lanes
+    assert blocks * (blocks - 1) // 2 == 120  # the flat-cut灾难 this avoids
+    bundle = compile_bundle(document, plan)
+    assert check_split(plan, document.contract, bundle, ontology(), frozen_hash=ontology().content_hash()).ok
+
+
+def test_the_13f_contract_now_declares_its_chain() -> None:
+    """★ 反证：13f 的 8 个产物 + 真实链关系 —— 逐条贴出的读数就在这里。"""
+    from bobanana6.ontology import load_ontology_file
+
+    document = parse_contract((AB / "task.yaml").read_text(encoding="utf-8"))
+    onto = load_ontology_file(AB / "ontology.yaml").freeze()
+    plan = Decomposer(strategy="field").split(document.contract, onto)
+    assert plan.shape == "layered"
+    assert all(block.inputs for block in plan.subtasks if block.output != "output/filing_resolution.csv")
+    depth, cycle = subtask_layers(plan)
+    assert cycle == ()
+    assert [depth[block.id] for block in plan.subtasks] == [0, 1, 2, 2, 2, 2, 2, 3]
+    bundle = compile_bundle(document, plan)
+    assert check_split(plan, document.contract, bundle, onto, frozen_hash=onto.content_hash()).ok
+
+
+def test_refine_keeps_the_declared_chain() -> None:
+    """重切也不许把链拍平：refine 走同一张产物图。"""
+    document = parse_contract(CHAIN)
+    decomposer = Decomposer(strategy="source", budget=RoundBudget(max_rounds=3))
+    plan = decomposer.split(document.contract, ontology())
+    refined = decomposer.refine(
+        document.contract, ontology(), plan, AssemblyOutcome(passed=False, failed_blocks=("T-02",))
+    )
+    assert refined.shape == "layered"
+    assert refined.round == 2
+    assert refined.subtasks[1].inputs == ("a.csv",)
+
+
+def test_a_contract_written_out_of_order_is_still_emitted_in_topological_order() -> None:
+    """契约把下游写在前面是合法的书写顺序，但计划必须排成可执行的顺序。"""
+    text = (
+        "task_id: t-reordered\ngoal: g\ndeliverables:\n"
+        "  - {name: summary.csv, schema: {pd: float}, depends_on: [b.csv]}\n"
+        "  - {name: b.csv, schema: {pd: float}, depends_on: [a.csv]}\n"
+        "  - {name: a.csv, schema: {pd: float}}\n"
+    )
+    document = parse_contract(text)
+    plan = Decomposer(strategy="field").split(document.contract, ontology())
+    assert [block.output for block in plan.subtasks] == ["a.csv", "b.csv", "summary.csv"]
+    assert [block.inputs for block in plan.subtasks] == [(), ("a.csv",), ("b.csv",)]
+    depth, _ = subtask_layers(plan)
+    assert [depth[block.id] for block in plan.subtasks] == [0, 1, 2]
+    bundle = compile_bundle(document, plan)
+    assert check_split(plan, document.contract, bundle, ontology(), frozen_hash=ontology().content_hash()).ok

@@ -214,3 +214,46 @@ def test_an_unknown_encoding_in_the_declaration_is_refused() -> None:
                 "  - {ref: src-1, locator: https://example.invalid/1, encoding: not-a-codec}",
             )
         )
+
+
+# --------------------------------------------------------------------------- #
+# ★ 层次切分：deliverables[].depends_on（产物依赖产物）
+# --------------------------------------------------------------------------- #
+
+LAYERED = """
+task_id: task-1
+goal: a chain
+deliverables:
+  - {name: a.csv}
+  - {name: b.csv, depends_on: [a.csv, a.csv]}
+  - {name: c.csv, depends_on: []}
+"""
+
+
+def test_depends_on_is_parsed_and_de_duplicated() -> None:
+    document = parse_contract(LAYERED)
+    assert document.contract.deliverables[0].depends_on == ()
+    assert document.contract.deliverables[1].depends_on == ("a.csv",)
+    assert document.contract.deliverables[2].depends_on == ()
+
+
+def test_depends_on_refuses_a_name_that_is_not_a_deliverable() -> None:
+    with pytest.raises(ContractParseError, match="not a declared deliverable"):
+        parse_contract(LAYERED.replace("[a.csv, a.csv]", "[ghost.csv]"))
+
+
+def test_depends_on_refuses_a_self_dependency() -> None:
+    with pytest.raises(ContractParseError, match="depends on itself"):
+        parse_contract(LAYERED.replace("[a.csv, a.csv]", "[b.csv]"))
+
+
+def test_depends_on_must_be_a_list_of_non_empty_strings() -> None:
+    with pytest.raises(ContractParseError, match=r"\$\.deliverables\[1\]\.depends_on"):
+        parse_contract(LAYERED.replace("[a.csv, a.csv]", "a.csv"))
+    with pytest.raises(ContractParseError, match="non-empty strings"):
+        parse_contract(LAYERED.replace("[a.csv, a.csv]", '[""]'))
+
+
+def test_a_contract_without_depends_on_stays_empty() -> None:
+    document = parse_contract(VALID)
+    assert all(deliverable.depends_on == () for deliverable in document.contract.deliverables)

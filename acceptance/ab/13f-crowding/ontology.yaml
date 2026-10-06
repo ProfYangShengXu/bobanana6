@@ -1,0 +1,11 @@
+# 13F 持仓重建题的本体：主体 / 期间 / 证券 / 持仓文本。
+domain: sec-13f-holdings
+version: "2026.1"
+
+concepts:
+  manager: {label: 机构管理人, kind: entity}
+  period: {label: 报告期间, kind: entity}
+  security: {label: 证券(CUSIP), kind: entity}
+  text: {label: 产物文本, kind: attribute}
+
+calendar: {timezone: America/New_York}

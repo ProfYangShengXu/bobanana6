@@ -1,0 +1,63 @@
+# 13F 修正案感知的持仓重建（AgentHON T1 / QFBench 2.0）
+# ★ A 臂用：bb6 单 agent。产物走 files 通道写；官方判据在【外面】跑（不由本任务提供）。
+task_id: 13f-amendment-aware-crowding
+goal: 重建目标管理人的有效持仓并产出四类分析（集中度/换手/重叠/拥挤），按 instruction.md 的 8 个产物规格写到 output/
+version: 1
+
+deliverables:
+  # ★ 层次切分：产物之间的真实数据流由【契约】声明（instruction.md L31/L33/L35 的散文
+  #   不解析）。这张图就是 §0 那条链：
+  #   filing_resolution → effective_holdings → {metrics, turnover, overlap, crowding,
+  #   cleaning_audit} → summary。同层（大括号里的五份）之间没有边。
+  - name: output/filing_resolution.csv
+    schema: {text: str}
+  - name: output/effective_holdings.csv
+    schema: {text: str}
+    depends_on: [output/filing_resolution.csv]
+  - name: output/manager_metrics.csv
+    schema: {text: str}
+    depends_on: [output/effective_holdings.csv]
+  - name: output/turnover.csv
+    schema: {text: str}
+    depends_on: [output/effective_holdings.csv]
+  - name: output/overlap_latest.csv
+    schema: {text: str}
+    depends_on: [output/effective_holdings.csv]
+  - name: output/crowded_securities_latest.csv
+    schema: {text: str}
+    depends_on: [output/effective_holdings.csv]
+  - name: output/cleaning_audit.csv
+    schema: {text: str}
+    depends_on: [output/effective_holdings.csv]
+  - name: output/summary.json
+    schema: {text: str}
+    depends_on:
+      - output/manager_metrics.csv
+      - output/turnover.csv
+      - output/overlap_latest.csv
+      - output/crowded_securities_latest.csv
+
+sources:
+  - {ref: instruction, locator: input/instruction.md}
+  - {ref: infotable, locator: input/data/INFOTABLE.tsv}
+  - {ref: coverpage, locator: input/data/COVERPAGE.tsv}
+  - {ref: submission, locator: input/data/SUBMISSION.tsv}
+  - {ref: summarypage, locator: input/data/SUMMARYPAGE.tsv}
+  - {ref: target-managers, locator: input/data/target_managers.csv}
+  - {ref: target-periods, locator: input/data/target_periods.csv}
+
+constraints:
+  # ★ 只放一条【弱】自检：产物在不在、能不能解析。
+  #   真正的判据（官方 test_outputs.py + reference_data）在【外面】跑 —— 不许放进本任务，
+  #   否则参考答案会泄漏进 agent 的可见范围（照官方口径：checks 是 grader 侧材料）。
+  hard:
+    - id: C-outputs-present
+      kind: custom
+      target: output/summary.json
+      spec:
+        check: shell_command
+        command: "cd _run/workspace && /mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import json,pathlib; d=pathlib.Path('output'); need=['filing_resolution.csv','effective_holdings.csv','manager_metrics.csv','turnover.csv','overlap_latest.csv','crowded_securities_latest.csv','cleaning_audit.csv','summary.json']; miss=[f for f in need if not (d/f).exists() or (d/f).stat().st_size==0]; json.load(open(d/'summary.json')); print('missing:', miss); raise SystemExit(1 if miss else 0)\""
+      rationale: "八个产物必须都写出来且非空；summary.json 必须是合法 JSON（真正的语义判据在外部）"
+
+limits: {max_rounds: 4}
+notes: 产物规格见 input/instruction.md；判据是官方的，不在本任务内。

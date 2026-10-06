@@ -106,22 +106,56 @@ def _deliverables(data: Mapping[str, Any], source: str) -> tuple[DeliverableSpec
     raw_items = data.get("deliverables")
     if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)) or not raw_items:
         _fail(source, "$.deliverables", "at least one deliverable is required", "required")
+    for index, raw in enumerate(raw_items):
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("name"), str) or not raw["name"]:
+            _fail(source, f"$.deliverables[{index}].name", "deliverable name must be a non-empty string", "required")
+    #: ★ 层次切分：先收齐名字，再校验依赖 —— 声明了一个不存在的产物是**契约错误**，
+    #: 在文件旁边当场报（与 `#32` 的 encoding/eol 同一条纪律），不留到运行期才炸。
+    names = {str(raw["name"]) for raw in raw_items}
     deliverables: list[DeliverableSpec] = []
     for index, raw in enumerate(raw_items):
         path = f"$.deliverables[{index}]"
-        if not isinstance(raw, Mapping) or not isinstance(raw.get("name"), str) or not raw["name"]:
-            _fail(source, f"{path}.name", "deliverable name must be a non-empty string", "required")
+        name = str(raw["name"])
         schema = raw.get("schema", {})
         if not isinstance(schema, Mapping):
             _fail(source, f"{path}.schema", "deliverable schema must be a mapping", "type")
         required = raw.get("required", True)
         if not isinstance(required, bool):
             _fail(source, f"{path}.required", "required must be a boolean", "type")
+        depends_on = _depends_on(raw.get("depends_on", ()), source, path, name=name, names=names)
         try:
-            deliverables.append(DeliverableSpec(name=raw["name"], schema=dict(schema), required=required))
+            deliverables.append(
+                DeliverableSpec(name=name, schema=dict(schema), required=required, depends_on=depends_on)
+            )
         except ValueError as exc:
             _fail(source, path, str(exc), "deliverable")
     return tuple(deliverables)
+
+
+def _depends_on(raw: Any, source: str, path: str, *, name: str, names: set[str]) -> tuple[str, ...]:
+    """`deliverables[].depends_on` -> a de-duplicated tuple of declared upstream names.
+
+    A missing key and an explicit `[]` are the same thing: no declared chain, so
+    the cut falls back to whatever it did before layered splitting existed. A name
+    that is not another deliverable of the same contract is refused here rather
+    than silently dropped -- a dropped dependency is a missing input, and a
+    missing input is what makes a worker invent one.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        _fail(source, f"{path}.depends_on", "depends_on must be a list of deliverable names", "type")
+    ordered: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry:
+            _fail(source, f"{path}.depends_on", "depends_on entries must be non-empty strings", "type")
+        if entry == name:
+            _fail(source, f"{path}.depends_on", f"{entry!r} depends on itself", "selfReference")
+        if entry not in names:
+            _fail(source, f"{path}.depends_on", f"{entry!r} is not a declared deliverable", "additionalProperties")
+        if entry not in ordered:
+            ordered.append(entry)
+    return tuple(ordered)
 
 
 def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:

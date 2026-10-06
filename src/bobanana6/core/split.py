@@ -27,11 +27,13 @@ from .model import (
 )
 from .ontology import map_field
 
-__all__ = ["CHECKS", "SplitReport", "SplitViolation", "check_split", "subtask_layers"]
+__all__ = ["CHECKS", "SplitReport", "SplitViolation", "check_split", "declared_layers", "subtask_layers"]
 
-#: The eleven checks the spec enumerates, in reporting order.
+#: The checks the spec enumerates, in reporting order.
 CHECKS: tuple[str, ...] = (
     "star",
+    "layer_lateral",
+    "layer_wiring",
     "iface_complete",
     "iface_match",
     "verifiable",
@@ -76,34 +78,62 @@ def _by_output(plan: SplitPlan) -> dict[str, Subtask]:
     return mapping
 
 
-def subtask_layers(plan: SplitPlan) -> tuple[dict[str, int], tuple[str, ...]]:
-    """Dependency depth per subtask, plus a cycle report.
+def _depth(
+    nodes: tuple[tuple[str, str, tuple[str, ...]], ...],
+) -> tuple[dict[str, int], tuple[str, ...]]:
+    """Longest-path depth over `(id, output, inputs)` nodes, plus a cycle report.
 
-    Nodes and edges are inserted in sorted order: ``TopologicalSorter`` keeps
-    insertion order, so unsorted input would make the result depend on dict
-    ordering rather than on the plan.
+    One implementation for two callers: the plan's own blocks (``subtask_layers``)
+    and the **contract's declared deliverable graph** (used by the layered check to
+    have a layering that does not come from the plan itself). Nodes and edges are
+    inserted in sorted order: ``TopologicalSorter`` keeps insertion order, so
+    unsorted input would make the result depend on dict ordering.
     """
-    producer = _by_output(plan)
-    nodes = sorted(subtask.id for subtask in plan.subtasks)
-    graph: dict[str, list[str]] = {node: [] for node in nodes}
-    for subtask in sorted(plan.subtasks, key=lambda s: s.id):
-        for name in sorted(set(subtask.inputs)):
+    order_of = sorted(nodes, key=lambda item: item[0])
+    producer: dict[str, str] = {}
+    for node_id, output, _inputs in order_of:
+        producer.setdefault(output, node_id)
+    ids = [node_id for node_id, _output, _inputs in order_of]
+    graph: dict[str, list[str]] = {node_id: [] for node_id in ids}
+    for node_id, _output, inputs in order_of:
+        for name in sorted(set(inputs)):
             upstream = producer.get(name)
-            if upstream is not None and upstream.id != subtask.id and upstream.id in graph:
-                graph[subtask.id].append(upstream.id)
+            if upstream is not None and upstream != node_id and upstream in graph:
+                graph[node_id].append(upstream)
 
-    sorter = TopologicalSorter({node: graph[node] for node in nodes})
+    sorter = TopologicalSorter({node_id: graph[node_id] for node_id in ids})
     try:
         order = list(sorter.static_order())
     except CycleError as exc:
         cycle = tuple(str(part) for part in exc.args[1]) if len(exc.args) > 1 else ()
-        return ({node: 0 for node in nodes}, cycle)
+        return ({node_id: 0 for node_id in ids}, cycle)
 
-    depth: dict[str, int] = {node: 0 for node in nodes}
-    for node in order:
-        for upstream in graph[node]:
-            depth[node] = max(depth[node], depth[upstream] + 1)
+    depth: dict[str, int] = {node_id: 0 for node_id in ids}
+    for node_id in order:
+        for upstream in graph[node_id]:
+            depth[node_id] = max(depth[node_id], depth[upstream] + 1)
     return depth, ()
+
+
+def subtask_layers(plan: SplitPlan) -> tuple[dict[str, int], tuple[str, ...]]:
+    """Dependency depth per subtask, plus a cycle report."""
+    nodes = tuple((subtask.id, subtask.output, tuple(subtask.inputs)) for subtask in plan.subtasks)
+    return _depth(nodes)
+
+
+def declared_layers(contract: TaskContract) -> dict[str, int]:
+    """Layer per **declared** deliverable, from the contract's `depends_on` graph.
+
+    This is the independent side of the layered check: the plan is one statement of
+    the graph, the contract is another, and `layer_lateral` compares them. An
+    undeclared deliverable has no edge, so it sits at layer 0.
+    """
+    nodes = tuple(
+        (deliverable.name, deliverable.name, tuple(deliverable.depends_on))
+        for deliverable in contract.deliverables
+    )
+    depth, _cycle = _depth(nodes)
+    return depth
 
 
 def check_split(
@@ -148,6 +178,60 @@ def check_split(
             bad = sorted(name for name in set(subtask.inputs) if name in produced)
             if bad:
                 add("star", f"block {subtask.id!r} depends on block outputs {bad!r}", subtask.id)
+
+    # -- layered: same-layer independence + wiring exactly as declared ------
+    # ★ 层次切分新增的两条约束：
+    #   ① `layer_lateral` —— 同层内不许有横向依赖。层取**契约声明的图**
+    #      （`declared_layers`），不是计划自己的分层 —— 两边是两份独立声明，比较才有意义：
+    #      一个块把"契约里与它同层的产物"当输入，就是横向依赖。
+    #   ③ `layer_wiring`  —— 接口数纪律：一个块**只许**声明它真正需要的上游，
+    #      即契约为它声明的那几条边。禁止"把上层的全部产物都当输入"（§4.3 的
+    #      N(N-1)/2 灾难）；自依赖也在这里拦（自己吃自己的产物不是接线，是环）。
+    #   ② 跨层无环由既有的 `cycle` 覆盖（它在分层之前就算，对每种形状都跑）。
+    if plan.shape == "layered":
+        producer_by_output = _by_output(plan)
+        declared_deps = {deliverable.name: tuple(deliverable.depends_on) for deliverable in contract.deliverables}
+        layer_of = declared_layers(contract)
+        position = {block.id: index for index, block in enumerate(plan.subtasks)}
+        for subtask in sorted(plan.subtasks, key=lambda s: s.id):
+            consumer_layer = layer_of.get(subtask.output)
+            for name in sorted(set(subtask.inputs)):
+                upstream = producer_by_output.get(name)
+                if upstream is None:
+                    continue  # iface_complete 已经就"指向不存在的接口"报过
+                if upstream.id == subtask.id:
+                    add("layer_wiring", f"block {subtask.id!r} declares its own output {name!r} as an input", subtask.id)
+                    continue
+                # ★ 计划【写下来的顺序】必须能被执行：块按 subtasks 顺序串行跑，上游排在
+                #   下游后面 ⇒ 下游开工时输入还没有（前置门 `inputs_unavailable`，0 次调用）。
+                #   这不是"运行时运气"，是计划本身的合法性。
+                if position.get(upstream.id, 0) > position.get(subtask.id, 0):
+                    add(
+                        "layer_wiring",
+                        f"block {subtask.id!r} is listed before its upstream {upstream.id!r} ({name!r})",
+                        subtask.id,
+                        upstream.id,
+                    )
+                producer_layer = layer_of.get(name)
+                if consumer_layer is not None and producer_layer is not None and producer_layer == consumer_layer:
+                    add(
+                        "layer_lateral",
+                        f"block {subtask.id!r} depends on same-layer block {upstream.id!r} ({name!r})",
+                        subtask.id,
+                        upstream.id,
+                    )
+            if subtask.output in declared_deps:
+                # 只比【交付物之间】的边：读块产出的部件不在契约的 depends_on 里
+                # （契约声明的是产物图，不是"读哪个源"），它由 ① 的同层约束管。
+                deliverable_inputs = {name for name in subtask.inputs if name in contract.deliverable_names}
+                want = set(declared_deps[subtask.output])
+                if deliverable_inputs != want:
+                    add(
+                        "layer_wiring",
+                        f"block {subtask.id!r} declares inputs {sorted(deliverable_inputs)!r} "
+                        f"but the contract declares {sorted(want)!r} for {subtask.output!r}",
+                        subtask.id,
+                    )
 
     # -- iface_complete ----------------------------------------------------
     known_interfaces = set(plan.interfaces)

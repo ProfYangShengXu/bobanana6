@@ -1148,3 +1148,65 @@ def test_no_second_hand_written_source_of_the_answer_shape() -> None:
             if len(present) >= 2:
                 offenders.append(f"{path.relative_to(root)}:{node.lineno} {present}")
     assert offenders == [], f"契约之外又出现了手写的答案形状：{offenders}"
+
+
+# --------------------------------------------------------------------------- #
+# ★ 层次切分：块与块之间真的接力（端到端，不是只看计划）
+# --------------------------------------------------------------------------- #
+
+RELAY = """
+task_id: t-relay
+goal: chain two products
+deliverables:
+  - {name: a.csv, schema: {obligor: str}}
+  - {name: b.csv, schema: {obligor: str}, depends_on: [a.csv]}
+sources:
+  - {ref: src-1, locator: SOURCE_CSV}
+constraints:
+  hard:
+    - {id: C-1, kind: presence, target: "*", spec: {min_rows: 1}, rationale: "no empty products"}
+"""
+
+
+class _RelayRecorder:
+    """Records the prompt each block received, and answers with a one-row product."""
+
+    def __init__(self) -> None:
+        self.prompts: dict[str, list[str]] = {}
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        block = ""
+        for message in messages:
+            if message.get("role") == "user":
+                try:
+                    block = json.loads(str(message.get("content")))["subtask"]["id"]
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    block = ""
+                if block:
+                    break
+        self.prompts.setdefault(block, []).append(json.dumps(messages, ensure_ascii=False))
+        return ModelResponse(
+            text=json.dumps(
+                {
+                    "columns": [{"name": "obligor", "dtype": "str"}],
+                    "ref": "src-1",
+                    "rows": [{"obligor": f"seen-by-{block}"}],
+                }
+            )
+        )
+
+
+def test_a_layered_plan_delivers_upstream_products_to_the_next_block(tmp_path: Path) -> None:
+    source = _csv(tmp_path, "a.csv", "obligor\nA-1\n")
+    client = _RelayRecorder()
+    runner = _runner(tmp_path, RELAY.replace("SOURCE_CSV", str(source)), client)
+    result = runner.run()
+
+    assert result.plan.shape == "layered"
+    assert [block.inputs for block in result.plan.subtasks] == [(), ("a.csv",)]
+    # ★ 改前（inputs 全空）这里不可能出现 delivered_inputs；改后 T-02 收到了 T-01 的产物。
+    downstream = client.prompts["T-02"][0]
+    assert "delivered_inputs" in downstream
+    assert "seen-by-T-01" in downstream
+    # 同层零依赖：T-01 的提示里没有任何上游输入
+    assert "delivered_inputs" not in client.prompts["T-01"][0]

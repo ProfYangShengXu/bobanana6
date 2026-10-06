@@ -35,18 +35,28 @@ from ..core.model import (
     TaskContract,
 )
 from ..core.ontology import map_field
+from ..core.split import declared_layers
 from .budget import RoundBudget, can_refine
 
 __all__ = [
+    "LAYERED_SPLIT",
     "STRATEGIES",
     "Decomposer",
+    "declared_dependencies",
     "estimate_costs",
+    "split_by_dependency",
     "split_by_field",
     "split_by_source",
     "split_single",
 ]
 
 STRATEGIES: tuple[str, ...] = ("source", "field", "module", "single")
+
+#: ★ 层次切分的能力开关（反证用）：`False` = 忽略契约里的 `depends_on`，回到改动前的形状。
+#: 它不是部署开关，而是把「层间可依赖」这件事做成**可开可关的一条能力** —— 这样
+#: 「不修 → 稳定复现、修 → 消失」才能被同一条输入演示两次。读取点只有一个：
+#: `Decomposer._build`（单点收口）。
+LAYERED_SPLIT: bool = True
 
 
 def estimate_costs(block_count: int) -> PlanCosts:
@@ -410,6 +420,84 @@ def split_single(
     )
 
 
+def declared_dependencies(contract: TaskContract) -> dict[str, tuple[str, ...]]:
+    """`{产物名: 它声明的上游产物们}` —— 只收**非空**的声明。
+
+    ★ 依赖信息只有一条来源：契约（`DeliverableSpec.depends_on`）。`decompose/` 不解析
+    散文、不猜语言，也**不发明**依赖 —— 这样切分对同一份契约是逐字可复现的。
+    一份声明都没有 ⇒ 空字典 ⇒ `Decomposer._build` 走原来的形状（这是 ④ 的回落）。
+    """
+    return {
+        deliverable.name: tuple(deliverable.depends_on)
+        for deliverable in contract.deliverables
+        if deliverable.depends_on
+    }
+
+
+def split_by_dependency(
+    contract: TaskContract,
+    ontology: Ontology,
+    recon: Recon | None = None,
+    *,
+    round: int = 1,
+    version: int = 1,
+) -> SplitPlan:
+    """★ 层次切分：一份产物一块，按契约声明的 `depends_on` 接线。
+
+    与 `split_single` 的唯一差别是 `inputs`：这里的输入是**上一层产物**，于是
+    块与块之间真的有数据流（runner 把上游的 `piece` 递给下一块）。同层的块之间
+    **没有**边 —— 层号就是依赖深度（`core/split.py::subtask_layers`），所以
+    同一层永远可以并行、且每块只声明它真正需要的那几件上游（接口数 = 声明边数，
+    不是 N(N-1)/2）。
+
+    没有收缩成"只按声明的产物图切"的地方：**读源**（`split_by_source` 的读块）不在
+    这张图里 —— 产物图是交付物之间的图，叶子产物自己去读它需要的源。这是刻意的：
+    把"读哪个源"和"依赖哪份产物"混成一件事，会把两种不同的依赖塞进一个字段。
+
+    形状声明为 `layered`（不是 `pipeline`）：`pipeline` 今天指"读层 → 写层"的两层
+    扇出（写块之间零依赖），`layered` 才是真正逐层传动的那一种。两者都不许再含糊。
+
+    ★ **块按拓扑序排**：runner 是普通 for（`runner.py:252`），按 `plan.subtasks` 顺序执行；
+    契约里把下游写在前面是合法的（`depends_on` 不规定书写顺序），但那样排出来的计划
+    跑不了（下游开工时输入还没产出）。所以这里按**声明层**稳定排序（同层保持契约顺序），
+    `core/split.py::layer_wiring` 再把"顺序可执行"写成断言。
+    """
+    interfaces: dict[str, str] = {}
+    for deliverable in contract.deliverables:
+        fields = tuple(sorted(deliverable.schema)) or ("value",)
+        interfaces[deliverable.name] = _descriptor(fields)
+    layers = declared_layers(contract)
+    ordered = sorted(contract.deliverables, key=lambda deliverable: layers.get(deliverable.name, 0))
+    blocks: list[Subtask] = []
+    for index, deliverable in enumerate(ordered, start=1):
+        fields = tuple(sorted(deliverable.schema)) or ("value",)
+        upstream = tuple(deliverable.depends_on)
+        blocks.append(
+            Subtask(
+                id=f"T-{index:02d}",
+                goal=f"produce {deliverable.name!r}",
+                inputs=upstream,
+                output=deliverable.name,
+                contract_ref=contract.task_id,
+                axis="product",
+                mode="write",
+                partition=f"deliverable:{deliverable.name}",
+                expects=tuple((name, interfaces[name]) for name in upstream),
+                output_fields=_mapped(ontology, fields),
+            )
+        )
+    return SplitPlan(
+        task_id=contract.task_id,
+        version=version,
+        round=round,
+        subtasks=tuple(blocks),
+        shape="layered",
+        interfaces=interfaces,
+        recon_evidence=recon.evidence if recon is not None else "",
+        costs=estimate_costs(len(blocks)),
+    )
+
+
 class Decomposer:
     """Implements ``core.ports.DecomposerPort`` for the strategies that exist."""
 
@@ -441,6 +529,10 @@ class Decomposer:
         if not can_refine(plan, self._budget):
             return plan
         self._version += 1
+        # ★ 声明过的链不许在 refine 里蒸发：重切也走同一张产物图（`_build` 的收口点在
+        #   这里补一份 —— 否则"第一次分层、第二次拍平"会是一条静默的退化路径）。
+        if LAYERED_SPLIT and declared_dependencies(contract):
+            return split_by_dependency(contract, ontology, round=plan.round + 1, version=self._version)
         failed = tuple(sorted(set(getattr(outcome, "failed_blocks", ()))))
         fields = tuple(sorted({field for block in plan.subtasks if block.id in failed for field in block.output_fields}))
         return split_by_field(
@@ -452,6 +544,11 @@ class Decomposer:
         )
 
     def _build(self, contract: TaskContract, ontology: Ontology, recon: Recon | None, *, round: int, version: int) -> SplitPlan:
+        # ★ 层次切分：契约一旦声明了"产物依赖产物"，这条链就是任务自己给的切口，
+        #   任何策略都不许把它丢掉 —— 所以在派发之前收口一次（单点判断）。没有声明
+        #   （含单产物任务）时一个字节都不变，走下面的原策略。`LAYERED_SPLIT` 是反证开关。
+        if LAYERED_SPLIT and declared_dependencies(contract):
+            return split_by_dependency(contract, ontology, recon, round=round, version=version)
         if self._strategy == "source":
             return split_by_source(contract, ontology, recon, round=round, version=version)
         if self._strategy == "field":

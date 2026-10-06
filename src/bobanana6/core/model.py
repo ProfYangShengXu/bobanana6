@@ -411,9 +411,15 @@ class DeliverableSpec:
         default_factory=dict
     )
     required: bool = True  # core:assemble —— cut_complete 只强制 required 的交付物必须产出
+    #: ★ 层次切分：这份产物【依赖哪些别的产物】—— 由契约的提供方写明（`adapters/`
+    #: 不猜、`decompose/` 不解析散文）。空元组 = 没有声明链，此时切分照旧。
+    #: core:split —— 分层、同层检查与「接口数纪律」都读它。
+    depends_on: tuple[str, ...] = ()  # core:split —— layered 计划据此接线
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "DeliverableSpec.name must not be empty")
+        for upstream in self.depends_on:
+            _require_non_empty(upstream, "DeliverableSpec.depends_on entries must not be empty")
 
 
 #: ★ `#32`: 载体行尾的**声明词表**（数据，不是判定）。`""` = 没声明；`preserve` = 原样。
@@ -491,7 +497,7 @@ class Subtask:
         _require_non_empty(self.output, "Subtask.output must not be empty")
         _require(self.mode in {"read", "write"}, f"unknown subtask mode: {self.mode}")
         _require(
-            self.axis in {"source", "entity", "window", "field", "module"},
+            self.axis in {"source", "entity", "window", "field", "module", "product"},
             f"unknown subtask axis: {self.axis}",
         )
 
@@ -540,7 +546,7 @@ class SplitPlan:
         _require_non_empty(self.task_id, "SplitPlan.task_id must not be empty")
         _require(self.version >= 1, "SplitPlan.version must be >= 1")
         _require(self.round >= 0, "SplitPlan.round must be >= 0")
-        _require(self.shape in {"star", "pipeline", "grid"}, f"unknown plan shape: {self.shape}")
+        _require(self.shape in {"star", "pipeline", "grid", "layered"}, f"unknown plan shape: {self.shape}")
 
     @property
     def subtask_ids(self) -> tuple[str, ...]:

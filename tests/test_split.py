@@ -3,6 +3,7 @@ violations but are not."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 ACCEPTANCE = Path(__file__).resolve().parents[1] / "acceptance"
@@ -17,8 +18,8 @@ from fakes import (
     unfrozen_ontology,
 )
 
-from bobanana6.core.model import PlanCosts
-from bobanana6.core.split import CHECKS, STRUCTURAL_CHECKS, check_split
+from bobanana6.core.model import DeliverableSpec, PlanCosts, TaskContract
+from bobanana6.core.split import CHECKS, STRUCTURAL_CHECKS, check_split, subtask_layers
 from bobanana6.ontology import load_ontology_file
 
 
@@ -52,8 +53,14 @@ def report(item=None, contract_=None, item_bundle=None, ontology=None, **kwargs)
 
 
 def test_check_list_matches_the_spec() -> None:
-    assert len(CHECKS) == 11
+    # ★ 层次切分把 11 条扩到 13 条（layer_lateral / layer_wiring），规格同步改过。
+    assert len(CHECKS) == 13
     assert CHECKS[0] == "star"
+
+
+def test_the_layered_checks_are_named_in_the_spec_list() -> None:
+    assert "layer_lateral" in CHECKS
+    assert "layer_wiring" in CHECKS
 
 
 def test_clean_plan_passes_every_check() -> None:
@@ -316,3 +323,108 @@ def test_the_module_strategy_needs_two_deliverables_for_the_interface_block() ->
     assert report.ok, report.codes()
     assert plan.subtasks[0].output == "input/repo/shared.py"
     assert not any(block.output == "interface.json" for block in plan.subtasks)
+
+# --------------------------------------------------------------------------- #
+# ★ 层次切分：layered 的两条新检查（layer_lateral / layer_wiring）
+# --------------------------------------------------------------------------- #
+
+
+def _layered_contract(*, d_deps=("b.csv", "c.csv")):
+    """a leaf; b/c siblings from a; d joins b+c. `depends_on` is the only input."""
+    return TaskContract(
+        task_id="task-1",
+        goal="layered",
+        deliverables=(
+            DeliverableSpec(name="a.csv"),
+            DeliverableSpec(name="b.csv", depends_on=("a.csv",)),
+            DeliverableSpec(name="c.csv", depends_on=("a.csv",)),
+            DeliverableSpec(name="d.csv", depends_on=tuple(d_deps)),
+        ),
+    )
+
+
+def _layered_plan(contract_=None):
+    item_contract = contract_ if contract_ is not None else _layered_contract()
+    blocks = (
+        subtask("T-01", output="a.csv", mode="write", partition="deliverable:a", output_fields=("pd_3y",)),
+        subtask("T-02", output="b.csv", inputs=("a.csv",), mode="write", partition="deliverable:b", output_fields=("pd_3y",)),
+        subtask("T-03", output="c.csv", inputs=("a.csv",), mode="write", partition="deliverable:c", output_fields=("pd_3y",)),
+        subtask("T-04", output="d.csv", inputs=("b.csv", "c.csv"), mode="write", partition="deliverable:d", output_fields=("pd_3y",)),
+    )
+    interfaces = {name: "schema:pd" for name in ("a.csv", "b.csv", "c.csv", "d.csv")}
+    item_bundle = bundle(hard=tuple(constraint(f"C-{i}", "presence", name, {"min_rows": 1}) for i, name in enumerate(("a.csv", "b.csv", "c.csv", "d.csv"))))
+    return plan(subtasks=blocks, shape="layered", interfaces=interfaces, costs=PlanCosts(merge=1.0, execute=10.0)), item_contract, item_bundle
+
+
+def _replace_subtask(item, sid, **changes):
+    return replace(item, subtasks=tuple(replace(block, **changes) if block.id == sid else block for block in item.subtasks))
+
+
+def test_layered_plan_passes_and_layers_by_dependency_depth() -> None:
+    item, item_contract, item_bundle = _layered_plan()
+    result = check_split(item, item_contract, item_bundle, mini_ontology(), frozen_hash=mini_ontology().content_hash())
+    assert result.ok, result.codes()
+    depth, cycle = subtask_layers(item)
+    assert cycle == ()
+    assert [depth[sid] for sid in ("T-01", "T-02", "T-03", "T-04")] == [0, 1, 1, 2]
+
+
+def test_layer_lateral_rejects_a_same_layer_dependency() -> None:
+    """① 同层不许横向依赖：契约里 d 与 a 同在第 0 层，计划却让 d 吃 a 的产物。"""
+    item, item_contract, item_bundle = _layered_plan(_layered_contract(d_deps=()))
+    broken = _replace_subtask(item, "T-04", inputs=("a.csv",))
+    codes = check_split(broken, item_contract, item_bundle, mini_ontology()).codes()
+    assert "layer_lateral" in codes
+
+
+def test_layer_wiring_rejects_declaring_more_than_the_contract() -> None:
+    """③ 接口数纪律：把"上层的全部产物"都当输入（§4.3 的 N(N-1)/2 灾难）要红。"""
+    item, item_contract, item_bundle = _layered_plan()
+    broken = _replace_subtask(item, "T-04", inputs=("a.csv", "b.csv", "c.csv"))
+    result = check_split(broken, item_contract, item_bundle, mini_ontology())
+    assert "layer_wiring" in result.codes()
+    assert any("contract declares" in v.detail for v in result.violations if v.check == "layer_wiring")
+
+
+def test_layer_wiring_rejects_a_self_dependency() -> None:
+    item, item_contract, item_bundle = _layered_plan()
+    broken = _replace_subtask(item, "T-02", inputs=("b.csv",))
+    codes = check_split(broken, item_contract, item_bundle, mini_ontology()).codes()
+    assert "layer_wiring" in codes
+
+
+def test_layered_plan_still_rejects_a_cycle() -> None:
+    """② 跨层无环：b↔c 互依赖，`cycle` 必须在分层之前就报出来。"""
+    item, item_contract, item_bundle = _layered_plan()
+    broken = _replace_subtask(_replace_subtask(item, "T-02", inputs=("c.csv",)), "T-03", inputs=("b.csv",))
+    codes = check_split(broken, item_contract, item_bundle, mini_ontology()).codes()
+    assert "cycle" in codes
+
+
+def test_a_read_block_on_the_chain_does_not_confuse_the_layers() -> None:
+    """③ 换块类型：链上混入 read 模式，层号仍按依赖深度算，检查不误伤。"""
+    item, item_contract, item_bundle = _layered_plan()
+    reader = subtask("T-00", output="part-a.csv", mode="read", output_fields=("pd_3y",))
+    wired = tuple(
+        replace(block, inputs=("part-a.csv",)) if block.id == "T-01" else block
+        for block in item.subtasks
+    )
+    item = plan(
+        subtasks=(reader, *wired),
+        shape="layered",
+        interfaces={**dict(item.interfaces), "part-a.csv": "schema:pd"},
+        costs=PlanCosts(merge=1.0, execute=10.0),
+    )
+    depth, _ = subtask_layers(item)
+    assert depth["T-00"] == 0 and depth["T-01"] == 1 and depth["T-04"] == 3
+    codes = check_split(item, item_contract, item_bundle, mini_ontology()).codes()
+    assert "layer_lateral" not in codes
+
+
+def test_layer_wiring_rejects_a_consumer_listed_before_its_producer() -> None:
+    """顺序也是接线：runner 按 subtasks 顺序跑，上游排在下游后面 ⇒ 计划不可执行。"""
+    item, item_contract, item_bundle = _layered_plan()
+    swapped = replace(item, subtasks=(item.subtasks[1], item.subtasks[0], *item.subtasks[2:]))
+    result = check_split(swapped, item_contract, item_bundle, mini_ontology())
+    assert "layer_wiring" in result.codes()
+    assert any("listed before its upstream" in v.detail for v in result.violations if v.check == "layer_wiring")
