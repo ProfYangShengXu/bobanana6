@@ -129,6 +129,30 @@ def _contract_sources(task_dir: Path, task_file: str = "task.yaml") -> tuple[str
     return tuple(str(row.get("ref", "")) for row in (document.get("sources", ()) or ()) if isinstance(row, dict))
 
 
+def _contract_deliverables(task_dir: Path, task_file: str = "task.yaml") -> tuple[str, ...]:
+    """The declared deliverable paths — read to **prepare the workspace**, nothing else.
+
+    ★ 用途只有一个：工作区播种时按它们建好父目录（见 ``run_task`` 里的注记）。
+    ★ 读不到就返回空 —— 这不是判定，缺了只影响"目录先建好"这个便利，
+      不许因此让任何一跑失败。
+    """
+    import yaml
+
+    try:
+        document = yaml.safe_load((task_dir / task_file).read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 - 准备工作，读不出来就不建
+        return ()
+    rows = document.get("deliverables") or ()
+    if not isinstance(rows, (list, tuple)):
+        return ()
+    names: list[str] = []
+    for row in rows:
+        name = str((row or {}).get("name", "")) if isinstance(row, dict) else str(row or "")
+        if name and not name.startswith(("/", "\\")) and ".." not in Path(name).parts:
+            names.append(name)
+    return tuple(names)
+
+
 def run_task(
     task_dir: str | Path,
     *,
@@ -173,6 +197,19 @@ def run_task(
         #   `<ws>/input/...` —— 冻结比对与写区检查都按这一条比较（不猜布局）。
         workspace_dir.mkdir(parents=True, exist_ok=True)
         shutil.copytree(base / "input", workspace_dir / "input")
+        # ★★ 工作区必须**能完成这道题**：契约声明的产物目录要先存在。
+        #   实测（13f）：deliverables 是 `output/*.csv`，而块要生成一份 1681 行的
+        #   CSV 只能靠 `code.run`（手写不了），于是 Python 里
+        #   `df.to_csv('output/x.csv')` 直接
+        #     `OSError: Cannot save file into a non-existent directory: 'output'`
+        #   —— `files.write` 会自建父目录，`code.run` / `shell.run` **不会**。
+        #   ⇒「块自己算、再落盘」这条路在**环境层面**就是断的；
+        #     那是壳的账，不是模型的账（模型再怎么听话也写不出来）。
+        #   ★ 按**契约自己声明的**交付物建目录，不特判任何题目。
+        for name in _contract_deliverables(base, task_file):
+            parent = (workspace_dir / name).parent
+            if parent != workspace_dir:
+                parent.mkdir(parents=True, exist_ok=True)
         if workspace_seed is not None:
             # ★ 反证钩子：播种之后、开跑之前动工作区（例如把测试改松）——
             #   "测试文件被改"必须在装配期被抓住，而不是靠没人去改。
