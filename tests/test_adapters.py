@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 from pathlib import Path
 from typing import Any, Self
@@ -328,3 +329,156 @@ def test_timeout_refuses_a_non_number() -> None:
 def test_timeout_must_be_positive() -> None:
     with pytest.raises(LLMConfigError, match="timeout_s must be > 0"):
         _settings(timeout_s=0.0)
+
+
+# --------------------------------------------------------------------------- #
+# ★ 线格式工具名：严格端点只接受 [a-zA-Z0-9_-]+，而壳内部的工具名含点号
+#   （这是**适配器层**的账：工具叫什么没错，错在发出去前没做合规转换）
+# --------------------------------------------------------------------------- #
+
+
+def _real_menu() -> list[dict[str, Any]]:
+    """真实工具面：内部名字含点号，正是严格端点会 400 的那一份。"""
+    from bobanana6.core.ports import _BASE_TOOL_SPECS
+
+    return [
+        {"type": "function", "function": {"name": spec.name, "description": spec.returns, "parameters": {}}}
+        for spec in _BASE_TOOL_SPECS
+    ]
+
+
+def _strict_endpoint(client: OpenAICompatibleClient, tools: list[dict[str, Any]]) -> dict[str, Any]:
+    """像一个严格端点那样校验 `function.name`（DeepSeek 官方的逐字约束）。"""
+    opener = _RecordingOpener(_FakeResponse(_reply("ok")))
+    client.opener = opener
+    client.complete([{"role": "user", "content": "hi"}], tools, 64)
+    payload = json.loads(opener.requests[0].data.decode())
+    for tool in payload.get("tools", []):
+        name = tool.get("function", {}).get("name", "")
+        assert re.match(r"^[a-zA-Z0-9_-]+$", name), f"non-compliant function.name on the wire: {name!r}"
+        assert len(name) <= 64, name
+    return payload
+
+
+def test_the_internal_menu_is_not_wire_compliant(tmp_path: Path) -> None:
+    """★ 病根的读数：壳内部的工具名**本来就**过不了严格端点的 pattern。"""
+    internal = [tool["function"]["name"] for tool in _real_menu()]
+    assert any("." in name for name in internal), internal
+    assert [name for name in internal if not re.match(r"^[a-zA-Z0-9_-]+$", name)]
+
+
+def test_the_wire_menu_satisfies_the_strict_pattern() -> None:
+    """★ 改后：送出去的每一个 `function.name` 都合规（`semantics.lookup` → `semantics_lookup`）。"""
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    payload = _strict_endpoint(client, _real_menu())
+    names = [tool["function"]["name"] for tool in payload["tools"]]
+    assert "semantics_lookup" in names and "semantics.lookup" not in names
+    assert len(names) == len(set(names)), "线格式名字必须一一对应"
+
+
+def test_a_compliant_menu_is_sent_byte_identically() -> None:
+    """★ 反向：名字本来就合规 ⇒ 出站一个字节都不改（旧端点读数不受影响）。"""
+    menu = [
+        {"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "files_patch", "parameters": {}}},
+    ]
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    opener = _RecordingOpener(_FakeResponse(_reply("ok")))
+    client.opener = opener
+    client.complete([], menu, 8)
+    assert json.loads(opener.requests[0].data.decode())["tools"] == menu
+
+
+def test_an_entry_without_a_function_object_is_left_alone() -> None:
+    """菜单里没有 `function` 的条目原样放行（别为了翻译把形状改了）。"""
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    opener = _RecordingOpener(_FakeResponse(_reply("ok")))
+    client.opener = opener
+    client.complete([], [{"type": "function"}], 8)
+    assert json.loads(opener.requests[0].data.decode())["tools"] == [{"type": "function"}]
+
+
+def test_the_wire_name_comes_back_as_the_internal_name() -> None:
+    """★ 入站：模型回 `semantics_lookup` ⇒ 壳拿到的必须是 `semantics.lookup`。
+
+    否则注册表会把它当"未知工具"，而真正的原因在适配器层。
+    """
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    reply = _reply(
+        "",
+        tool_calls=[
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "semantics_lookup", "arguments": '{"term": "x"}'},
+            }
+        ],
+    )
+    opener = _RecordingOpener(_FakeResponse(reply))
+    client.opener = opener
+    response = client.complete([], _real_menu(), 64)
+    call = response.tool_calls[0]
+    assert call["function"]["name"] == "semantics.lookup"
+    assert call["function"]["arguments"] == '{"term": "x"}' and call["id"] == "c1"
+
+
+def test_a_name_the_shell_never_renamed_is_passed_through() -> None:
+    """模型编的名字不做"猜"还原 —— 原样交给既有的 unknown tool 路径。"""
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    call = {"id": "c1", "type": "function", "function": {"name": "totally_made_up", "arguments": "{}"}}
+    client.opener = _RecordingOpener(_FakeResponse(_reply("", tool_calls=[call])))
+    response = client.complete([], _real_menu(), 64)
+    assert response.tool_calls[0]["function"]["name"] == "totally_made_up"
+
+
+def test_every_internal_tool_name_round_trips() -> None:
+    """★ 一一对应且可逆：没有冲突、每个名字都还原得回来。"""
+    from bobanana6.adapters.tool_names import ToolNameMap, is_wire_name
+
+    internal = [spec.name for spec in __import__(
+        "bobanana6.core.ports", fromlist=["_BASE_TOOL_SPECS"]
+    )._BASE_TOOL_SPECS]
+    names = ToolNameMap.of(internal)
+    assert len(set(names.forward.values())) == len(internal)
+    for name in internal:
+        wire = names.wire(name)
+        assert is_wire_name(wire), wire
+        assert names.internal(wire) == name
+
+
+def test_two_names_that_would_collide_are_refused_not_merged() -> None:
+    """★ 冲突检测：`a.b` 与 `a_b` 清洗后撞车 ⇒ 显式报错，不许静默合并。"""
+    from bobanana6.adapters.tool_names import ToolNameCollision, ToolNameMap
+
+    with pytest.raises(ToolNameCollision, match="both become"):
+        ToolNameMap.of(("a.b", "a_b"))
+    # 同名的重复声明不是冲突（同一张表里同名只出现一次）
+    assert ToolNameMap.of(("a.b", "a.b")).wire("a.b") == "a_b"
+
+
+def test_the_forced_tool_choice_is_translated_too() -> None:
+    """`tool_choice` 里也能点名一个函数 —— 同一个 pattern，同一张表。"""
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    opener = _RecordingOpener(_FakeResponse(_reply("ok")))
+    client.opener = opener
+    client.complete(
+        [], _real_menu(), 8, tool_choice={"type": "function", "function": {"name": "semantics.lookup"}}
+    )
+    payload = json.loads(opener.requests[0].data.decode())
+    assert payload["tool_choice"]["function"]["name"] == "semantics_lookup"
+
+
+def test_the_response_schema_label_is_made_wire_compliant() -> None:
+    """`response_format.json_schema.name` 受**同一个** pattern 管 —— 顺手在边界上收口。"""
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    opener = _RecordingOpener(_FakeResponse(_reply("ok")))
+    client.opener = opener
+    client.complete([], _real_menu(), 8, response_format={"type": "json_schema", "json_schema": {"name": "candidate"}})
+    assert json.loads(opener.requests[0].data.decode())["response_format"]["json_schema"]["name"] == "candidate"
+
+    from bobanana6.adapters.tool_names import ToolNameMap
+
+    dotted = ToolNameMap.of(("semantics.lookup",)).wire_response_format(
+        {"type": "json_schema", "json_schema": {"name": "candidate.v2", "schema": {}}}
+    )
+    assert dotted["json_schema"]["name"] == "candidate_v2"

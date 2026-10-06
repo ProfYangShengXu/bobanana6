@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from bobanana6.adapters.tool_names import changed_names
+
 __all__ = ["Archive", "ArchivingClient", "record_verdicts"]
 
 
@@ -65,6 +67,7 @@ class Archive:
         params: Mapping[str, Any],
         usage: Mapping[str, Any] | None = None,
         phase: str = "produce",
+        wire_names: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         block, turn = _block_and_turn(messages)
         self.seq += 1
@@ -83,6 +86,11 @@ class Archive:
             "tool_calls": [dict(call) for call in tool_calls],
             # ⑧ 壳当时给它的工具菜单：A1 问"它看到什么"，菜单也是看到的东西
             "tools": [dict(tool) for tool in tools],
+            # ★ ⑧ 的补丁：`tools` 是**壳内部**的名字；严格端点只接受 `[a-zA-Z0-9_-]+`，
+            #   所以适配器出站时换成线格式。这里把"改名了多少"一并记下 —— 否则归档会
+            #   声称模型看到 `semantics.lookup`，而它实际看到的是 `semantics_lookup`。
+            #   只列**真的变了**的那些（合规的名字是恒等映射，不占篇幅）。
+            "wire_names": dict(wire_names or {}),
             "usage": dict(usage or {}),
             # ④ 判据的拒绝理由由调用方在 judge 之后补（record_rejection）
             "rejections": [],
@@ -152,5 +160,8 @@ class ArchivingClient:
             tools=tuple(tools or ()),
             params=merged,
             usage=getattr(response, "usage", None) or {},
+            # ★ 模型看到的菜单是**线格式**；只记真的改过名的那些（合规的名字恒等，不占篇幅）。
+            #   冲突在这里也会抛 —— 与适配器同一张表，同一个"不许静默合并"。
+            wire_names=changed_names(tools or []),
         )
         return response

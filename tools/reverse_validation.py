@@ -2143,6 +2143,30 @@ MUTATIONS: tuple[Mutation, ...] = (
         "a workspace write can point outside the workspace again",
     ),
     Mutation(
+        "X47N-tool-names-sent-raw",
+        "adapters/openai_compat.py",
+        "        if tools:\n            payload[\"tools\"] = names.wire_tools(tools)\n",
+        "        if tools:\n            payload[\"tools\"] = list(tools)  # mutation: raw internal names go out\n",
+        "tests/test_adapters.py::test_the_wire_menu_satisfies_the_strict_pattern",
+        "dotted tool names are sent again and every strict endpoint answers 400",
+    ),
+    Mutation(
+        "X47N-collisions-silently-merged",
+        "adapters/tool_names.py",
+        "            existing = reverse.get(wire)\n            if existing is not None and existing != internal:\n",
+        "            existing = reverse.get(wire)\n            if False:  # mutation: a collision picks a winner silently\n",
+        "tests/test_adapters.py::test_two_names_that_would_collide_are_refused_not_merged",
+        "two internal names collapse onto one wire name and the model's call lands on the wrong tool",
+    ),
+    Mutation(
+        "X47N-inbound-name-not-restored",
+        "adapters/openai_compat.py",
+        "        restored = names.internal_calls(calls) if names is not None else tuple(dict(call) for call in calls)\n",
+        "        restored = tuple(dict(call) for call in calls)  # mutation: the wire name is handed to the shell\n",
+        "tests/test_adapters.py::test_the_wire_name_comes_back_as_the_internal_name",
+        "the model's wire name reaches the registry, which reports an unknown tool",
+    ),
+    Mutation(
         "X47-reconciliation-dropped",
         "assemble_impl/produce.py",
         "        ledger = self.ledger\n"

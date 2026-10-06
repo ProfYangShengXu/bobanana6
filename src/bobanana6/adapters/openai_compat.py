@@ -21,6 +21,7 @@ from os import environ
 from typing import Any
 
 from ..core.model import ModelResponse
+from .tool_names import ToolNameMap
 
 __all__ = [
     "DEFAULT_TIMEOUT_S",
@@ -175,16 +176,31 @@ class OpenAICompatibleClient:
         max_tokens: int,
         **kw: Any,
     ) -> ModelResponse:
+        # ★ 出站翻译：严格端点（DeepSeek 官方 / OpenAI 官方 / 多数企业网关）只接受
+        #   `function.name` ∈ [a-zA-Z0-9_-]+。工具的内部名字含点号，是**壳内部**的稳定标识，
+        #   不改（那会散到全仓）；在**发出去之前**换成线格式，入站再换回来。
+        #   冲突（两个内部名字清洗后撞车）在这里就抛，绝不静默合并。
+        names = ToolNameMap.of(
+            [
+                str(tool["function"].get("name", ""))
+                for tool in tools
+                if isinstance(tool, Mapping) and isinstance(tool.get("function"), Mapping)
+            ]
+        )
         payload: dict[str, Any] = {
             "model": self.settings.model,
             "messages": list(messages),
             "max_tokens": max_tokens,
         }
         if tools:
-            payload["tools"] = list(tools)
+            payload["tools"] = names.wire_tools(tools)
         for key in ("temperature", "tool_choice", "response_format"):
             if key in kw:
                 payload[key] = kw[key]
+        if "tool_choice" in payload:
+            payload["tool_choice"] = names.wire_tool_choice(payload["tool_choice"])
+        if "response_format" in payload:
+            payload["response_format"] = names.wire_response_format(payload["response_format"])
         # ★ Vendor extensions last. ``LLMSettings`` already refused to override
         #   ``model`` / ``messages``, so this can only tune the request.
         payload.update(self.settings.extra_body)
@@ -213,10 +229,10 @@ class OpenAICompatibleClient:
             raw = response.read()
         if status != 200:
             raise LLMError(f"model call failed with HTTP {status}", status_code=status)
-        return self._parse(raw)
+        return self._parse(raw, names)
 
     @staticmethod
-    def _parse(raw: bytes) -> ModelResponse:
+    def _parse(raw: bytes, names: ToolNameMap | None = None) -> ModelResponse:
         try:
             document = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -233,9 +249,13 @@ class OpenAICompatibleClient:
         calls = message.get("tool_calls") or ()
         if not isinstance(calls, Sequence) or isinstance(calls, (str, bytes)):
             raise LLMError("tool_calls must be a list")
+        # ★ 入站翻译：模型回的是线格式（`semantics_lookup`），壳内部只认 `semantics.lookup`。
+        #   查**同一张表的反向** —— 只还原我们自己改过的名字，模型编的名字原样放行
+        #   （交给既有的 unknown tool 路径，不在这里猜）。
+        restored = names.internal_calls(calls) if names is not None else tuple(dict(call) for call in calls)
         usage = document.get("usage")
         return ModelResponse(
             text=str(message.get("content") or ""),
-            tool_calls=tuple(calls),
+            tool_calls=restored,
             usage=dict(usage) if isinstance(usage, Mapping) else {},
         )
