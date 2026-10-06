@@ -112,6 +112,32 @@ def _name_of(calls: Sequence[ToolCall], call_id: str) -> str:
 #: `expected_shape()` / 系统提示 / `reference_note` / `files` 要求，全部由它派生。
 EXPECTED_SHAPE = render_shape(ANSWER_CONTRACT)
 
+
+#: ★ 抄自 Hermes `agent/prompt_builder.py::TASK_COMPLETION_GUIDANCE` —— **按规则重写，
+#:   不是逐字复制**：那里治的是通用 agent 的「写完存根就停」，这里治块级工人的
+#:   「形状交对了、内容空着」。这两件事同源，所以规矩同一条。
+#:
+#: 本仓实测复现过它治的两种毛病（13f，A 臂，DeepSeek-V4-Flash）：
+#:   ① **交空壳**：T-01 三次尝试全是 `rows: []`，形状全对、内容全空；
+#:   ② **不取数就作答**：`authorized_sources` 列了 7 个来源，它一次 `sources.*` 都没调，
+#:      看到 `task.upstream_all` 返回 `{}` 就认定"没数据"。
+#: ★ Hermes 那边的注释里记着这毛病在 **DeepSeek v4-flash** 上实测出现过 —— 同一个模型。
+#:
+#: 三条按重要性排：取数 → 别手写大表 → 取不到就说取不到。**与块、与题目无关**
+#: （不提任何产物名/题号），所以它对每个块都成立，也才配发在系统提示里。
+BLOCK_COMPLETION_GUIDANCE = (
+    "\n\n# 把这件活干完\n"
+    "交付物是【一份有真实数据的答案】，不是一份形状正确的空壳。"
+    "空表、占位符、示例值、凭印象写的数字，都不是答案。\n"
+    "★ 第一步永远是【先把数据取到手】："
+    "你被授权读的来源就在 brief 的 `authorized_sources` 里，用 `sources.*` 去读它们。"
+    "没有数据就先取数，不要先写答案。\n"
+    "★ 大表不要手写：你有 `code.run` / `shell.run` / `files.write`，"
+    "算得出来的东西让程序去算、去写。\n"
+    "★ 取不到就说取不到：报「这条来源读不出来」好过编一份看起来合理的答案。"
+    "绝不拿编造的内容替代你产不出来的结果 —— 报告阻塞永远好过编一个结果。"
+)
+
 #: ★ ``json_schema`` 形式，由契约的结构化形态生成（`answer_contract.py::candidate_schema`）。
 #: 故意**不是** ``strict: true``：strict 要求每个属性都必填，那会逼模型在每次答案里编
 #: ``hint`` / ``text`` / ``claims``。真正要紧的那一处收紧（``columns`` / ``rows`` 的形状、
@@ -976,6 +1002,10 @@ class LoopIOImpl(LoopIO):
                     "You are one worker in a split plan. "
                     + render_prompt_contract(ANSWER_CONTRACT)
                     + " Use the tools you were given; you may only read what they expose."
+                    # ★ 上面两句是【限制】（你能读什么、答案长什么样）。
+                    #   这一段是【动作与目标】——限制不会自己变成行为，
+                    #   实测：只给限制时，块会交形状正确、内容全空的答案。
+                    + BLOCK_COMPLETION_GUIDANCE
                 ),
             },
             {"role": "user", "content": json.dumps(brief, ensure_ascii=False)},
