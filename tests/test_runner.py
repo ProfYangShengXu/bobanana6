@@ -722,7 +722,13 @@ constraints:
   hard:
     - {id: C-rows, kind: presence, target: "*", spec: {min_rows: 5}, rationale: "the panel needs five rows"}
 """.replace("SOURCE_CSV", str(source))
-    client = ScriptedClient([{"text": json.dumps({"ref": "src-1", "rows": [{"obligor": "A-1"}]})}])
+    client = ScriptedClient(
+        [
+            # ★ read-before-produce：先读来源，再交那份"行数不够"的候选。
+            {"tool_calls": (_tool_call("sources.snapshot", {"ref": "src-1"}, "c1"),)},
+            {"text": json.dumps({"ref": "src-1", "rows": [{"obligor": "A-1"}]})},
+        ]
+    )
     result = _runner(tmp_path, text, client).run()
 
     evidence = result.verdicts["T-01"].evidence
@@ -1203,15 +1209,25 @@ class _RelayRecorder:
 
     def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
         block = ""
+        inputs: list[str] = []
         for message in messages:
             if message.get("role") == "user":
                 try:
-                    block = json.loads(str(message.get("content")))["subtask"]["id"]
+                    brief = json.loads(str(message.get("content")))
+                    block = brief["subtask"]["id"]
+                    inputs = list(brief["subtask"].get("inputs") or ())
                 except (json.JSONDecodeError, KeyError, TypeError):
                     block = ""
                 if block:
                     break
         self.prompts.setdefault(block, []).append(json.dumps(messages, ensure_ascii=False))
+        # ★ read-before-produce：没有上游输入的块，先读来源再产出。
+        #   （有上游的块数据从上游来，不被这条要求。）
+        read_already = any(message.get("role") == "tool" for message in messages)
+        if not inputs and not read_already:
+            return ModelResponse(
+                tool_calls=(_tool_call("sources.snapshot", {"ref": "src-1"}, f"r-{block}"),)
+            )
         return ModelResponse(
             text=json.dumps(
                 {

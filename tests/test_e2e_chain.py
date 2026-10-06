@@ -77,11 +77,15 @@ class _Service(BaseHTTPRequestHandler):
             return
 
         type(self).answers += 1
+        ref = _authorized_source(body["messages"]) or "panel-2026q1"
+        # ★ read-before-produce：这一块只有来源一条取数路，产出前先读一眼。
+        if not _read_already(body["messages"]):
+            self._send(200, _tool_reply("sources.snapshot", {"ref": ref}))
+            return
         if "required shape" not in _transcript(body["messages"]):
             # The measured failure: the model answers prose on its own.
             self._send(200, _reply("I think the panel is probably fine, but I am not sure."))
             return
-        ref = _authorized_source(body["messages"]) or "panel-2026q1"
         self._send(
             200,
             _reply(
@@ -110,6 +114,33 @@ class _Service(BaseHTTPRequestHandler):
 
 def _reply(text: str) -> dict:
     return {"choices": [{"message": {"role": "assistant", "content": text}}], "usage": {"total_tokens": 9}}
+
+
+def _tool_reply(name: str, arguments: dict) -> dict:
+    """一次工具调用的应答（OpenAI 兼容形状）。"""
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                        }
+                    ],
+                }
+            }
+        ],
+        "usage": {"total_tokens": 9},
+    }
+
+
+def _read_already(messages: list[dict]) -> bool:
+    """这一块读过来源了吗 —— ★ read-before-produce 要求产出前先读。"""
+    return any(message.get("role") == "tool" for message in messages)
 
 
 def _transcript(messages: list[dict]) -> str:
@@ -179,9 +210,10 @@ def test_the_chain_recovers_from_prose_and_from_a_refused_schema(
     assert "exit      : passed" in printed.out
 
     sent = _Service.requests
-    # turn 1 free-form (it may need a tool), turn 2 asks for the shape, turn 3 does
-    # not because the service refused it -- and the run still reaches a candidate.
-    assert [("response_format" in body) for body in sent] == [False, True, False]
+    # turn 1 读来源（read-before-produce），turn 2 free-form 被要求形状、
+    # 服务端拒绝，turn 3 再 free-form，turn 4 带结构化修正交付。
+    # ★ 协商模式 `False → True → False` 原样保留在头部：被提供一次，然后记住。
+    assert [("response_format" in body) for body in sent] == [False, True, False, False]
     # ① the last call carries the structured fix, and the transcript stays clean
     last = sent[-1]["messages"]
     feedback = [m for m in last if isinstance(m.get("content"), str) and "required shape" in m["content"]]
@@ -224,4 +256,5 @@ def test_a_service_without_structured_output_is_asked_only_once(
 
     # ★ Within one run it is offered once and then remembered; a fresh run is a
     #   fresh negotiation (the flag lives in the run's assembly, not in a module global).
-    assert per_run == [[False, True, False], [False, True, False]]
+    #   每一跑的第一个 False 是 read-before-produce 的读来源调用。
+    assert per_run == [[False, True, False, False], [False, True, False, False]]

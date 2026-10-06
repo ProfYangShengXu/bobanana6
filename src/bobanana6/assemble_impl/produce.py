@@ -1059,6 +1059,18 @@ class LoopIOImpl(LoopIO):
     epoch: Callable[[], float] = time.monotonic
     calls: int = 0
     failed_tools: set[str] = field(default_factory=set)
+    #: ★★ 这一块【读过来源了吗】—— 一次 `sources.*` 调用就置真。
+    #:
+    #: 为什么要有这个标志：13f 实测（六轮）里，块被授权读 7 份来源，
+    #: 却**一次都不读**就交答案 —— 交空表、交 `"example"`、交一个字面 `"A"`。
+    #: 而我们的提示词早就把该说的说了（`BLOCK_COMPLETION_GUIDANCE` 写着
+    #: "第一步永远是先把数据取到手"、`how_to_read` 写着 "read first, then produce"），
+    #: ★ 采访里模型自己承认："材料中没有一句让我不需要调…**我违反了这条指令**"。
+    #: ⇒ 提示词这条路已经试穷（§5.3.5①：**约束改输入形态，不教模型遵守**）。
+    #: 这个标志把它从"嘱托"变成"前置条件"：读都没读，答案不受理。
+    #: ★ 只在【被授权读来源】的块上生效（`authorized_sources` 非空）——
+    #:   纯合并块本来就读不到来源，不该被这条拦住。
+    read_sources: bool = False
     #: ★ `#33`: 这一跑的工作区（代码落盘到这里）。`None` = 这个部署没有工作区 ——
     #: 那就**不许**交代码类产物（具名拒绝，不静默丢）。
     workspace: Path | None = None
@@ -1445,6 +1457,11 @@ class LoopIOImpl(LoopIO):
                 )
             if name and not result.ok:
                 self.failed_tools.add(name)
+            # ★★ 一次成功的 `sources.*` 调用就足够 —— 判据是"读没读过"，
+            #   不是"读全了没有"（读全不全由产物自己交代）。读失败不算数：
+            #   失败的那次没拿到任何数据，不该用来开门。
+            if result.ok and name.startswith("sources."):
+                self.read_sources = True
         return results
 
     def _declared_cause(self, name: str, result: Any, calls: Sequence[Any]) -> str:
@@ -1469,4 +1486,41 @@ class LoopIOImpl(LoopIO):
         return "context" if isinstance(payload, Mapping) and payload.get("missing") is True else ""
 
     def verify(self, candidate: Candidate) -> GateVerdict:
+        # ★★ 前置条件（不是提示词）：**只能靠来源取数的块，一次都没读就交答案 ⇒ 不受理。**
+        #
+        # 依据是模型自己在采访里给的 —— 问它"为什么一次都不调 `sources.*`"，
+        # 它答："材料中没有任何一句让我不需要调…**我违反了这条指令**"，
+        # 并建议把那句从"嘱托"改成"不读就会被拒"。
+        # §5.3.5① 说的也是同一件事：**约束改输入形态，不教模型遵守**。
+        #
+        # ★ 判据必须精确到"它有没有别的路可走"：
+        #   块有**两条**取数路 —— `task.upstream*`（上游产物）与 `sources.*`（授权来源）。
+        #   · 有上游 ⇒ 数据可以从上游来，**不逼它读来源**（合并块就是这种，
+        #     实测：用 `authorized_sources` 非空去判，会把 pipeline 的合并块
+        #     T-03 一起拦下，15 条既有测试红）；
+        #   · 没上游 + 有来源 ⇒ **只能读来源**，一次没读就是没取数 ⇒ 拒。
+        #   另外一条边界：一次**成功**的 `sources.*` 就够 —— 判"读没读过"，
+        #   不判"读全了没"（读全不全由产物自己交代）。
+        # 顺序即语义：这条在 `judge.verify` **之前** —— 没读，连判都不判。
+        if self._must_read_sources() and not self.read_sources:
+            names = list(self.authorized_sources())
+            return GateVerdict(
+                status="failed",
+                scope=self.judge.required_scope,
+                violations=(
+                    (
+                        "read-before-produce: this block declares no upstream input and may "
+                        f"read {len(names)} source(s); it has read none. Call "
+                        "sources.snapshot / sources.read / sources.grep first — the answer "
+                        "cannot be produced from sources it never opened."
+                    ),
+                ),
+            )
         return self.judge.verify(candidate)
+
+    def _must_read_sources(self) -> bool:
+        """这一块【只有来源一条取数路】吗（见 `verify` 里的注记）。"""
+        sources = list(self.authorized_sources())
+        if not sources:
+            return False
+        return not tuple(getattr(self.subtask, "inputs", ()) or ())

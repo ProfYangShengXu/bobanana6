@@ -1562,8 +1562,14 @@ class _ChannelTwoClient:
         self.calls += 1
         brief = _briefing(messages)
         output = str(brief.get("subtask", {}).get("output", ""))
-        answered = any(message.get("role") == "tool" for message in messages)
-        if self.path is not None and not answered:
+        # ★ read-before-produce：这一块只有来源一条取数路，必须先读过来源才准产出。
+        #   分三步走 —— 读来源 → 写交付物 → 交答案（原来只有后两步）。
+        answered = sum(1 for message in messages if message.get("role") == "tool")
+        if answered == 0:
+            return ModelResponse(
+                tool_calls=(_tool_call("r1", "sources.snapshot", {"ref": "seed"}),)
+            )
+        if self.path is not None and answered == 1:
             return ModelResponse(
                 tool_calls=(
                     _tool_call("w1", self.tool, {"path": self.path, "content": self.content}),
