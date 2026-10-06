@@ -125,10 +125,22 @@ ANSWER_CONTRACT: tuple[AnswerField, ...] = (
     ),
 )
 
-#: **不是**契约字段，但请求里允许出现的可选字段（`hint` / `text` / `definition_versions` /
-#: `claims`）。它们不承担"必须填"的语义，所以不进 `ANSWER_CONTRACT` —— 分开摆，别混。
+#: **不是**契约字段，但请求里允许出现的可选字段（`hint` / `summary` / `text` /
+#: `definition_versions` / `claims`）。它们不承担"必须填"的语义，所以不进
+#: `ANSWER_CONTRACT` —— 分开摆，别混。
+#:
+#: ★★ `summary` 是**给模型写"过程"的位置**（对齐 Hermes 子代理 prompt 的
+#: `When finished, provide a clear, concise summary of: What you did / What you found /
+#: Any files you created / Any issues`）。
+#: 为什么需要它：bb6 的产物是一张纯数据表（`ref` / `columns` / `rows`），**没有任何一格放
+#: "过程"** ⇒ 模型想汇报"我在读来源"，只能往数据格里塞。13f 五轮的原文
+#: （`"Let me read the sources."` → `"read sources"` → `"Need to read sources first."`
+#: → 「Reading authorized sources: instruction, infotable, …」）全是这么来的。
+#: 判定器**不读** `summary`（`core/checkers/` 一个都不碰它）—— 它纯粹是给模型一个
+#: 说人话的地方，让数据表回到"副产物"的位置。
 CANDIDATE_OPTIONAL_PROPERTIES: Mapping[str, Any] = {
     "hint": {"type": "string"},
+    "summary": {"type": "string"},
     "text": {"type": "string"},
     "definition_versions": {"type": "object", "additionalProperties": {"type": "string"}},
     "claims": {

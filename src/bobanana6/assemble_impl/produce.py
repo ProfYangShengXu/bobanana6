@@ -1184,6 +1184,8 @@ class LoopIOImpl(LoopIO):
                     "- What you found or accomplished\n"
                     "- Any files you created or modified\n"
                     "- Any issues encountered\n\n"
+                    "★ 这份汇报写在答案 JSON 的 `summary` 字段里（判定器不读它，它是你说人话的位置）；"
+                    "**产物本身照下面的形状交**。\n"
                     + render_prompt_contract(ANSWER_CONTRACT)
                     + BLOCK_COMPLETION_GUIDANCE
                     + TOOL_USE_ENFORCEMENT_GUIDANCE
