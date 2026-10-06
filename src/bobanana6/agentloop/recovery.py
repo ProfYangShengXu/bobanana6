@@ -152,15 +152,12 @@ def gate_failure_detail(gate: GateVerdict | None) -> str:
     """What a gate verdict actually objects to, one rule per line (``""`` when none).
 
     A verdict that names its violations gets each rule on its own line so several
-    stay readable; a verdict that names none keeps the old ``status`` word as the
-    only thing there is to say. The status itself is *not* repeated here -- it
-    travels as ``classification``, where ``failed`` / ``stale`` / ``unverified``
-    remain distinguishable.
+    stay readable. A verdict that names none produces nothing here: its status
+    travels as ``classification``, and a bare status is not a fact -- feeding it
+    as one would turn a transient retry into a reflection for no information.
     """
-    if gate is None:
+    if gate is None or not gate.violations:
         return ""
-    if not gate.violations:
-        return gate.status
     return "\n".join(f"- {violation}" for violation in gate.violations)
 
 
@@ -228,6 +225,7 @@ def decide_recovery(
     failure: str = "",
     detail: str = "",
     classification: str = "",
+    reflections: int = 0,
     has_feedback: bool = False,
 ) -> RecoveryDecision:
     """Pick the next exit for a failure.
@@ -265,6 +263,29 @@ def decide_recovery(
         )
 
     if action is BobananaAction.RETRY_LOCAL:
+        # ★ retry != reflect (module docstring): a retry resends the same input for
+        #   a transient fault; a reflection hands the failure reason back for a
+        #   capability shortfall. When the rejection carries concrete facts (a gate
+        #   verdict's violations), it is *already* the capability shortfall, so
+        #   reflect on the first rejection instead of resending the same input.
+        #   The attempt budget is unchanged -- `max_retries + max_reflections`
+        #   rejections before degrading -- only which of them carry the reason.
+        can_reflect = reflections < max_reflections
+        if attempts >= max_retries + max_reflections:
+            return RecoveryDecision(
+                action=RecoveryAction.DEGRADE_SINGLE_AGENT,
+                reason="retries and reflections exhausted; stop fanning out",
+                attempts=attempts,
+                tainted_tools=tainted,
+            )
+        if detail.strip() and can_reflect:
+            return RecoveryDecision(
+                action=RecoveryAction.REFLECT,
+                reason="the rejection carries concrete facts; reflect on them instead of resending",
+                attempts=attempts,
+                injected=reflect_message(failure or "the attempt failed", detail=detail, classification=classification),
+                tainted_tools=tainted,
+            )
         if attempts < max_retries:
             return RecoveryDecision(
                 action=RecoveryAction.RETRY,
@@ -272,7 +293,7 @@ def decide_recovery(
                 attempts=attempts,
                 tainted_tools=tainted,
             )
-        if attempts - max_retries < max_reflections:
+        if can_reflect:
             return RecoveryDecision(
                 action=RecoveryAction.REFLECT,
                 reason="retries exhausted; add the failure reason and try a different approach",
@@ -281,8 +302,8 @@ def decide_recovery(
                 tainted_tools=tainted,
             )
         return RecoveryDecision(
-            action=RecoveryAction.DEGRADE_SINGLE_AGENT,
-            reason="retries and reflections exhausted; stop fanning out",
+            action=RecoveryAction.RETRY,
+            reason="the reflection budget is spent; one more attempt before degrading",
             attempts=attempts,
             tainted_tools=tainted,
         )

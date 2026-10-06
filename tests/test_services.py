@@ -23,7 +23,16 @@ from fakes import (
 from bobanana6.agentloop.gate import GateVerdict
 from bobanana6.agentloop.tools import plan_tool_segments
 from bobanana6.core.checkers.base import CheckContext
-from bobanana6.core.model import Budget, ModelResponse, SourceRef, Subtask
+from bobanana6.core.model import (
+    Budget,
+    DeliverableField,
+    DeliverableSpec,
+    FieldSource,
+    ModelResponse,
+    SourceRef,
+    Subtask,
+    TaskContract,
+)
 from bobanana6.services import (
     SHELL_COMMAND_CHECK,
     TOOL_NAMES,
@@ -1237,6 +1246,65 @@ def test_every_served_tool_can_actually_be_called(tmp_path: Path) -> None:
     # 那个 bug 的正面读数：`task.contract` 交的是合同本身（不是"调用一个对象"）
     payload = json.loads(results["task.contract"].content)
     assert payload["task_id"] == "task-1" and payload["goal"]
+
+
+def test_the_contract_tool_announces_declared_fields_but_keeps_bare_contracts_verbatim(tmp_path: Path) -> None:
+    """★ `task.contract` 把字段声明发给块；裸类型契约逐字不变（只回名字）。
+
+    这是 §4.2 的端到端读数：走**真的注册表**调 `task.contract`，读它返回的 JSON。
+    """
+    _store, snap = _snapshot(tmp_path)
+    block = subtask("T-01", output="out.csv", inputs=("part-1",), mode="write")
+    rich = TaskContract(
+        task_id="t-rich",
+        goal="g",
+        deliverables=(
+            DeliverableSpec(
+                name="out.csv",
+                schema={
+                    "CUSIP": DeliverableField(
+                        name="CUSIP",
+                        type="str",
+                        domain="the CUSIP column",
+                        granularity="one value per security",
+                        source=FieldSource(ref="src-1", locator="CUSIP"),
+                    ),
+                    "text": DeliverableField(name="text", type="str"),
+                },
+            ),
+            DeliverableSpec(name="nice.csv"),
+        ),
+        sources=(SourceRef(ref="src-1", locator="input/a.csv"),),
+    )
+    tools = build_toolset(
+        plan=plan(subtasks=(block,), interfaces={"out.csv": "s"}),
+        subtask=block,
+        contract=rich,
+        ontology=mini_ontology(),
+        authorized=(SourceRef(ref="src-1", locator="input/a.csv"),),
+        fetched={"src-1": snap},
+        upstream={"part-1": {"name": "part-1", "columns": [], "rows": []}},
+        checks=BoundChecks(block="T-01"),
+    )
+    registry = build_registry(tools, _store.read)
+    call = registry.calls([_raw("c-contract", "task.contract", "{}")])[0]
+    body = json.loads(registry.execute((call,))[0].content)
+
+    assert body["deliverables"][0] == {
+        "name": "out.csv",
+        "fields": {
+            "CUSIP": {
+                "type": "str",
+                "domain": "the CUSIP column",
+                "granularity": "one value per security",
+                "source": {"ref": "src-1", "locator": "CUSIP"},
+            },
+            # 类型也在，但 type-only 的字段不会单独触发「带声明」这件事
+            "text": "str",
+        },
+    }
+    # 没有字段声明的交付物：只回名字，不造空的 {}
+    assert body["deliverables"][1] == "nice.csv"
 
 
 def test_the_served_tool_list_matches_the_declared_inventory() -> None:

@@ -29,7 +29,7 @@ from ..agentloop.tools import (
     invalid_arguments_result,
     parse_tool_arguments,
 )
-from ..core.model import Artifact, Column, Snapshot, canonical_row
+from ..core.model import Artifact, Column, Snapshot, TaskContract, canonical_row
 from ..core.ports import ToolSet
 from ..sources.form import SourceForm, decode_body, form_for
 from .textops import (
@@ -47,6 +47,7 @@ __all__ = [
     "ToolRegistry",
     "artifact_payload",
     "build_registry",
+    "deliverables_payload",
     "snapshot_payload",
 ]
 
@@ -390,6 +391,24 @@ def _snapshot_preview(
 
 
 
+def deliverables_payload(contract: TaskContract) -> list[Any]:
+    """How ``task.contract`` announces the deliverables, one entry each.
+
+    A deliverable that declares nothing beyond its field types is announced by
+    name alone -- the historical payload, byte for byte. A deliverable whose
+    fields carry a ``domain`` / ``granularity`` / ``source`` is announced with
+    them, so the block can see where each value is supposed to come from. The
+    "is this a declaration?" decision lives on ``DeliverableSpec`` (single
+    source); this function only chooses the shape.
+    """
+    return [
+        {"name": deliverable.name, "fields": dict(deliverable.schema_payload)}
+        if deliverable.has_field_declarations
+        else deliverable.name
+        for deliverable in contract.deliverables
+    ]
+
+
 def build_registry(
     toolset: ToolSet,
     body_reader: Callable[[Snapshot], bytes],
@@ -440,7 +459,7 @@ def build_registry(
             {
                 "task_id": value.task_id,
                 "goal": value.goal,
-                "deliverables": [d.name for d in value.deliverables],
+                "deliverables": deliverables_payload(value),
                 "sources": [s.ref for s in value.sources],
             }
         )

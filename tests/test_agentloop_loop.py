@@ -414,12 +414,12 @@ def test_a_rejected_gate_tells_the_model_which_rule_it_broke() -> None:
     assert "Classification: failed" in received
 
 
-def test_the_violations_reach_the_model_under_the_default_budget() -> None:
-    """★ 用**默认** LoopConfig 复跑：violations 必须真的到模型，不靠调小 max_retries。
+def test_the_first_rejection_carries_the_violations_without_a_blind_resend() -> None:
+    """★ 默认预算下，第一次被拒就把违反项交回模型 —— 不先用一次盲重试。
 
-    注意时序：默认 `max_retries=2` ⇒ 头两次被拒是 RETRY（重发同样输入），violations
-    首次到达是在第 3 次 produce。本测试只断言"终究到了"（默认预算内），把
-    "第一次被拒就反思"这个预算策略问题留给独立的轮次（见 `.chen/suspicious.md` #128）。
+    改前：默认 `max_retries=2` ⇒ 头两次被拒是 RETRY（同输入重发），violations 第 3 次
+    produce 才到（甚至到不了）。改后：第一次被拒（turn1）就反思 ⇒ 紧接的 produce#2
+    就带着违反项。这里断言「produce#1 无、produce#2 有」，即中间没有一次盲发。
     """
     io = FakeIO(
         [TurnProposal(candidate=candidate()) for _ in range(4)],
@@ -432,10 +432,15 @@ def test_the_violations_reach_the_model_under_the_default_budget() -> None:
     )
     WorkerLoop(io).run(task_id="t", worker_id="w")  # 全部默认值
 
-    received = "\n".join(
-        str(row.get("content")) for state in io.states for row in state.messages if row.get("role") == "user"
-    )
-    assert "C-rows: 'out.csv' has 1 rows, needs >= 5" in received
+    def injected(messages) -> list[str]:
+        return [
+            str(row.get("content"))
+            for row in messages
+            if row.get("role") == "user" and "previous attempt failed" in str(row.get("content"))
+        ]
+
+    assert injected(io.states[0].messages) == []  # 第一次被拒前，没有任何理由可给
+    assert any("C-rows: 'out.csv' has 1 rows, needs >= 5" in text for text in injected(io.states[1].messages))
 
 
 def test_the_compression_callback_is_the_injected_summarizer() -> None:

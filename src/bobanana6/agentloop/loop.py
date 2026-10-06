@@ -667,6 +667,7 @@ class WorkerLoop:
             failure="verification did not pass",
             detail=detail,
             classification=classification,
+            reflections=state.reflections,
         )
         if decision.action is RecoveryAction.RETRY:
             turn.exit_reason = "retry"
@@ -807,6 +808,7 @@ class WorkerLoop:
             taint=self._taint,
             failure=classified.reason,
             detail=classified.detail,
+            reflections=turn.state.reflections,
             has_feedback=feedback is not None,
         )
         if decision.action is RecoveryAction.RETRY:

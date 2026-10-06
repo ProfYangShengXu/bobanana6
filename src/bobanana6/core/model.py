@@ -443,6 +443,16 @@ class DeliverableField:
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "DeliverableField.name must not be empty")
 
+    @property
+    def declared(self) -> bool:
+        """Whether this field says anything beyond its type.
+
+        The one place that decides what "a field declaration" means: a bare type
+        (``{text: str}``) is not a declaration, so a contract written before this
+        existed keeps producing exactly the payload it produced before.
+        """
+        return bool(self.domain or self.granularity or self.source is not None)
+
     def as_payload(self) -> Any:
         """The declaration as a JSON-shaped value.
 
@@ -451,7 +461,7 @@ class DeliverableField:
         for every contract written before this field existed. A field that declares
         more carries it -- nothing is dropped from the report.
         """
-        if not (self.domain or self.granularity or self.source is not None):
+        if not self.declared:
             return self.type
         payload: dict[str, Any] = {"type": self.type}
         if self.domain:
@@ -487,6 +497,15 @@ class DeliverableSpec:
     def schema_payload(self) -> Mapping[str, Any]:
         """``schema`` as JSON-shaped values, for the report and the ontology draft."""
         return {name: spec.as_payload() for name, spec in self.schema.items()}
+
+    @property
+    def has_field_declarations(self) -> bool:
+        """Whether any of this deliverable's fields declares more than its type.
+
+        False for a bare spec (``{text: str}``, or no schema at all): such a
+        deliverable is announced by name alone, exactly as before.
+        """
+        return any(spec.declared for spec in self.schema.values())
 
 
 #: ★ `#32`: 载体行尾的**声明词表**（数据，不是判定）。`""` = 没声明；`preserve` = 原样。

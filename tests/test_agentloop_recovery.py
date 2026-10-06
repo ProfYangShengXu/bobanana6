@@ -82,6 +82,36 @@ def test_transient_fault_retries_then_reflects_then_degrades() -> None:
     assert decide(attempts=3).action is RecoveryAction.DEGRADE_SINGLE_AGENT
 
 
+def test_a_rejection_with_facts_reflects_on_the_first_attempt() -> None:
+    """★ retry != reflect: 有具体事实时第一次被拒就反思，不先用一次盲重试。"""
+    decision = decide(
+        attempts=1,
+        failure="verification did not pass",
+        detail="- C-rows: 'out.csv' has 1 rows, needs >= 5",
+        classification="failed",
+    )
+    assert decision.action is RecoveryAction.REFLECT
+    assert decision.injected is not None
+    assert "C-rows: 'out.csv' has 1 rows, needs >= 5" in decision.injected
+    assert "Classification: failed" in decision.injected
+
+
+def test_a_transient_fault_without_facts_still_retries() -> None:
+    """★ 反向：没有可给的事实时保持 RETRY（同输入重发），injected 仍为空。"""
+    decision = decide(attempts=1, detail="")
+    assert decision.action is RecoveryAction.RETRY
+    assert decision.injected is None
+
+
+def test_the_early_reflection_does_not_widen_the_attempt_budget() -> None:
+    """★ 早反思只改「哪一次带理由」，不改总预算：`max_retries + max_reflections` 次后仍 degrade。"""
+    facts = {"failure": "verification did not pass", "detail": "- C-rows: needs >= 5"}
+    assert decide(attempts=1, reflections=0, **facts).action is RecoveryAction.REFLECT
+    # 反思预算（1）已用掉 ⇒ 这一次退回普通重试，不再多给一次反思。
+    assert decide(attempts=2, reflections=1, **facts).action is RecoveryAction.RETRY
+    assert decide(attempts=3, reflections=1, **facts).action is RecoveryAction.DEGRADE_SINGLE_AGENT
+
+
 def test_reflect_carries_the_failure_reason_back_into_the_context() -> None:
     decision = decide(attempts=2, failure="timeout", detail="read timed out")
     assert decision.action is RecoveryAction.REFLECT
