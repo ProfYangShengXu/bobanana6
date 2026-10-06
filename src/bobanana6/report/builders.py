@@ -294,7 +294,7 @@ def render_summary(
             # reader for TaskContract.notes
             "notes": contract.notes,
             "deliverables": [
-                {"name": d.name, "required": d.required, "schema": dict(d.schema)} for d in contract.deliverables
+                {"name": d.name, "required": d.required, "schema": dict(d.schema_payload)} for d in contract.deliverables
             ],
         },
         "plan": {

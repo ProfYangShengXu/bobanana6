@@ -12,6 +12,7 @@ from bobanana6.contract import (
     parse_contract,
     parse_contract_file,
 )
+from bobanana6.core.model import FieldSource
 
 VALID = """
 task_id: task-1
@@ -257,3 +258,95 @@ def test_depends_on_must_be_a_list_of_non_empty_strings() -> None:
 def test_a_contract_without_depends_on_stays_empty() -> None:
     document = parse_contract(VALID)
     assert all(deliverable.depends_on == () for deliverable in document.contract.deliverables)
+
+
+# --------------------------------------------------------------------------- #
+# ★ 字段声明：deliverables[].schema 从「透传类型名」升为「解析声明」
+# --------------------------------------------------------------------------- #
+
+RICH_SCHEMA = """
+task_id: task-1
+goal: rebuild the effective holdings
+deliverables:
+  - name: output/effective_holdings.csv
+    schema:
+      manager_order: {type: int, domain: "in target_managers.csv order", granularity: "one value per manager"}
+      CUSIP: {type: str, domain: "the CUSIP column of INFOTABLE", granularity: "one value per security",
+              source: {ref: infotable, locator: CUSIP}}
+      VALUE: {type: float, domain: dollars, granularity: "one holding's market value",
+              source: {ref: infotable, locator: VALUE}}
+sources:
+  - {ref: instruction, locator: input/instruction.md}
+  - {ref: infotable, locator: input/data/INFOTABLE.tsv}
+"""
+
+
+def test_a_field_may_declare_domain_granularity_and_source() -> None:
+    fields = parse_contract(RICH_SCHEMA).contract.deliverables[0].schema
+    assert set(fields) == {"manager_order", "CUSIP", "VALUE"}
+    cusip = fields["CUSIP"]
+    assert (cusip.type, cusip.domain) == ("str", "the CUSIP column of INFOTABLE")
+    assert cusip.granularity == "one value per security"
+    assert cusip.source is not None
+    assert (cusip.source.ref, cusip.source.locator) == ("infotable", "CUSIP")
+    # 没写就是没写：`source` 缺席不等于默认指某个源。
+    assert fields["manager_order"].source is None
+
+
+def test_the_declared_field_sources_reach_the_task_contract() -> None:
+    contract = parse_contract(RICH_SCHEMA).contract
+    assert contract.declared_field_sources == {
+        "output/effective_holdings.csv": {
+            "CUSIP": FieldSource(ref="infotable", locator="CUSIP"),
+            "VALUE": FieldSource(ref="infotable", locator="VALUE"),
+        }
+    }
+
+
+def test_a_bare_type_still_parses_and_keeps_the_legacy_payload() -> None:
+    """★ 向后兼容：`{pd: float}` 这种裸类型必须仍然解析，报告载荷逐字不变。"""
+    deliverable = parse_contract(VALID).contract.deliverables[0]
+    assert {name: spec.type for name, spec in deliverable.schema.items()} == {"pd": "float", "amount": "float"}
+    assert deliverable.schema_payload == {"pd": "float", "amount": "float"}
+
+
+def test_a_rich_field_payload_keeps_everything_it_declares() -> None:
+    deliverable = parse_contract(RICH_SCHEMA).contract.deliverables[0]
+    assert deliverable.schema_payload["CUSIP"] == {
+        "type": "str",
+        "domain": "the CUSIP column of INFOTABLE",
+        "granularity": "one value per security",
+        "source": {"ref": "infotable", "locator": "CUSIP"},
+    }
+
+
+def test_a_field_source_ref_must_name_a_declared_source() -> None:
+    text = RICH_SCHEMA.replace("ref: infotable, locator: CUSIP", "ref: ghost, locator: CUSIP")
+    with pytest.raises(ContractParseError) as error:
+        parse_contract(text, source="task.yaml")
+    message = str(error.value)
+    assert "$.deliverables[0].schema.CUSIP.source.ref" in message
+    assert "not a declared source" in message
+    assert "rule: source" in message
+
+
+def test_an_unknown_field_key_is_refused() -> None:
+    text = RICH_SCHEMA.replace("type: int, domain:", "type: int, unit: CNY, domain:")
+    with pytest.raises(ContractParseError, match="unknown field keys"):
+        parse_contract(text)
+
+
+def test_a_field_declaration_without_a_type_is_refused() -> None:
+    text = RICH_SCHEMA.replace("{type: int, domain:", "{domain:")
+    with pytest.raises(ContractParseError, match=r"schema\.manager_order\.type"):
+        parse_contract(text)
+
+
+def test_a_field_value_that_is_neither_a_type_nor_a_mapping_is_refused() -> None:
+    with pytest.raises(ContractParseError, match="type name or a declaration mapping"):
+        parse_contract(VALID.replace("schema: {pd: float, amount: float}", "schema: {pd: 3}"))
+
+
+def test_a_source_declaration_must_be_a_mapping() -> None:
+    with pytest.raises(ContractParseError, match=r"schema\.CUSIP\.source"):
+        parse_contract(RICH_SCHEMA.replace("source: {ref: infotable, locator: CUSIP}", "source: infotable"))

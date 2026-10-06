@@ -52,6 +52,12 @@ GATE_SCOPES: tuple[str, ...] = ("targeted", "full")
 class GateVerdict:
     status: str
     scope: str
+    #: ★ What the verdict is *about*: one entry per rule that was broken, stated so
+    #: the reader can act on it. ``("C-rows: 'out.csv' has 1 rows, needs >= 5",)``
+    #: names both the constraint (``keywordLocation``) and what was observed
+    #: (``message``/``detail``) -- the JSON-Schema/RFC-9457 shape. Empty for a
+    #: passed verdict and for a failure that has no rule to name; never a guess.
+    violations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in GATE_STATUSES:
@@ -241,7 +247,15 @@ def evaluate(
     if evidence is None:
         return GateVerdict(status="unverified", scope=required_scope)
     if is_stale(evidence, last_edit_at):
-        return GateVerdict(status="stale", scope=required_scope)
+        return GateVerdict(
+            status="stale",
+            scope=required_scope,
+            violations=(f"{evidence.command!r} was checked before the latest edit",),
+        )
     if not evidence.attributable or evidence.exit_code != 0:
-        return GateVerdict(status="failed", scope=required_scope)
+        return GateVerdict(
+            status="failed",
+            scope=required_scope,
+            violations=(f"{evidence.command!r} exited {evidence.exit_code}",),
+        )
     return GateVerdict(status="passed", scope=required_scope)

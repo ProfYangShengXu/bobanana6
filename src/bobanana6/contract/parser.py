@@ -31,7 +31,9 @@ from ..core.model import (
     KNOWN_KINDS,
     Constraint,
     ConstraintBundle,
+    DeliverableField,
     DeliverableSpec,
+    FieldSource,
     Limits,
     SourceRef,
     SplitPlan,
@@ -63,6 +65,13 @@ _TOP_LEVEL_KEYS = frozenset(
     }
 )
 _CONSTRAINT_KEYS = frozenset({"id", "kind", "target", "spec", "rationale"})
+
+#: ★ `deliverables[].schema` 里一个字段声明的**唯一形状定义**：键集直接从
+#: `DeliverableField` / `FieldSource` 这两个 dataclass 推导（与 `_limits` 用
+#: `Limits.__dataclass_fields__` 同一做法），字段增删不会在这里留下一份手写副本。
+#: 裸类型字符串（`{text: str}`）不走这张表 —— 它是「只声明了 type」的简写。
+_FIELD_KEYS = frozenset(DeliverableField.__dataclass_fields__) - {"name"}
+_FIELD_SOURCE_KEYS = frozenset(FieldSource.__dataclass_fields__)
 
 
 class ContractParseError(ValueError):
@@ -102,7 +111,92 @@ def _load(text: str, source: str) -> Mapping[str, Any]:
     return data
 
 
-def _deliverables(data: Mapping[str, Any], source: str) -> tuple[DeliverableSpec, ...]:
+def _fields(
+    raw: Mapping[Any, Any],
+    source: str,
+    path: str,
+    *,
+    declared_sources: frozenset[str],
+) -> dict[str, DeliverableField]:
+    """`deliverables[].schema` -> ``{field name: declaration}``.
+
+    Two legal spellings, one shape:
+
+      * a bare type name -- ``{text: str}`` -- is the historical form and stays
+        legal; it becomes a field that declares only its type. Every contract
+        written before this existed keeps parsing (and keeps its payload).
+      * a mapping -- ``{CUSIP: {type: str, domain: ..., granularity: ...,
+        source: {ref: infotable, locator: CUSIP}}}`` -- declares the extra facts.
+
+    A ``source.ref`` that is not one of the contract's declared sources is a
+    contract error here, next to the file, not a silent dangling reference.
+    """
+    fields: dict[str, DeliverableField] = {}
+    for raw_name, raw_value in raw.items():
+        if not isinstance(raw_name, str) or not raw_name:
+            _fail(source, f"{path}.<name>", "field names must be non-empty strings", "required")
+        field_path = f"{path}.{raw_name}"
+        if isinstance(raw_value, str):
+            fields[raw_name] = DeliverableField(name=raw_name, type=raw_value)
+            continue
+        if not isinstance(raw_value, Mapping):
+            _fail(source, field_path, "a field must be a type name or a declaration mapping", "type")
+        unknown = sorted(str(key) for key in set(raw_value) - _FIELD_KEYS)
+        if unknown:
+            _fail(source, field_path, f"unknown field keys {unknown!r}", "additionalProperties")
+        dtype = raw_value.get("type")
+        if not isinstance(dtype, str) or not dtype:
+            _fail(source, f"{field_path}.type", "type must be a non-empty string", "required")
+        fields[raw_name] = DeliverableField(
+            name=raw_name,
+            type=dtype,
+            domain=_optional_text(raw_value.get("domain"), source, f"{field_path}.domain"),
+            granularity=_optional_text(raw_value.get("granularity"), source, f"{field_path}.granularity"),
+            source=_field_source(raw_value.get("source"), source, field_path, declared_sources=declared_sources),
+        )
+    return fields
+
+
+def _optional_text(raw: Any, source: str, path: str) -> str:
+    """An optional declaration string; absent or ``None`` = not declared."""
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        _fail(source, path, "must be a string", "type")
+    return raw
+
+
+def _field_source(
+    raw: Any,
+    source: str,
+    path: str,
+    *,
+    declared_sources: frozenset[str],
+) -> FieldSource | None:
+    """`source: {ref, locator}` -- the carrier one field's values come from."""
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        _fail(source, f"{path}.source", "source must be a mapping", "type")
+    unknown = sorted(str(key) for key in set(raw) - _FIELD_SOURCE_KEYS)
+    if unknown:
+        _fail(source, f"{path}.source", f"unknown source keys {unknown!r}", "additionalProperties")
+    ref = raw.get("ref")
+    if not isinstance(ref, str) or not ref:
+        _fail(source, f"{path}.source.ref", "ref must be a non-empty string", "required")
+    if ref not in declared_sources:
+        _fail(
+            source,
+            f"{path}.source.ref",
+            f"{ref!r} is not a declared source",
+            "source",
+        )
+    return FieldSource(ref=ref, locator=_optional_text(raw.get("locator"), source, f"{path}.source.locator"))
+
+
+def _deliverables(
+    data: Mapping[str, Any], source: str, *, declared_sources: frozenset[str]
+) -> tuple[DeliverableSpec, ...]:
     raw_items = data.get("deliverables")
     if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)) or not raw_items:
         _fail(source, "$.deliverables", "at least one deliverable is required", "required")
@@ -119,13 +213,14 @@ def _deliverables(data: Mapping[str, Any], source: str) -> tuple[DeliverableSpec
         schema = raw.get("schema", {})
         if not isinstance(schema, Mapping):
             _fail(source, f"{path}.schema", "deliverable schema must be a mapping", "type")
+        fields = _fields(schema, source, f"{path}.schema", declared_sources=declared_sources)
         required = raw.get("required", True)
         if not isinstance(required, bool):
             _fail(source, f"{path}.required", "required must be a boolean", "type")
         depends_on = _depends_on(raw.get("depends_on", ()), source, path, name=name, names=names)
         try:
             deliverables.append(
-                DeliverableSpec(name=name, schema=dict(schema), required=required, depends_on=depends_on)
+                DeliverableSpec(name=name, schema=fields, required=required, depends_on=depends_on)
             )
         except ValueError as exc:
             _fail(source, path, str(exc), "deliverable")
@@ -297,11 +392,14 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
     if not isinstance(notes, str):
         _fail(source, "$.notes", "notes must be a string", "type")
 
+    #: ★ 字段声明的 `source.ref` 要在解析 deliverables 时就能对照已声明来源，
+    #: 所以 sources 先解析（契约错误仍在文件旁边当场报，只是顺序固定）。
+    sources = _sources(data, source)
     contract = TaskContract(
         task_id=data["task_id"],
         goal=data["goal"],
-        deliverables=_deliverables(data, source),
-        sources=_sources(data, source),
+        deliverables=_deliverables(data, source, declared_sources=frozenset(item.ref for item in sources)),
+        sources=sources,
         notes=notes,
         sources_share_state=share_state,
     )

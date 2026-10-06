@@ -143,6 +143,25 @@ def test_nonzero_exit_is_failed() -> None:
     assert evaluate(evidence, required_scope="full", last_edit_at=0.0).status == "failed"
 
 
+def test_a_failed_verdict_names_the_command_that_failed() -> None:
+    """★ 失败要说得出"哪条命令、退出码几" —— 不是只给一个 failed。"""
+    evidence = record_evidence("pytest -q", 1, "1 failed", created_at=10.0)
+    verdict = evaluate(evidence, required_scope="full", last_edit_at=0.0)
+    assert verdict.violations == ("'pytest -q' exited 1",)
+
+
+def test_a_stale_verdict_names_the_command_it_no_longer_covers() -> None:
+    evidence = record_evidence("pytest -q", 0, "ok", created_at=10.0)
+    verdict = evaluate(evidence, required_scope="full", last_edit_at=11.0)
+    assert verdict.status == "stale"
+    assert verdict.violations == ("'pytest -q' was checked before the latest edit",)
+
+
+def test_a_passed_verdict_names_no_violation() -> None:
+    evidence = record_evidence("pytest -q", 0, "ok", created_at=10.0)
+    assert evaluate(evidence, required_scope="full", last_edit_at=9.0).violations == ()
+
+
 def test_unattributable_command_fails_rather_than_passing() -> None:
     """One exit 0 through a pipe must never impersonate a verification."""
     evidence = record_evidence("pytest -q | tee out", 0, "ok", created_at=10.0)

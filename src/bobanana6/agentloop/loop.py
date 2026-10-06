@@ -42,6 +42,7 @@ from .recovery import (
     TaintTracker,
     decide_recovery,
     declared_feedback,
+    gate_failure_detail,
     reflect_message,
     reformat_message,
 )
@@ -653,6 +654,8 @@ class WorkerLoop:
         state = turn.state
         if state.withheld is None:
             return PhaseResult.fallthrough()
+        detail = gate_failure_detail(turn.gate)
+        classification = turn.gate.status if turn.gate else ""
         decision = decide_recovery(
             BobananaAction.RETRY_LOCAL,
             attempts=state.attempts,
@@ -662,13 +665,16 @@ class WorkerLoop:
             block_verifiable=self._config.block_verifiable,
             taint=self._taint,
             failure="verification did not pass",
-            detail=turn.gate.status if turn.gate else "",
+            detail=detail,
+            classification=classification,
         )
         if decision.action is RecoveryAction.RETRY:
             turn.exit_reason = "retry"
             return PhaseResult.cont("retry")
         if decision.action is RecoveryAction.REFLECT:
-            text = decision.injected or reflect_message("verification did not pass")
+            text = decision.injected or reflect_message(
+                "verification did not pass", detail=detail, classification=classification
+            )
             turn.state = replace(
                 state,
                 injected=({"role": "user", "content": text},),

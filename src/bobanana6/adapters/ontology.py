@@ -73,7 +73,7 @@ class DraftingOntology:
                     {
                         "goal": contract.goal,
                         "deliverables": [
-                            {"name": d.name, "schema": dict(d.schema)} for d in contract.deliverables
+                            {"name": d.name, "schema": dict(d.schema_payload)} for d in contract.deliverables
                         ],
                         "sources": [s.ref for s in contract.sources],
                         "input_sources": list(survey.source_refs),

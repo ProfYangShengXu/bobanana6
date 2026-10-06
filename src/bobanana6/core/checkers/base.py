@@ -19,6 +19,7 @@ from ..model import (
     Candidate,
     Constraint,
     Disagreement,
+    FieldSource,
     Limits,
     Ontology,
     Snapshot,
@@ -50,6 +51,12 @@ class CheckContext:
     #: ★ `#33`: `ref -> (冻结时的摘要, 工作区里那份的摘要)`，由外侧算好（core 不读盘）。
     #: 缺一项 = 那一份没被观测过 —— `frozen_files` 判据会具名失败，不静默通过。
     frozen_files: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+    #: ★ `deliverable -> {field: the carrier that field declares}`. This is the
+    #: channel a field declaration's ``source{ref,locator}`` travels on. Judgment
+    #: semantics do not read it yet: a checker that compared a citation against the
+    #: *declared* carrier would be a new rule, and this unit only adds the ability
+    #: to say where a value is supposed to come from.
+    declared_field_sources: Mapping[str, Mapping[str, FieldSource]] = field(default_factory=dict)
     now: str | None = None
     limits: Limits = DEFAULT_LIMITS
     custom_checks: Mapping[str, Callable[..., Any]] = field(default_factory=dict)

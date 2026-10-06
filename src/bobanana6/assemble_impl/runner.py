@@ -239,6 +239,9 @@ class Runner:
             snapshot_bodies=self._snapshot_bodies(snapshots),
             frozen_files=self._frozen_files(snapshots),
             unmapped_fields=bundle.unmapped_fields,
+            # ★ 字段声明里的 source{ref,locator} 由契约解析，在这里进判定上下文；
+            #   判定器今天不读它（改语义不在本单元），但通道是接上的、可断言的。
+            declared_field_sources=contract.declared_field_sources,
             now=self.now,
             limits=self.limits,
             custom_checks=self._custom_checks(),

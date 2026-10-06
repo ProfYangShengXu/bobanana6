@@ -69,8 +69,10 @@ __all__ = [
     "Convergence",
     "Definition",
     "DefinitionMismatch",
+    "DeliverableField",
     "DeliverableSpec",
     "DisagreementTypes",
+    "FieldSource",
     "InputSurvey",
     "Limits",
     "ModelResponse",
@@ -405,9 +407,69 @@ def _deep_freeze_mapping(value: Mapping[Any, Any]) -> Mapping[Any, Any]:
 
 
 @dataclass(frozen=True)
+class FieldSource:
+    """Where one declared output field comes from: a declared source + a locator.
+
+    ``ref`` names one of the contract's ``sources``; ``locator`` says where inside
+    that carrier the value lives (a column name, a JSON pointer, ...). Empty
+    ``locator`` = the declaration names the carrier but not the spot -- the field
+    is still *declared*, it just does not say which cell.
+    """
+
+    ref: str  # external:contract —— 字段值取自哪个已声明的来源
+    locator: str = ""  # external:contract —— 该来源内的定位
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.ref, "FieldSource.ref must not be empty")
+
+
+@dataclass(frozen=True)
+class DeliverableField:
+    """One declared output field: what value it holds, from where, at what grain.
+
+    The bare spelling (``{text: str}``) is a legal declaration too -- it becomes a
+    field whose only declared thing is its type (the Frictionless precedent that a
+    missing type defaults to string, applied here to domain/granularity/source as
+    well: missing means *not declared*, never a guessed default). Keeping the bare
+    form parseable is what lets every existing contract keep working.
+    """
+
+    name: str  # external:contract —— schema 映射的键，也是列名
+    type: str = ""  # external:contract —— 值的基本形态（str / int / float / bool）
+    domain: str = ""  # external:contract —— 取值域：能给哪些值
+    granularity: str = ""  # external:contract —— 粒度：一个值代表多大一块
+    source: FieldSource | None = None  # external:contract —— 值的出处；None = 没声明
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.name, "DeliverableField.name must not be empty")
+
+    def as_payload(self) -> Any:
+        """The declaration as a JSON-shaped value.
+
+        A field that declares nothing beyond its type keeps the historical payload
+        (the bare type string), so reports and ontology drafts are byte-identical
+        for every contract written before this field existed. A field that declares
+        more carries it -- nothing is dropped from the report.
+        """
+        if not (self.domain or self.granularity or self.source is not None):
+            return self.type
+        payload: dict[str, Any] = {"type": self.type}
+        if self.domain:
+            payload["domain"] = self.domain
+        if self.granularity:
+            payload["granularity"] = self.granularity
+        if self.source is not None:
+            payload["source"] = {"ref": self.source.ref, "locator": self.source.locator}
+        return payload
+
+
+@dataclass(frozen=True)
 class DeliverableSpec:
     name: str  # core:split —— deliverable_names 供 no_orphan / cut_complete 读
-    schema: Mapping[str, str] = field(  # external:contract —— 产物字段契约，core 不读
+    #: ★ 字段名 -> 字段声明。契约的 schema 从「透传一个字符串」升为「解析出
+    #: `DeliverableField`」：类型之外还能声明 domain / granularity / source。
+    #: 裸类型（`{text: str}`）解析成只声明了 type 的字段，向后兼容。
+    schema: Mapping[str, DeliverableField] = field(  # external:contract —— 产物字段契约
         default_factory=dict
     )
     required: bool = True  # core:assemble —— cut_complete 只强制 required 的交付物必须产出
@@ -420,6 +482,11 @@ class DeliverableSpec:
         _require_non_empty(self.name, "DeliverableSpec.name must not be empty")
         for upstream in self.depends_on:
             _require_non_empty(upstream, "DeliverableSpec.depends_on entries must not be empty")
+
+    @property
+    def schema_payload(self) -> Mapping[str, Any]:
+        """``schema`` as JSON-shaped values, for the report and the ontology draft."""
+        return {name: spec.as_payload() for name, spec in self.schema.items()}
 
 
 #: ★ `#32`: 载体行尾的**声明词表**（数据，不是判定）。`""` = 没声明；`preserve` = 原样。
@@ -473,6 +540,21 @@ class TaskContract:
         decorative marker.
         """
         return frozenset(d.name for d in self.deliverables if d.required)
+
+    @property
+    def declared_field_sources(self) -> Mapping[str, Mapping[str, FieldSource]]:
+        """``{deliverable: {field: declared source}}`` for the fields that declare one.
+
+        This is how a field declaration's ``source`` reaches the judgment context
+        (``CheckContext.declared_field_sources``). Fields that declare no source
+        are omitted rather than defaulted -- "not declared" is not a location.
+        """
+        return {
+            deliverable.name: {
+                name: spec.source for name, spec in deliverable.schema.items() if spec.source is not None
+            }
+            for deliverable in self.deliverables
+        }
 
 
 @dataclass(frozen=True)

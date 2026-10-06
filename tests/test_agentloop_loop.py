@@ -389,6 +389,55 @@ def test_exhausted_retries_land_on_degrade_single_agent_never_on_retry() -> None
     assert result.exit_reason == "degrade_single_agent", result.exit_reason
 
 
+def test_a_rejected_gate_tells_the_model_which_rule_it_broke() -> None:
+    """★ 判据拒绝的反思文本要带上【违反项】（约束 id + 事实），不是笼统一句。
+
+    改前：`reflect_message("verification did not pass", detail="failed")` —— 模型
+    只知道"没过"。改后：每条违反项逐条进上下文，模型能照着改。
+    """
+    io = FakeIO(
+        [TurnProposal(candidate=candidate()), TurnProposal(candidate=candidate())],
+        gates=[
+            GateVerdict(
+                "failed",
+                "full",
+                violations=("C-rows: 'out.csv' has 1 rows, needs >= 5", "C-fields: column 'amount' is missing"),
+            ),
+            GateVerdict("passed", "full"),
+        ],
+    )
+    WorkerLoop(io, config=LoopConfig(max_turns=4, max_retries=1, max_reflections=1)).run(task_id="t", worker_id="w")
+
+    received = "\n".join(str(row.get("content")) for row in io.states[-1].messages if row.get("role") == "user")
+    assert "C-rows: 'out.csv' has 1 rows, needs >= 5" in received
+    assert "C-fields: column 'amount' is missing" in received
+    assert "Classification: failed" in received
+
+
+def test_the_violations_reach_the_model_under_the_default_budget() -> None:
+    """★ 用**默认** LoopConfig 复跑：violations 必须真的到模型，不靠调小 max_retries。
+
+    注意时序：默认 `max_retries=2` ⇒ 头两次被拒是 RETRY（重发同样输入），violations
+    首次到达是在第 3 次 produce。本测试只断言"终究到了"（默认预算内），把
+    "第一次被拒就反思"这个预算策略问题留给独立的轮次（见 `.chen/suspicious.md` #128）。
+    """
+    io = FakeIO(
+        [TurnProposal(candidate=candidate()) for _ in range(4)],
+        gates=[
+            GateVerdict("failed", "full", violations=("C-rows: 'out.csv' has 1 rows, needs >= 5",)),
+            # 真的判据对同一份候选会给出同一条违反项（重算，不缓存）。
+            GateVerdict("failed", "full", violations=("C-rows: 'out.csv' has 1 rows, needs >= 5",)),
+            GateVerdict("passed", "full"),
+        ],
+    )
+    WorkerLoop(io).run(task_id="t", worker_id="w")  # 全部默认值
+
+    received = "\n".join(
+        str(row.get("content")) for state in io.states for row in state.messages if row.get("role") == "user"
+    )
+    assert "C-rows: 'out.csv' has 1 rows, needs >= 5" in received
+
+
 def test_the_compression_callback_is_the_injected_summarizer() -> None:
     """★ Wiring point: ``summarize`` is injected, so the loop never builds one.
 

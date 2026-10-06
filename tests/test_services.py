@@ -20,6 +20,7 @@ from fakes import (
     subtask,
 )
 
+from bobanana6.agentloop.gate import GateVerdict
 from bobanana6.agentloop.tools import plan_tool_segments
 from bobanana6.core.checkers.base import CheckContext
 from bobanana6.core.model import Budget, ModelResponse, SourceRef, Subtask
@@ -580,6 +581,20 @@ def test_verify_reports_failure_when_a_constraint_fails() -> None:
     failing = bundle(hard=(constraint("C-1", "presence", "T-01", {"min_rows": 5}),))
     verdict = _judge(failing).verify(candidate(artifacts=(artifact(rows=({"a": 1},)),)))
     assert verdict.status == "failed"
+
+
+def test_a_rejected_verdict_names_the_constraint_and_the_fact() -> None:
+    """★ 判据拒绝时要说清【违反了哪一条】+【看到了什么】，不再只给 `failed`。"""
+    failing = bundle(hard=(constraint("C-1", "presence", "T-01", {"min_rows": 5}),))
+    verdict = _judge(failing).verify(candidate(artifacts=(artifact(rows=({"a": 1},)),)))
+    assert verdict.violations == ("C-1: 'out.csv' has 1 rows, needs >= 5",), verdict.violations
+
+
+def test_a_passing_verdict_names_no_violation() -> None:
+    """★ 反向：通过的判定不带任何违反项（默认空，与改前逐字同）。"""
+    passing = bundle(hard=(constraint("C-1", "presence", "T-01", {"min_rows": 1}),))
+    verdict = _judge(passing).verify(candidate(artifacts=(artifact(rows=({"a": 1},)),)))
+    assert verdict == GateVerdict(status="passed", scope="full")
 
 
 def test_verify_uses_the_recorded_command_evidence() -> None:

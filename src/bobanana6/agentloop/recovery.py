@@ -36,6 +36,7 @@ __all__ = [
     "TaintTracker",
     "decide_recovery",
     "declared_feedback",
+    "gate_failure_detail",
     "reflect_message",
     "reformat_message",
 ]
@@ -147,6 +148,22 @@ def reflect_message(
     return " ".join(parts)
 
 
+def gate_failure_detail(gate: GateVerdict | None) -> str:
+    """What a gate verdict actually objects to, one rule per line (``""`` when none).
+
+    A verdict that names its violations gets each rule on its own line so several
+    stay readable; a verdict that names none keeps the old ``status`` word as the
+    only thing there is to say. The status itself is *not* repeated here -- it
+    travels as ``classification``, where ``failed`` / ``stale`` / ``unverified``
+    remain distinguishable.
+    """
+    if gate is None:
+        return ""
+    if not gate.violations:
+        return gate.status
+    return "\n".join(f"- {violation}" for violation in gate.violations)
+
+
 def declared_feedback(error: Any) -> Mapping[str, Any] | None:
     """The *fix instructions* the raiser attached to a rejected answer, or ``None``.
 
@@ -210,6 +227,7 @@ def decide_recovery(
     tool_name: str | None = None,
     failure: str = "",
     detail: str = "",
+    classification: str = "",
     has_feedback: bool = False,
 ) -> RecoveryDecision:
     """Pick the next exit for a failure.
@@ -240,7 +258,9 @@ def decide_recovery(
             action=RecoveryAction.REFLECT,
             reason=f"tool {tool_name!r} is tainted",
             attempts=attempts,
-            injected=reflect_message(failure or "tool failure", detail=detail, taint_hint=hint),
+            injected=reflect_message(
+                failure or "tool failure", detail=detail, classification=classification, taint_hint=hint
+            ),
             tainted_tools=tainted,
         )
 
@@ -257,7 +277,7 @@ def decide_recovery(
                 action=RecoveryAction.REFLECT,
                 reason="retries exhausted; add the failure reason and try a different approach",
                 attempts=attempts,
-                injected=reflect_message(failure or "the attempt failed", detail=detail),
+                injected=reflect_message(failure or "the attempt failed", detail=detail, classification=classification),
                 tainted_tools=tainted,
             )
         return RecoveryDecision(

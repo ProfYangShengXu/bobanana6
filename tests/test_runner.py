@@ -29,6 +29,7 @@ from bobanana6.core.checkers.base import CheckContext
 from bobanana6.core.model import (
     MISSING,
     Budget,
+    FieldSource,
     ModelResponse,
     Subtask,
     TaskContract,
@@ -673,6 +674,32 @@ def test_the_summarizer_releases_the_gate_when_it_sends() -> None:
     gate = RuntimeGate()
     assert llm_summarizer(client, gate=gate)(({"role": "user", "content": "x"},)) == "summary"
     assert gate.active("default") == 0  # released, so the next call can go
+
+
+def test_a_field_declarations_source_reaches_the_judgement_context(tmp_path: Path) -> None:
+    """★ 契约字段声明的 `source{ref,locator}` 一路进到 `CheckContext`。
+
+    判定器今天**不读**它（改判定语义不在本单元），但通道是接上的：契约 ->
+    `TaskContract.declared_field_sources` -> `runner` -> `CheckContext`。
+    """
+    source = _csv(tmp_path, "panel.csv", "obligor,pd,amount\nA-1,0.01,100\n")
+    text = ONE_SOURCE.replace("SOURCE_CSV", str(source)).replace(
+        "- {name: out.csv, schema: {obligor: str, pd: float, amount: float}}",
+        "- name: out.csv\n"
+        "    schema:\n"
+        "      obligor:\n"
+        "        type: str\n"
+        "        source: {ref: src-1, locator: obligor}\n"
+        "      pd: {type: float}\n"
+        "      amount: {type: float}",
+    )
+    client = ScriptedClient([{"text": json.dumps({"ref": "src-1", "rows": [{"obligor": "A-1"}]})}])
+    runner = _runner(tmp_path, text, client)
+    runner.run()
+
+    assert runner.runtime.context.declared_field_sources == {
+        "out.csv": {"obligor": FieldSource(ref="src-1", locator="obligor")}
+    }
 
 
 def test_a_withheld_candidate_says_which_check_rejected_it(tmp_path: Path) -> None:

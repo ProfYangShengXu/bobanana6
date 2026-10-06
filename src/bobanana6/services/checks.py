@@ -44,6 +44,7 @@ __all__ = [
     "command_unrunnable",
     "judge_environment_problems",
     "shell_command_check",
+    "verdict_violations",
 ]
 
 #: The name a host registers to let a ``custom`` constraint run a shell command.
@@ -297,11 +298,26 @@ class BlockJudge:
         verdict = self.admit(candidate)
         self.last_verdict = verdict
         if not verdict.ok:
-            return GateVerdict(status="failed", scope=self.required_scope)
+            return GateVerdict(status="failed", scope=self.required_scope, violations=verdict_violations(verdict))
         recorded = self.evidence.last()
         if recorded is None:
             return GateVerdict(status="passed", scope=self.required_scope)
         return evaluate(recorded, required_scope=self.required_scope, last_edit_at=self.last_edit_at)
+
+
+def verdict_violations(verdict: Verdict) -> tuple[str, ...]:
+    """The concrete rule each failure broke, in judgment order.
+
+    ``<constraint id>: <observed facts>`` -- the id names the rule, the facts name
+    what was actually seen. JSON Schema's output model (``keywordLocation`` +
+    ``message``) and RFC 9457's ``detail`` are the precedents: a rejection has to
+    say *which* constraint and *what* it saw, or the next attempt is a guess.
+    """
+    rendered: list[str] = []
+    for constraint_id in verdict.failed:
+        facts = verdict.evidence.get(constraint_id, "")
+        rendered.append(f"{constraint_id}: {facts}" if facts else constraint_id)
+    return tuple(rendered)
 
 
 def verdict_summary(verdict: Verdict, judge: BlockJudge) -> dict[str, Any]:
