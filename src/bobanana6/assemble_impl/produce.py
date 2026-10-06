@@ -162,6 +162,60 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "手上有能干成这件事的工具，就用它们，而不是告诉别人你打算怎么用。"
 )
 
+
+#: ★ 抄自 Hermes `agent/system_prompt.py` 的 `# Execution discipline`（八条：
+#: `tool_persistence` / `mandatory_tool_use` / `act_dont_ask` / `prerequisite_checks` /
+#: `verification` / `external_state_verification` / `literal_preservation` /
+#: `missing_context`）—— **按规则重写，不是逐字复制**。
+#:
+#: ★ 八条去掉一条、保留七条：
+#:   · **去掉 `act_dont_ask`** —— 那条治的是「别问用户显而易见的问题」，
+#:     而块**没有人可以问**。抄进来反而会让它幻想有个用户能回答，
+#:     于是拿"我该问谁"当不出手的理由。
+#:   · 其余七条全部保留，按本仓场景重写。
+#:
+#: ★★ 写法标准（用户 2026-10-06 定）：**普通大学生读完能说出"我该怎么做"**。
+#:   ⇒ 每条 = 【一句话规矩】+【一个具体例子】，不用术语、不写"应当"。
+#:   ⇒ 例子的取材一律来自 13f 的**实测症状**，不是编的。
+#:
+#: ★★★ 为什么这七条值得占每轮的固定预算：
+#:   13f 上模型的行为**逐条命中**它们的反面 ——
+#:     `tool_persistence`     拿到 `{}` 就下结论（没换办法再试）
+#:     `prerequisite_checks`  跳过"读数据"直接交答案
+#:     `mandatory_tool_use`   没算过就交（权重/合计全凭印象）
+#:     `literal_preservation` 把来源里的值"顺手修正"
+#:     `missing_context`      缺口径时不查 `semantics.*`，直接猜
+#:     `verification`         交之前不调 `check.local`
+#:     `external_state_verification` 写了文件不回读确认
+#:   ⇒ 这不是七条泛泛的"好习惯"，是七条**对着已知症状**写的规矩。
+EXECUTION_DISCIPLINE = (
+    "\n\n# 干活纪律\n"
+    "## 工具说没有，先换个办法再问一次\n"
+    "你问「有没有数据」，答「没有」—— 这可能是真的，也可能是你问错了地方。\n"
+    "★ 换一个工具、换一个说法再试一次，然后才下结论。\n"
+    "例：`task.upstream_all` 返回 `{}` 只说明**没人往你这儿传数据**，"
+    "不代表**这件事没有数据** —— 数据很可能就在 `authorized_sources` 里，用 `sources.*` 去读。\n"
+    "## 先拿到手，再动手\n"
+    "还没看到任何数据就开始写答案，等于交白卷。\n"
+    "★ 顺序是：读来源 → 看懂了 → 再算、再写。别跳。\n"
+    "## 数字必须真的算过\n"
+    "合计、比例、计数、排序 —— 用 `code.run` 让程序算。\n"
+    "★ 「看起来应该是……」不是数据。凭印象写的数字会被判错。\n"
+    "## 不确定就先查，别猜\n"
+    "不知道一个词的确切口径 → `semantics.lookup`。\n"
+    "不知道某个字段对应什么概念 → `semantics.map`。\n"
+    "★ 查不到就在答案里说「这条读不出来」—— 这是合格的交付，不是失败。\n"
+    "## 来源里的值原样抄\n"
+    "代码、编号、金额、日期 —— 逐字照抄，不要顺手改。\n"
+    "★ 它长得奇怪不等于它写错了。你改它的那一刻，溯源就断了。\n"
+    "## 交之前自己先看一眼\n"
+    "你有 `check.local` —— 交答案之前调一次，看这一块现在被判成什么。\n"
+    "★ 比交上去被拒、再重来一遍便宜得多。\n"
+    "## 写在文件里的，要回读确认\n"
+    "用 `files.write` / `code.run` 写出来的东西，回读一次，确认真的写进去了。\n"
+    "★ 「我以为写好了」和「它真的在磁盘上」是两件事。"
+)
+
 #: ★ ``json_schema`` 形式，由契约的结构化形态生成（`answer_contract.py::candidate_schema`）。
 #: 故意**不是** ``strict: true``：strict 要求每个属性都必填，那会逼模型在每次答案里编
 #: ``hint`` / ``text`` / ``claims``。真正要紧的那一处收紧（``columns`` / ``rows`` 的形状、
@@ -1020,7 +1074,20 @@ class LoopIOImpl(LoopIO):
         block = self.toolset.task.mysubtask()
         authorized = list(self.authorized_sources())
         brief: dict[str, Any] = {"subtask": dict(block), "authorized_sources": authorized}
-        nature = task_nature(self.toolset.task.contract(), self.judge.bundle, self.subtask)
+        contract = self.toolset.task.contract()
+        # ★★★ 用户 2026-10-06 定的标准：**普通大学生读完 brief 要能说出"我要做什么"**。
+        #   实测前它说不出 —— 块拿到的全部任务信息是
+        #   `{"goal": "produce 'output/filing_resolution.csv'", "inputs": [],
+        #     "output_fields": ["text"]}`：一个动作 + 一个字段名，没有内容。
+        #   而契约里**本来就有一句人话**（任务作者写的 `goal`），从没进过 brief。
+        #   `#44` 当初只搬契约**派生**出来的东西（kind/acceptance/frozen），
+        #   为的是不把任务级 goal 原文塞进每一块（`#37`"每块投 6 份源全文"的教训）。
+        #   ★ 这次搬的是**一句话**，不是六份源全文 —— 代价几十个字符，
+        #   换的是"这一块在整个任务里是干嘛的"这唯一一处上下文。
+        #   缺了它，块只知道要产出一个文件名，不知道那个文件里该有什么。
+        if contract.goal.strip():
+            brief["what_this_task_is"] = contract.goal
+        nature = task_nature(contract, self.judge.bundle, self.subtask)
         if nature:
             # ★ 块级 goal 只说了"产出哪个文件"；本任务的性质与验收要求由契约派生（`#44`）。
             brief["task"] = nature
@@ -1034,10 +1101,11 @@ class LoopIOImpl(LoopIO):
                     + render_prompt_contract(ANSWER_CONTRACT)
                     + " Use the tools you were given; you may only read what they expose."
                     # ★ 上面两句是【限制】（你能读什么、答案长什么样）。
-                    #   下面两段是【动作与目标】——限制不会自己变成行为，
+                    #   下面三段是【动作与目标】——限制不会自己变成行为，
                     #   实测：只给限制时，块会交形状正确、内容全空的答案。
                     + BLOCK_COMPLETION_GUIDANCE
                     + TOOL_USE_ENFORCEMENT_GUIDANCE
+                    + EXECUTION_DISCIPLINE
                 ),
             },
             {"role": "user", "content": json.dumps(brief, ensure_ascii=False)},

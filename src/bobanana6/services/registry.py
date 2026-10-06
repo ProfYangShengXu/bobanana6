@@ -461,6 +461,21 @@ def build_registry(
                 "goal": value.goal,
                 "deliverables": deliverables_payload(value),
                 "sources": [s.ref for s in value.sources],
+                # ★ 一次实验：模型把上面的 `sources` 当成【资料本身】来读，
+                #   读完名单就以为读完了书。于是它一次都不调 `sources.*`，
+                #   直接交空表（13f 实测：五轮里 `sources.*` 调用 0 次，
+                #   而它的推理原文写着 "understanding my subtask and the
+                #   sources available"）。
+                #   这一句把"名字 ≠ 内容、读是下一步动作"钉在**它产生误会的
+                #   那一刻**（拿到名单时），而不是写进系统提示 —— 系统提示里
+                #   的同类话实测三轮无效（§5.3.5①：改输入形态，不教模型遵守）。
+                #   措辞给【工具名】而不给"你应该"：可执行的动作，不是态度。
+                "how_to_read": (
+                    "The `sources` above are names, not their contents. "
+                    "`sources.snapshot` / `sources.read` / `sources.grep` take one of "
+                    "those names and return the actual text. Nothing else hands you "
+                    "data: read first, then produce."
+                ),
             }
         )
 
