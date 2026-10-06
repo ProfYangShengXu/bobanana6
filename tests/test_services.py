@@ -31,9 +31,12 @@ from bobanana6.services import (
     BoundSemantics,
     BoundSources,
     BoundTask,
+    BoundWorkspace,
     RecordedEvidence,
     RegisteredTool,
     ToolRegistry,
+    WorkspaceLedger,
+    WriteOutsideRegion,
     build_registry,
     build_toolset,
     shell_command_check,
@@ -1119,13 +1122,26 @@ _PLAUSIBLE_ARGS: dict[str, dict[str, Any]] = {
     "check.provenance": {},
     "check.assemble_dryrun": {},
     "sources.snapshot": {"ref": "src-1"},
+    # ★ `#47`: 六个通用原语 —— 读的那两个走授权来源，写/执行的三个落在工作区。
+    "sources.read": {"ref": "src-1"},
+    "sources.grep": {"pattern": "a"},
+    "files.write": {"path": "out.csv", "content": "x\n"},
+    "files.patch": {"path": "out.csv", "old_string": "x", "new_string": "y"},
+    "shell.run": {"command": "true"},
+    "code.run": {"code": "1 + 1"},
 }
 
 
 def _full_toolset(tmp_path: Path) -> tuple[object, object]:
-    """一个真的装配出来的工具面（所有服务都在），用来逐个调。"""
+    """一个真的装配出来的工具面（所有服务都在），用来逐个调。
+
+    ★ `#47`: 工作区也装上 —— 否则写/执行的六个工具的**实现路径**根本不会被这次体检走到，
+    `#39` 那种"名字对、实现坏"的 bug 就又会躲在这一层后面。
+    """
     _store, snap = _snapshot(tmp_path)
     block = subtask("T-01", output="out.csv", inputs=("part-1",), mode="write")
+    root = tmp_path / "ws"
+    root.mkdir(parents=True, exist_ok=True)
     tools = build_toolset(
         plan=plan(subtasks=(block,), interfaces={"out.csv": "s"}),
         subtask=block,
@@ -1135,6 +1151,9 @@ def _full_toolset(tmp_path: Path) -> tuple[object, object]:
         fetched={"src-1": snap},
         upstream={"part-1": {"name": "part-1", "columns": [], "rows": []}},
         checks=BoundChecks(block="T-01"),
+        workspace=BoundWorkspace(
+            root=root, write_region=("out.csv",), ledger=WorkspaceLedger(root=root, region=("out.csv",))
+        ),
     )
     return tools, build_registry(tools, _store.read)
 
@@ -1160,3 +1179,155 @@ def test_the_served_tool_list_matches_the_declared_inventory() -> None:
 
     assert set(TOOL_NAMES) == {spec.name for spec in _BASE_TOOL_SPECS}
     assert "task.upstream_all" in TOOL_NAMES
+
+
+# --------------------------------------------------------------------------- #
+# ★ `#47`: 通用读写/执行原语 —— 行为契约（分页 / 检索 / 局部改 / 执行）与三条边界
+# --------------------------------------------------------------------------- #
+
+
+def _call_registry(registry, name: str, arguments: dict) -> object:
+    call = registry.calls([_raw(f"c-{name}", name, json.dumps(arguments))])[0]
+    return registry.execute((call,))[0]
+
+
+def test_the_read_tools_page_and_search_one_authorized_source(tmp_path: Path) -> None:
+    """★ 整份取回来会撑爆上下文 —— 分页读与正则检索必须**逐字**给出哪一段。"""
+    from bobanana6.sources import SnapshotStore
+
+    store = SnapshotStore(root=tmp_path / "s2")
+    body = "\n".join(f"row {index} alpha" for index in range(1, 11)).encode("utf-8")
+    snap = store.put(ref="src-1", body=body, source_kind="file", captured_at="2026-01-01T00:00:00", suffix=".txt")
+    block = subtask("T-01", output="out.csv", inputs=("part-1",), mode="write")
+    root = tmp_path / "ws"
+    tools = build_toolset(
+        plan=plan(subtasks=(block,), interfaces={"out.csv": "s"}),
+        subtask=block,
+        contract=contract(),
+        ontology=mini_ontology(),
+        authorized=(SourceRef(ref="src-1", locator="input/a.txt"),),
+        fetched={"src-1": snap},
+        upstream={"part-1": {"name": "part-1", "columns": [], "rows": []}},
+        checks=BoundChecks(block="T-01"),
+        workspace=BoundWorkspace(root=root, write_region=("out.csv",)),
+    )
+    registry = build_registry(tools, store.read)
+
+    first = json.loads(_call_registry(registry, "sources.read", {"ref": "src-1", "offset": "0", "limit": "3"}).content)
+    assert first["total_lines"] == 10 and first["returned_lines"] == 3 and first["truncated"] is True
+    assert [row["line"] for row in first["lines"]] == [1, 2, 3]
+    assert first["lines"][0]["text"] == "row 1 alpha"
+    second = json.loads(
+        _call_registry(registry, "sources.read", {"ref": "src-1", "offset": str(first["next_offset"])}).content
+    )
+    assert next(row["line"] for row in second["lines"]) == 4
+
+    found = json.loads(
+        _call_registry(registry, "sources.grep", {"pattern": "row 7", "ref": "src-1", "context": "1"}).content
+    )
+    assert found["total_matches"] == 1 and found["matches"][0]["line"] == 7
+    assert [row["line"] for row in found["matches"][0]["context"]] == [6, 7, 8]
+    assert found["matches"][0]["context"][1]["match"] is True
+    # `target="files"`：在**授权名单**里按名字找（Hermes `search_files` 的另一半）
+    named = json.loads(_call_registry(registry, "sources.grep", {"pattern": "src-", "target": "files"}).content)
+    assert named["matches"] == ["src-1"]
+
+
+def test_a_read_tool_refuses_a_source_the_block_was_not_granted(tmp_path: Path) -> None:
+    """★ 读边界：路径参数换成了来源 ref，越权必须**具名拒**，不许静默返回空。"""
+    _tools, registry = _full_toolset(tmp_path)
+    for tool in ("sources.read", "sources.grep"):
+        result = _call_registry(registry, tool, {"ref": "src-9", "pattern": "a"})
+        assert result.ok is False and result.error_type == "PermissionError", (tool, result)
+        assert "not authorized" in result.content
+
+
+def test_a_write_outside_the_write_region_is_refused_before_it_lands(tmp_path: Path) -> None:
+    """★ 写边界：写区互斥由稳定侧决定，越权在**落盘之前**就拒。"""
+    workspace = BoundWorkspace(root=tmp_path / "ws", write_region=("out.csv",))
+    with pytest.raises(WriteOutsideRegion):
+        workspace.write("elsewhere.txt", "x")
+    assert not (tmp_path / "ws" / "elsewhere.txt").exists()
+    # 正常工作：父目录自动创建，摘要随结果一起回去
+    written = workspace.write("out.csv", "a,b\n")
+    assert written["path"] == "out.csv" and written["bytes"] == 4 and written["lines"] == 1
+    # 父目录自动创建（写区里的子路径同样允许）
+    nested = BoundWorkspace(root=tmp_path / "ws2", write_region=("deep/out.csv",))
+    assert nested.write("deep/out.csv", "x\n")["path"] == "deep/out.csv"
+
+
+def test_a_patch_that_matches_more_than_once_is_refused_unless_replace_all(tmp_path: Path) -> None:
+    """★ 局部改的契约：精确替换，非唯一匹配必须报错（否则改错地方没人知道）。"""
+    from bobanana6.services import WorkspaceError
+
+    workspace = BoundWorkspace(root=tmp_path / "ws", write_region=("out.csv",))
+    workspace.write("out.csv", "x\nx\n")
+    with pytest.raises(WorkspaceError, match="appears 2 times"):
+        workspace.patch("out.csv", "x", "y")
+    assert workspace.patch("out.csv", "x", "y", replace_all=True)["replacements"] == 2
+    assert (tmp_path / "ws" / "out.csv").read_text(encoding="utf-8") == "y\ny\n"
+    with pytest.raises(WorkspaceError, match="does not appear"):
+        workspace.patch("out.csv", "zzz", "y")
+
+
+def test_the_ledger_sees_a_file_a_shell_command_created(tmp_path: Path) -> None:
+    """★ 只有登记 `files.write` 会在"能执行代码"这一加入口上留洞 —— ledger 观察整个工作区。"""
+    root = tmp_path / "ws"
+    ledger = WorkspaceLedger(root=root, region=("out.csv",))
+    workspace = BoundWorkspace(root=root, write_region=("out.csv",), ledger=ledger)
+    assert ledger.used is False and ledger.changed() == ()  # 没动过 ⇒ 一个字节都不多读
+
+    workspace.write("out.csv", "one\n")
+    workspace.run("echo two > other.txt")
+    changed = ledger.changed()
+    assert "out.csv" in changed and "other.txt" in changed
+    # 编辑既有文件也算"改动"（patch 的语义就在这）
+    workspace.patch("out.csv", "one", "three")
+    assert ledger.changed() == ("other.txt", "out.csv")
+
+
+def test_the_code_session_keeps_its_namespace_and_reset_drops_it(tmp_path: Path) -> None:
+    """★ `execute_code` 的契约：会话在调用之间保持，`reset` 丢掉它。"""
+    workspace = BoundWorkspace(root=tmp_path / "ws", write_region=("out.csv",))
+    first = workspace.run_code("counter = 41\ncounter + 1")
+    assert first["ok"] is True and first["value"] == "42", first
+    second = workspace.run_code("counter += 1\ncounter")
+    assert second["value"] == "42", second
+    third = workspace.run_code("counter", reset=True)
+    assert third["ok"] is False and "NameError" in third["error"], third
+    # 代码在工作区里跑：相对路径落到工作区
+    workspace.run_code("open('made.txt', 'w').write('x')")
+    assert (tmp_path / "ws" / "made.txt").read_text(encoding="utf-8") == "x"
+    workspace.close()
+
+
+def test_the_write_and_execute_tools_are_not_advertised_without_a_workspace(tmp_path: Path) -> None:
+    """★ 部署没给工作区 ⇒ 这些工具**根本不该被广告**（与 `sources` 同一条规则）。"""
+    _store, snap = _snapshot(tmp_path)
+    block = subtask("T-01", output="out.csv", inputs=(), mode="write")
+    without = build_toolset(
+        plan=plan(subtasks=(block,), interfaces={"out.csv": "s"}),
+        subtask=block,
+        contract=contract(),
+        ontology=mini_ontology(),
+        authorized=(SourceRef(ref="src-1", locator="input/a.csv"),),
+        fetched={"src-1": snap},
+        upstream={},
+        checks=BoundChecks(block="T-01"),
+    )
+    names = {spec.name for spec in without.specs()}
+    assert not (names & {"files.write", "files.patch", "shell.run", "code.run"})
+    assert "sources.read" in names and "sources.grep" in names
+
+
+def test_a_workspace_path_may_not_climb_out_of_the_workspace() -> None:
+    """★ 路径边界：绝对路径 / `..` / 盘符一律拒 —— 与写区无关，它自己就是一道闸。"""
+    from bobanana6.services import WorkspaceError
+    from bobanana6.services.workspace import relative_parts
+
+    for bad in ("/etc/passwd", "../outside.txt", "a/../../b.txt", "C:/windows/x", "", "   "):
+        with pytest.raises(WorkspaceError):
+            relative_parts(bad)
+    assert relative_parts("a/b.txt") == ("a", "b.txt")
+    assert relative_parts("./a//b.txt") == ("a", "b.txt")
+    assert relative_parts("a\\b.txt") == ("a", "b.txt")

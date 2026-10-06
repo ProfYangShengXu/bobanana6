@@ -47,6 +47,7 @@ from ..core.ontology import map_field
 from ..core.ports import LLMClient, ToolSet
 from ..services.checks import BlockJudge
 from ..services.registry import build_registry
+from ..services.workspace import BoundWorkspace, WorkspaceLedger
 from ..sources import SnapshotStore
 from ..sources.form import forms_for
 from .produce import LoopIOImpl, ResponseFormatSupport, write_region
@@ -269,6 +270,14 @@ class BlockRuntime:
             required_scope=self.required_scope,
             last_edit_at=self.edit_clock(subtask),
         )
+        # ★ `#47`: the block's own working area, plus the ledger that turns its
+        #   direct writes into traceable products. Both are per block; the ledger
+        #   only starts observing when the block first uses channel 2, so a block
+        #   that never does pays nothing and its reading is unchanged.
+        region = write_region(self.contract, subtask)
+        ledger = WorkspaceLedger(root=self.workspace, region=region)
+        workspace = BoundWorkspace(root=self.workspace, write_region=region, ledger=ledger)
+        tools = replace(tools, workspace=workspace)
         # ★ `#32`: 派活前按任务声明的形式规整载体（encoding / eol）—— 规整清单来自契约，动作只有一套。
         registry = build_registry(tools, self.store.read, forms=forms_for(self.contract.sources))
         io = LoopIOImpl(
@@ -285,7 +294,8 @@ class BlockRuntime:
             task_id=self.contract.task_id,
             workspace=self.workspace,
             observe_dir=self.observe_dir,
-            write_region=write_region(self.contract, subtask),
+            write_region=region,
+            ledger=ledger,
             epoch=self.epoch,
             response_format=self.response_format,
         )
@@ -301,7 +311,12 @@ class BlockRuntime:
             compression=self.compression,
             summarize=self.summarize,
         )
-        result = loop.run(task_id=self.contract.task_id, worker_id=subtask.id, messages=(), route_key=subtask.axis)
+        try:
+            result = loop.run(task_id=self.contract.task_id, worker_id=subtask.id, messages=(), route_key=subtask.axis)
+        finally:
+            # ★ No orphan processes: the code session and every background job the
+            #   block started are owned by this block and die with it.
+            workspace.close()
         self.last_judge = judge
         if result.candidate is not None:
             self.last_candidate = result.candidate

@@ -1509,3 +1509,144 @@ def test_a_judge_command_referencing_a_missing_absolute_path_is_still_refused(tm
     assert run.refused == "judge", run.refused
     assert run.refused_codes == ("C-judge:cwd_missing",), run.refused_codes
     assert client.calls == 0, "判据命令跑不起来时一个模型都不该被叫"
+
+
+# --------------------------------------------------------------------------- #
+# ★ `#47`: 通道 2 —— 块直接写工作区，判定器与装配关必须仍然看得见
+# --------------------------------------------------------------------------- #
+
+
+def _workspace_task(tmp_path: Path, *, name: str, target: str = "out.txt") -> Path:
+    """一道最小的代码类题：一份草稿来源 + 一条判据命令 + 一个交付物。
+
+    ★ 刻意**不**依赖任何未入库的 `acceptance/ab/` fixture：这类题的形状（写工作区 +
+    判据读工作区）必须能用仓库里已有的东西复现，否则它就只是一个本地读数。
+    """
+    import shutil
+
+    task = tmp_path / name
+    (task / "input").mkdir(parents=True)
+    (task / "input" / "seed.txt").write_text("draft\n", encoding="utf-8")
+    (task / "ontology.yaml").write_text(
+        "domain: text-fix\nversion: \"2026.1\"\nconcepts:\n  text: {label: 文本, kind: attribute}\n"
+        "calendar: {timezone: Asia/Shanghai}\n",
+        encoding="utf-8",
+    )
+    (task / "task.yaml").write_text(
+        "task_id: ws-task\ngoal: write the deliverable\nversion: 1\n"
+        f"deliverables:\n  - name: {target}\n    schema: {{text: str}}\n"
+        "sources:\n  - {ref: seed, locator: input/seed.txt}\n"
+        "constraints:\n  hard:\n"
+        f"    - id: C-judge\n      kind: custom\n      target: {target}\n"
+        "      spec:\n        check: shell_command\n"
+        f"        command: \"cd _run/workspace && grep -q EXPECTED {target}\"\n"
+        "      rationale: \"产物必须真的写出来并含 EXPECTED\"\n"
+        "limits: {max_rounds: 3}\n",
+        encoding="utf-8",
+    )
+    shutil.rmtree(tmp_path / name / "_run", ignore_errors=True)
+    return task
+
+
+class _ChannelTwoClient:
+    """一条会走通道 2 的模型：先 `files.write`，再交 JSON 答案。
+
+    ``path=None`` 时走通道 1（把内容放进答案的 `files` 字段），这是同一个问题的旧走法。
+    """
+
+    def __init__(self, *, path: str | None = "out.txt", content: str = "EXPECTED\n", tool: str = "files.write") -> None:
+        self.path, self.content, self.tool = path, content, tool
+        self.calls = 0
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        brief = _briefing(messages)
+        output = str(brief.get("subtask", {}).get("output", ""))
+        answered = any(message.get("role") == "tool" for message in messages)
+        if self.path is not None and not answered:
+            return ModelResponse(
+                tool_calls=(
+                    _tool_call("w1", self.tool, {"path": self.path, "content": self.content}),
+                )
+            )
+        body: dict[str, object] = {"ref": "seed", "columns": [], "rows": []}
+        if self.path is None:
+            body["files"] = {output: self.content}
+        return ModelResponse(text=json.dumps(body))
+
+
+def test_a_block_that_writes_its_deliverable_directly_is_judged_and_assembled(tmp_path: Path) -> None:
+    """★ `#47`：通道 2 写出来的交付物必须**仍然被判定器看见**。
+
+    三个要点一起钉住：
+      · 判据命令（读工作区）通过 ⇒ 文件真的落到了判据看得见的地方；
+      · 候选的**判定内容取自磁盘**（`artifact.text` == 文件原文，不是答案里那句话）；
+      · 文件级溯源（`out.txt:file`）进了候选 ⇒ 装配关与报告看得见它。
+    """
+    task = _workspace_task(tmp_path, name="channel-two")
+    client = _ChannelTwoClient()
+    run = run_task(task, client=client, env={}, workspace=True)
+
+    assert run.refused is None
+    assert run.report.block_pass_rate == 1.0, run.verdicts
+    assert client.calls > 1, "应该先写文件、再交答案"
+    candidate = next(iter(run.candidates.values()))
+    assert "out.txt" in candidate.files
+    assert candidate.artifact("out.txt") is not None
+    assert candidate.artifact("out.txt").text == "EXPECTED\n", "判定内容必须取自磁盘"
+    assert any(point.value_ref == "out.txt:file" for point in candidate.provenance), candidate.provenance
+    assert (run.workspace / "out.txt").read_text(encoding="utf-8") == "EXPECTED\n"
+
+
+def test_the_same_deliverable_through_the_answer_json_still_works(tmp_path: Path) -> None:
+    """★ 通道 1（答案 JSON 的 `files`）一字未改 —— 同一个题、同一份内容，同样通过。"""
+    task = _workspace_task(tmp_path, name="channel-one")
+    run = run_task(task, client=_ChannelTwoClient(path=None), env={}, workspace=True)
+
+    assert run.report.block_pass_rate == 1.0, run.verdicts
+    candidate = next(iter(run.candidates.values()))
+    assert "out.txt" in candidate.files
+    assert (run.workspace / "out.txt").read_text(encoding="utf-8") == "EXPECTED\n"
+
+
+def test_a_channel_two_write_outside_the_write_region_never_lands(tmp_path: Path) -> None:
+    """★ 通道 2 **不是后门**（其一）：`files.write` 写到写区之外 ⇒ 工具当场具名拒。
+
+    于是交付物从来没出现过，判据命令（读工作区）必然失败 —— 这既证明了写区边界，也证明了
+    "绕过判据器"这条路走不通。
+    """
+    task = _workspace_task(tmp_path, name="outside-region")
+    run = run_task(task, client=_ChannelTwoClient(path="elsewhere.txt"), env={}, workspace=True)
+
+    assert run.report.block_pass_rate < 1.0, run.verdicts
+    assert not (run.workspace / "elsewhere.txt").exists(), "越权写必须一个字都没落盘"
+    assert not (run.workspace / "out.txt").exists(), "交付物根本没被写出来"
+
+
+class _ShellWritingClient(_ChannelTwoClient):
+    """走 `shell.run` 在写区之外落一个文件 —— 工具看不出来，只有块结束时的对账能抓住。"""
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        brief = _briefing(messages)
+        output = str(brief.get("subtask", {}).get("output", ""))
+        if not any(message.get("role") == "tool" for message in messages):
+            return ModelResponse(
+                tool_calls=(
+                    _tool_call("w1", "shell.run", {"command": "echo stray > elsewhere.txt"}),
+                )
+            )
+        return ModelResponse(text=json.dumps({"ref": "seed", "columns": [], "rows": [], "files": {output: "EXPECTED\n"}}))
+
+
+def test_a_shell_command_that_writes_outside_the_region_is_caught_at_block_end(tmp_path: Path) -> None:
+    """★ 通道 2 **不是后门**（其二）：`shell.run` 的副作用壳看不到参数 —— 由块结束时的对账兜住。
+
+    这就是"只登记 `files.write`"会留的那个洞：能执行代码之后，写文件的路不止一条。
+    """
+    task = _workspace_task(tmp_path, name="shell-outside-region")
+    run = run_task(task, client=_ShellWritingClient(), env={}, workspace=True)
+
+    assert run.report.block_pass_rate < 1.0, run.verdicts
+    errors = " ".join(str((verdict.evidence or {}).get("errors", "")) for verdict in run.verdicts.values())
+    assert "outside its write region" in errors, errors

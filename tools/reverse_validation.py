@@ -2125,6 +2125,35 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_acceptance.py::test_a_refused_split_reaches_the_exit_coverage",
         "refuse_split / single_agent go back to being invisible however truly they were refused",
     ),
+    Mutation(
+        "X47-write-region-check-removed",
+        "services/workspace.py",
+        "    def _check_region(self, path: str) -> None:\n",
+        "    def _check_region(self, path: str) -> None:\n"
+        "        return  # mutation: the write region stops being enforced\n",
+        "tests/test_services.py::test_a_write_outside_the_write_region_is_refused_before_it_lands",
+        "channel 2 becomes a backdoor: any path the model names is writable",
+    ),
+    Mutation(
+        "X47-path-escape-allowed",
+        "services/workspace.py",
+        '    if any(part == ".." for part in parts):\n',
+        '    if False:  # mutation: a path may climb out of the workspace\n',
+        "tests/test_services.py::test_a_workspace_path_may_not_climb_out_of_the_workspace",
+        "a workspace write can point outside the workspace again",
+    ),
+    Mutation(
+        "X47-reconciliation-dropped",
+        "assemble_impl/produce.py",
+        "        ledger = self.ledger\n"
+        "        if ledger is None or not ledger.used or self.workspace is None:\n"
+        "            return candidate\n",
+        "        ledger = self.ledger\n"
+        "        if True:  # mutation: direct writes never reach the candidate\n"
+        "            return candidate\n",
+        "tests/test_acceptance.py::test_a_block_that_writes_its_deliverable_directly_is_judged_and_assembled",
+        "channel-2 products go back to being invisible to the judge and the assembly",
+    ),
 )
 
 

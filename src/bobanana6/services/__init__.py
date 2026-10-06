@@ -19,6 +19,7 @@ from .registry import (
     build_registry,
     snapshot_payload,
 )
+from .textops import DEFAULT_LIMIT, line_window, search_lines
 from .tools import (
     SOURCE_READING_AXES,
     BoundChecks,
@@ -27,8 +28,16 @@ from .tools import (
     BoundTask,
     build_toolset,
 )
+from .workspace import (
+    BoundWorkspace,
+    WorkspaceError,
+    WorkspaceLedger,
+    WorkspaceUnavailable,
+    WriteOutsideRegion,
+)
 
 __all__ = [
+    "DEFAULT_LIMIT",
     "SHELL_COMMAND_CHECK",
     "SOURCE_READING_AXES",
     "TOOL_NAMES",
@@ -37,14 +46,21 @@ __all__ = [
     "BoundSemantics",
     "BoundSources",
     "BoundTask",
+    "BoundWorkspace",
     "RecordedEvidence",
     "RegisteredTool",
     "ToolRegistry",
+    "WorkspaceError",
+    "WorkspaceLedger",
+    "WorkspaceUnavailable",
+    "WriteOutsideRegion",
     "artifact_payload",
     "build_registry",
     "build_toolset",
     "command_unrunnable",
     "judge_environment_problems",
+    "line_window",
+    "search_lines",
     "shell_command_check",
     "snapshot_payload",
     "verdict_summary",

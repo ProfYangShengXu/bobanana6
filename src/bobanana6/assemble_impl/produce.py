@@ -28,7 +28,7 @@ import json
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -54,6 +54,7 @@ from ..core.model import (
 from ..core.ports import LLMClient, ToolSet
 from ..services.checks import SHELL_COMMAND_CHECK, BlockJudge
 from ..services.registry import ToolRegistry
+from ..services.workspace import WorkspaceLedger, relative_parts
 from .answer_contract import (
     ANSWER_CONTRACT,
     candidate_schema,
@@ -229,10 +230,17 @@ class CandidateFormatError(ValueError):
 
 
 def tool_schemas(toolset: ToolSet) -> list[dict[str, Any]]:
-    """The advertised tool surface, in the shape a model expects."""
+    """The advertised tool surface, in the shape a model expects.
+
+    ★ `#47`: a tool may declare **optional** arguments. They are advertised (a
+    model cannot ask for what it is not told about) but not listed as required,
+    so an omitted argument keeps its default instead of forcing the caller to
+    invent one. For every pre-existing tool ``optional`` is empty, so the
+    advertised schema is byte-identical to before.
+    """
     schemas: list[dict[str, Any]] = []
     for spec in toolset.specs():
-        properties = {name: {"type": "string"} for name in spec.params}
+        properties = {name: {"type": "string"} for name in (*spec.params, *spec.optional)}
         schemas.append(
             {
                 "type": "function",
@@ -941,6 +949,9 @@ class LoopIOImpl(LoopIO):
     written: tuple[str, ...] = ()
     #: ★ `#43`: 继承守卫拒收时把"池子 + 交上来的行"落盘到这里（`None` = 不观测，零开销）。
     observe_dir: Path | None = None
+    #: ★ `#47` 通道 2：本块直接写/执行动过的工作区，块结束时在这里对账。
+    #: `None` / 没被用过 ⇒ 一个字节都不多读（既有读数一字不变）。
+    ledger: WorkspaceLedger | None = None
 
     def prompt(self, state: LoopState) -> list[dict[str, Any]]:
         """Stable instructions first, this block next, the transcript last.
@@ -1069,7 +1080,71 @@ class LoopIOImpl(LoopIO):
             raise
         if candidate.files:
             self._persist_files(response.text, candidate)
+        candidate = self._reconcile_workspace(candidate, response.text)
         return TurnProposal(candidate=candidate, text=response.text)
+
+    def _reconcile_workspace(self, candidate: Candidate, text: str) -> Candidate:
+        """★ `#47` 通道 2 的对账：块**直接写/执行**出来的文件，在这里变成可追溯的产物。
+
+        这是本块最关键的一处设计取舍（`#47` 报告 §2②）：
+
+        * **为什么观察而不是相信每个工具**：`shell.run` / `code.run` 能创建壳看不到参数的
+          文件（`> out.csv`、`open(...).write(...)`）。只登记 `files.write` 会在"能执行代码"
+          这一加入口上留一个洞。ledger 在**第一次**动工作区前拍了"之前"，这里 diff 出
+          "新增/改动的文件"——两条路径（写工具 / 执行副作用）走同一条记录。
+        * **通道 1 一字不改**：答案 JSON 的 `files` 仍然走 `_persist_files` 与行级溯源；
+          这里**只追加**通道 2 的东西。没用到通道 2 的块（所有既有题）直接原样返回。
+        * **写区互斥在这里是硬闸**：改到写区之外的路径 ⇒ 具名拒（模型能看见、能自纠），
+          而不是"写进去了、装配关看不见"。
+        * **不许当后门**：本块声明的交付物若被直接写过，那个交付物的**判定内容取自磁盘**
+          （不是答案里那句话）——判定器看见的就是块真正交出来的字节。文件级溯源点
+          （`<path>:file`）与交付物的行级点位一起进候选，装配关与 `SOURCES.md` 因此看得见它们。
+        """
+        ledger = self.ledger
+        if ledger is None or not ledger.used or self.workspace is None:
+            return candidate
+        changed = ledger.changed()
+        if not changed:
+            return candidate
+
+        allowed = {"/".join(relative_parts(name)) for name in self.write_region}
+        outside = [name for name in changed if name not in allowed]
+        if outside:
+            raise CandidateFormatError(
+                f"block {self.subtask.id!r} changed {outside!r}, which is outside its write region "
+                f"{sorted(allowed)!r}",
+                code="write_outside_region",
+                got=text[:200],
+                expected=f"write only inside {sorted(allowed)!r}",
+            )
+
+        root = Path(self.workspace)
+        #: 文件级溯源要指回一个**登记在册**的快照 —— 用本块有权引用的那些（自己读的 + 继承的）。
+        #: 一个都没有时只登记文件、不编一个指向不了的引用（宁可不编，不造假）。
+        authorized = tuple(self.authorized_sources())
+        cited = authorized[0] if authorized else ""
+        provenance = list(candidate.provenance)
+        files = dict(candidate.files)
+        for name in changed:
+            files[name] = root / name
+            if cited:
+                provenance.append(Provenance(value_ref=f"{name}:file", snapshot_ref=cited, locator=name))
+
+        artifacts = list(candidate.artifacts)
+        output = self.subtask.output
+        if output in changed:
+            # ★ 交付物被直接写过 ⇒ 判定的那一份内容以**磁盘为准**，答案里那句话不算数。
+            content = (root / output).read_text(encoding="utf-8")
+            artifacts = [
+                replace(artifact, text=content) if artifact.name == output else artifact for artifact in artifacts
+            ]
+            if cited:
+                provenance.extend(
+                    Provenance(value_ref=f"{output}:line={index}", snapshot_ref=cited, locator=output)
+                    for index, line in enumerate(content.splitlines())
+                    if line
+                )
+        return replace(candidate, files=files, provenance=tuple(provenance), artifacts=tuple(artifacts))
 
     def _guard_observer(self) -> Callable[[Mapping[str, Any]], None] | None:
         """★ `#43`: 继承守卫的观测点 —— 只观测，不改判定。

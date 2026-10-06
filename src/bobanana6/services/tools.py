@@ -25,7 +25,14 @@ from ..core.model import (
     TaskContract,
 )
 from ..core.ontology import map_field, pinned_version, resolve_unit, validate_code
-from ..core.ports import CheckTools, SemanticsTools, SourceTools, TaskTools, ToolSet
+from ..core.ports import (
+    CheckTools,
+    SemanticsTools,
+    SourceTools,
+    TaskTools,
+    ToolSet,
+    WorkspaceTools,
+)
 
 __all__ = [
     "BoundChecks",
@@ -144,6 +151,13 @@ class BoundSources(SourceTools):
     def refs(self) -> tuple[str, ...]:
         return tuple(source.ref for source in self.authorized)
 
+    def locator(self, ref: str) -> str:
+        """The carrier's declared locator (a hint for the payload, never a permission)."""
+        for source in self.authorized:
+            if source.ref == ref:
+                return source.locator
+        return ""
+
     def resolve(self, ref: str) -> str:
         if ref:
             if ref not in self.refs():
@@ -213,6 +227,7 @@ def build_toolset(
     upstream: Mapping[str, Mapping[str, Any]],
     checks: BoundChecks,
     inherited_sources: tuple[str, ...] = (),
+    workspace: WorkspaceTools | None = None,
 ) -> ToolSet:
     """Bind the tool surface to one block.
 
@@ -221,6 +236,10 @@ def build_toolset(
     按模块切只换了**切口**，模块块读的仍然是自己那几个声明来源); the declared-input
     permission is ``subtask.inputs`` and nothing else. ``inherited_sources`` are the snapshots
     the declared inputs came from (a merge block cites those, never its own).
+
+    ★ `#47`: ``workspace`` is the block's own working area (or ``None`` when the
+    deployment declared none) -- the write/execute tools are advertised only when
+    it is present, so a capability the deployment never granted cannot be asked for.
     """
     sources = (
         BoundSources(authorized=authorized, fetched=fetched)
@@ -233,6 +252,7 @@ def build_toolset(
         task=BoundTask(subtask=subtask, contract_document=contract, upstream_parts=upstream, allowed_inputs=subtask.inputs),
         check=checks,
         sources=sources,
+        workspace=workspace,
         allowed_inputs=subtask.inputs,
         inherited_sources=inherited_sources,
     )

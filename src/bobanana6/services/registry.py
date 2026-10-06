@@ -32,6 +32,14 @@ from ..agentloop.tools import (
 from ..core.model import Artifact, Column, Snapshot, canonical_row
 from ..core.ports import ToolSet
 from ..sources.form import SourceForm, decode_body, form_for
+from .textops import (
+    DEFAULT_LIMIT,
+    TARGETS,
+    TextArgumentError,
+    grep_names,
+    line_window,
+    search_lines,
+)
 
 __all__ = [
     "TOOL_NAMES",
@@ -65,6 +73,15 @@ TOOL_NAMES: tuple[str, ...] = (
     "check.provenance",
     "check.assemble_dryrun",
     "sources.snapshot",
+    # ★ `#47`: 通用读写/执行原语（Hermes 的 read_file / search_files / write_file /
+    #   patch / terminal / execute_code 的**行为契约**）。名字走本仓的命名空间约定，
+    #   参数域换成本仓的授权模型（见 `core/ports.py::_BASE_TOOL_SPECS`）。
+    "sources.read",
+    "sources.grep",
+    "files.write",
+    "files.patch",
+    "shell.run",
+    "code.run",
 )
 
 
@@ -357,24 +374,145 @@ def build_registry(
         bound = toolset.sources.snapshot(str(args.get("ref", "")))
         return snapshot_payload(bound.ref, bound, body_reader(bound), form_for(forms or {}, bound.ref))
 
-    catalog: Mapping[str, tuple[Handler, tuple[str, ...], tuple[str, ...]]] = {
-        "semantics.lookup": (lookup, (), ()),
-        "semantics.map": (map_field, (), ()),
-        "semantics.check": (check_usage, (), ()),
-        "task.mysubtask": (mysubtask, (), ()),
-        "task.upstream": (upstream, (), ("name",)),
-        "task.upstream_all": (upstream_all, (), ()),
-        "task.contract": (contract, (), ()),
-        "check.local": (check_local, (), ()),
-        "check.provenance": (check_provenance, (), ()),
-        "check.assemble_dryrun": (assemble_dryrun, (), ()),
-        "sources.snapshot": (snapshot, (), ("ref",)),
+    # -- ★ `#47`: the general read/write/execute primitives ------------------ #
+    #
+    # ``sources.read`` / ``sources.grep`` keep Hermes' *behaviour contract*
+    # (line numbers, pagination, regex, context lines) and change only **where
+    # the path may point**: an authorized source ref instead of a host path.
+    # The permission check is the same one ``sources.snapshot`` uses, so the
+    # three read tools cannot drift apart.
+
+    def _locator(ref: str) -> str:
+        """The carrier's locator for the payload's hint -- never a permission rule.
+
+        Guarded with ``getattr`` so a partial stand-in toolset (a test double that
+        implements only the read path) degrades to "no hint" instead of breaking
+        every read with an ``AttributeError``.
+        """
+        locator = getattr(getattr(toolset, "sources", None), "locator", None)
+        return str(locator(ref)) if callable(locator) else ""
+
+    def _authorized_text(ref: str) -> tuple[str, str]:
+        if toolset.sources is None:
+            raise PermissionError(f"subtask {toolset.subtask!r} is not authorized to read sources")
+        resolved = toolset.sources.resolve(ref)
+        bound = toolset.sources.snapshot(resolved)
+        body = body_reader(bound)
+        return resolved, decode_body(body, form_for(forms or {}, bound.ref)).text
+
+    def source_read(args: Mapping[str, Any]) -> str:
+        resolved, text = _authorized_text(str(args.get("ref", "")))
+        window = line_window(
+            text,
+            offset=args.get("offset", 0),
+            limit=args.get("limit", DEFAULT_LIMIT),
+        )
+        return payload({"ref": resolved, "locator": _locator(resolved), **dict(window)})
+
+    def source_grep(args: Mapping[str, Any]) -> str:
+        pattern = args.get("pattern", "")
+        if not isinstance(pattern, str):
+            raise TextArgumentError(f"pattern must be a string, got {type(pattern).__name__}")
+        target = str(args.get("target") or "content")
+        if target not in TARGETS:
+            raise TextArgumentError(f"target must be one of {list(TARGETS)!r}, got {target!r}")
+        if target == "files":
+            if toolset.sources is None:
+                raise PermissionError(f"subtask {toolset.subtask!r} is not authorized to read sources")
+            names = list(toolset.sources.refs())
+            names.extend(name for name in map(_locator, names) if name and name not in names)
+            return payload(dict(grep_names(names, pattern)))
+        resolved, text = _authorized_text(str(args.get("ref", "")))
+        found = search_lines(
+            text,
+            pattern,
+            offset=args.get("offset", 0),
+            limit=args.get("limit", DEFAULT_LIMIT),
+            context=args.get("context", 0),
+            output_mode=str(args.get("output_mode") or "content"),
+        )
+        return payload({"ref": resolved, "locator": _locator(resolved), **dict(found)})
+
+    def _workspace() -> Any:
+        workspace = getattr(toolset, "workspace", None)
+        if workspace is None:
+            raise PermissionError(f"subtask {toolset.subtask!r} has no workspace; file tools are not granted")
+        return workspace
+
+    def files_write(args: Mapping[str, Any]) -> str:
+        return payload(
+            dict(
+                _workspace().write(
+                    str(args.get("path", "")),
+                    str(args.get("content", "")),
+                    append=str(args.get("append", "")).strip().lower() in ("true", "1", "yes"),
+                )
+            )
+        )
+
+    def files_patch(args: Mapping[str, Any]) -> str:
+        return payload(
+            dict(
+                _workspace().patch(
+                    str(args.get("path", "")),
+                    str(args.get("old_string", "")),
+                    str(args.get("new_string", "")),
+                    replace_all=str(args.get("replace_all", "")).strip().lower() in ("true", "1", "yes"),
+                )
+            )
+        )
+
+    def shell_run(args: Mapping[str, Any]) -> str:
+        return payload(
+            dict(
+                _workspace().run(
+                    str(args.get("command", "")),
+                    background=str(args.get("background", "")).strip().lower() in ("true", "1", "yes"),
+                    timeout=args.get("timeout") or None,
+                    workdir=str(args.get("workdir", "")),
+                )
+            )
+        )
+
+    def code_run(args: Mapping[str, Any]) -> str:
+        return payload(
+            dict(
+                _workspace().run_code(
+                    str(args.get("code", "")),
+                    reset=str(args.get("reset", "")).strip().lower() in ("true", "1", "yes"),
+                )
+            )
+        )
+
+    #: name -> (handler, effect, target arguments).
+    #: ★ The **effect** is declared here, once, by the tool itself -- a write is
+    #: a barrier for call-level concurrency (``agentloop/tools.plan_tool_segments``),
+    #: and a tool must not be able to lie about it (``services/registry.py`` header).
+    catalog: Mapping[str, tuple[Handler, str, tuple[str, ...]]] = {
+        "semantics.lookup": (lookup, "read", ()),
+        "semantics.map": (map_field, "read", ()),
+        "semantics.check": (check_usage, "read", ()),
+        "task.mysubtask": (mysubtask, "read", ()),
+        "task.upstream": (upstream, "read", ("name",)),
+        "task.upstream_all": (upstream_all, "read", ()),
+        "task.contract": (contract, "read", ()),
+        "check.local": (check_local, "read", ()),
+        "check.provenance": (check_provenance, "read", ()),
+        "check.assemble_dryrun": (assemble_dryrun, "read", ()),
+        "sources.snapshot": (snapshot, "read", ("ref",)),
+        "sources.read": (source_read, "read", ("ref",)),
+        "sources.grep": (source_grep, "read", ("ref",)),
+        "files.write": (files_write, "write", ("path",)),
+        "files.patch": (files_patch, "write", ("path",)),
+        "shell.run": (shell_run, "write", ()),
+        "code.run": (code_run, "write", ()),
     }
     tools: list[RegisteredTool] = []
     for spec in toolset.specs():
-        handler, _, targets = catalog.get(spec.name, (None, (), ()))
-        if handler is None:
+        entry = catalog.get(spec.name)
+        if entry is None:
             raise KeyError(f"tool {spec.name!r} is advertised but has no implementation")
+        handler, effect, targets = entry
         tools.append(
             RegisteredTool(
                 name=spec.name,
@@ -382,7 +520,7 @@ def build_registry(
                 handler=handler,
                 returns=spec.returns,
                 bound_to=spec.bound_to,
-                effect="read",  # ★ no tool in this surface mutates state; a write tool must declare it
+                effect=effect,
                 target_args=tuple(targets),
             )
         )

@@ -57,6 +57,7 @@ __all__ = [
     "TaskTools",
     "ToolSet",
     "ToolSpec",
+    "WorkspaceTools",
 ]
 
 
@@ -200,6 +201,28 @@ class CheckTools(Protocol):
 class SourceTools(Protocol):
     def snapshot(self, ref: str) -> Snapshot: ...
 
+    #: The carrier's declared locator, for the payload's human-readable hint.
+    #: Never used for permission (``snapshot``/``resolve`` own that).
+    def locator(self, ref: str) -> str: ...
+
+
+class WorkspaceTools(Protocol):
+    """The block's own working area: files it may write, code it may run.
+
+    ★ Deliberately narrow and *bound*: the paths are workspace-relative and the
+    process cwd stays inside the workspace, so a block cannot reach the host.
+    The permission rule (which paths this block may write) is decided outside
+    and passed in -- a tool never widens its own write region by asking.
+    """
+
+    def write(self, path: str, content: str) -> Mapping[str, Any]: ...
+
+    def patch(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> Mapping[str, Any]: ...
+
+    def run(self, command: str, *, background: bool = False, timeout: float | None = None, workdir: str = "") -> Mapping[str, Any]: ...
+
+    def run_code(self, code: str, *, reset: bool = False) -> Mapping[str, Any]: ...
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -207,6 +230,10 @@ class ToolSpec:
     params: tuple[str, ...]
     returns: str
     bound_to: str | None = None
+    #: Arguments the tool accepts but does not require. They are advertised (a
+    #: model cannot ask for what it is not told about) but not listed as
+    #: required, so a default stays a default.
+    optional: tuple[str, ...] = ()
 
 
 _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
@@ -222,6 +249,54 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec("check.provenance", (), "provenance report", "subtask"),
     ToolSpec("check.assemble_dryrun", (), "assembly verdict", "subtask"),
     ToolSpec("sources.snapshot", ("ref",), "Snapshot", "authorized sources"),
+    #: ★ 读：整份取回来会撑爆上下文，所以给它【带行号的分页】与【正则检索】。
+    #: 路径参数不是任意路径，而是**授权来源的 ref** —— 换的是"能指到哪"，不是语义。
+    ToolSpec(
+        "sources.read",
+        ("ref",),
+        "the source's text as LINE_NUM|CONTENT, one window at a time",
+        "authorized sources",
+        optional=("offset", "limit"),
+    ),
+    ToolSpec(
+        "sources.grep",
+        ("pattern",),
+        "regex matches (with context lines) inside an authorized source, or among its names",
+        "authorized sources",
+        optional=("ref", "target", "limit", "offset", "context"),
+    ),
+    #: ★ 写：产物直接落工作区（父目录自动创建），不再要求"整个文件装进一个字符串"。
+    #: `append` 是对"整份覆盖写"的一处**有意扩展**：产物大于单次调用上限时，
+    #: 覆盖写没有诚实的办法分次写完（实作与理由见 `services/workspace.py`）。
+    ToolSpec(
+        "files.write",
+        ("path", "content"),
+        "the file was written (bytes + digest)",
+        "write region",
+        optional=("append",),
+    ),
+    ToolSpec(
+        "files.patch",
+        ("path", "old_string", "new_string"),
+        "exact text replacement; a non-unique match is refused",
+        "write region",
+        optional=("replace_all",),
+    ),
+    #: ★ 执行：cwd 落在工作区内；产生的文件与 `files.write` 同等处理。
+    ToolSpec(
+        "shell.run",
+        ("command",),
+        "exit code + stdout/stderr of a shell command run inside the workspace",
+        "workspace cwd",
+        optional=("background", "timeout", "workdir"),
+    ),
+    ToolSpec(
+        "code.run",
+        ("code",),
+        "run a code snippet in the workspace (persistent between calls)",
+        "workspace cwd",
+        optional=("reset",),
+    ),
 )
 
 
@@ -243,6 +318,11 @@ class ToolSet:
     task: TaskTools
     check: CheckTools
     sources: SourceTools | None = None
+    #: ★ `#47`: the block's own working area. ``None`` = this deployment has no
+    #: workspace, and then the write/execute tools are **not advertised at all**
+    #: (the same rule `sources` follows) -- a block cannot ask for a capability
+    #: the deployment never granted.
+    workspace: WorkspaceTools | None = None
     allowed_inputs: tuple[str, ...] = ()
     #: ★ A11: the snapshots this block did not read itself but inherited from the
     #: parts it consumes. A merge block may cite these and nothing else.
@@ -260,7 +340,16 @@ class ToolSet:
             raise PermissionError(f"input {name!r} is not declared by subtask {self.subtask!r}")
 
     def specs(self) -> tuple[ToolSpec, ...]:
-        """The tool schema, independent of any specific runtime."""
-        return _BASE_TOOL_SPECS if self.sources is not None else tuple(
-            spec for spec in _BASE_TOOL_SPECS if spec.name != "sources.snapshot"
-        )
+        """The tool schema, independent of any specific runtime.
+
+        A capability the block does not hold is not advertised: no ``sources``
+        means no read tools, no ``workspace`` means no write/execute tools.
+        """
+        available: list[ToolSpec] = []
+        for spec in _BASE_TOOL_SPECS:
+            if spec.name.startswith("sources.") and self.sources is None:
+                continue
+            if spec.name.startswith(("files.", "shell.", "code.")) and self.workspace is None:
+                continue
+            available.append(spec)
+        return tuple(available)
