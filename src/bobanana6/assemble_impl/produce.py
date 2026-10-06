@@ -138,6 +138,30 @@ BLOCK_COMPLETION_GUIDANCE = (
     "绝不拿编造的内容替代你产不出来的结果 —— 报告阻塞永远好过编一个结果。"
 )
 
+
+#: ★ 抄自 Hermes `agent/prompt_builder.py::TOOL_USE_ENFORCEMENT_GUIDANCE` ——
+#: **按规则重写，不是逐字复制**。
+#:
+#: ★★ 那块在 Hermes 里是**按模型名门控**的，触发名单原文是
+#: ``("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")``
+#: —— **deepseek 明在名单里**。本仓 A 臂用的正是 ``deepseek-v4-flash``，
+#: 症状与它治的病一模一样：
+#:   第 1 轮模型回「I'll start by understanding my task and examining the
+#:   available sources.」—— **说了要去看，没在同一轮动手**。
+#: ⇒ Hermes 的作者早就知道这个模型族需要显式引导才会用工具；本仓没抄这块。
+#:
+#: 与 `BLOCK_COMPLETION_GUIDANCE` 的分工：那块说**做什么**（取数、别手写、
+#: 别编），这块说**怎么开始**（说了就立刻做，不许用"我接下来会…"结束一轮）。
+TOOL_USE_ENFORCEMENT_GUIDANCE = (
+    "\n\n# 说了就立刻做\n"
+    "要动手就【在这一轮里直接发出工具调用】—— 不要先把打算说一遍、等下一轮再动。"
+    "「我先看一下…」「让我检查…」这种句子后面，必须紧跟对应的工具调用。\n"
+    "★ 不要用「我接下来会…」结束一轮：要么这一轮里有推进的调用，"
+    "要么这一轮里交出最终答案。只有打算、没有动作的一轮是不合格的。\n"
+    "★ 活儿没干完就别停：不要用一段「后续计划」收尾。"
+    "手上有能干成这件事的工具，就用它们，而不是告诉别人你打算怎么用。"
+)
+
 #: ★ ``json_schema`` 形式，由契约的结构化形态生成（`answer_contract.py::candidate_schema`）。
 #: 故意**不是** ``strict: true``：strict 要求每个属性都必填，那会逼模型在每次答案里编
 #: ``hint`` / ``text`` / ``claims``。真正要紧的那一处收紧（``columns`` / ``rows`` 的形状、
@@ -1003,9 +1027,10 @@ class LoopIOImpl(LoopIO):
                     + render_prompt_contract(ANSWER_CONTRACT)
                     + " Use the tools you were given; you may only read what they expose."
                     # ★ 上面两句是【限制】（你能读什么、答案长什么样）。
-                    #   这一段是【动作与目标】——限制不会自己变成行为，
+                    #   下面两段是【动作与目标】——限制不会自己变成行为，
                     #   实测：只给限制时，块会交形状正确、内容全空的答案。
                     + BLOCK_COMPLETION_GUIDANCE
+                    + TOOL_USE_ENFORCEMENT_GUIDANCE
                 ),
             },
             {"role": "user", "content": json.dumps(brief, ensure_ascii=False)},

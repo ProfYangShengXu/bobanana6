@@ -279,6 +279,19 @@ def _rows_from_json(text: str) -> tuple[list[Column], list[dict[str, Any]]]:
     return [Column(name=name, dtype="str") for name in names], rows
 
 
+#: ★ 单次 ``sources.snapshot`` 回给模型的字符上限。
+#:
+#: 实测（13f，A 臂，2026-10-06）：``INFOTABLE.tsv`` 只有 261 KB，但一次
+#: snapshot 吐出 **298,587 字符 ≈ 8 万 token** —— 模型装不下也算不动，
+#: 于是它退回交一段"关于这个产物的描述"当答案。同一次运行里它**从未**
+#: 用过 ``sources.read`` / ``sources.grep``。
+#:
+#: ⇒ 结论：**分页必须是默认，不能是选项**。Hermes 的 ``read_file`` 默认只读
+#: 一页，所以大文件天然被切；这里默认整份，于是最大的那份来源一次爆上下文。
+#: 超限时不整份回 —— 留头部 + 一张回程票（``_snapshot_preview``）。
+SNAPSHOT_MAX_CHARS = 20_000
+
+
 def snapshot_payload(
     ref: str,
     snapshot: Snapshot,
@@ -295,6 +308,8 @@ def snapshot_payload(
     the form the task declared (`encoding` / `eol`) *here*, before any block sees
     them, and what was normalized (or assumed) rides along in ``source_form``.
     Undeclared and clean stays byte-identical to the old payload (no extra key).
+
+    ★ 超限时**不整份回**：留头部 + 一张回程票（见 ``SNAPSHOT_MAX_CHARS``）。
     """
     decoded = decode_body(body, form)
     text = decoded.text
@@ -315,7 +330,64 @@ def snapshot_payload(
     }
     if decoded.note:
         payload["source_form"] = dict(decoded.note)
-    return json.dumps(payload, ensure_ascii=False)
+    encoded = json.dumps(payload, ensure_ascii=False)
+    if len(encoded) > SNAPSHOT_MAX_CHARS:
+        encoded = json.dumps(_snapshot_preview(ref, payload, rows, len(encoded)), ensure_ascii=False)
+    return encoded
+
+
+def _snapshot_preview(
+    ref: str,
+    payload: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    original_chars: int,
+) -> dict[str, Any]:
+    """★ 超限回执：留下头部，并**明确指路**到分页/检索两个工具。
+
+    这一条是本项目的病根族在工具面上的一个实例：**分页必须是默认，不能是选项**。
+    Hermes 的 ``read_file`` 默认只读一页，所以大文件天然被切开；这里的
+    ``sources.snapshot`` 默认整份，于是最大的那份来源一次灌进 8 万 token。
+
+    回执里三件事缺一不可：① 说清被截了（``truncated``/``total_rows``）；
+    ② 给出**不要据此作答**的指令（否则模型会拿前 20 行编完整答案）；
+    ③ 给出下一步该调哪个工具、带什么参数（回程票）。
+
+    ★ 单文本行（非 csv/json 的来源，如 ``.tsv`` 落进"整份当一行"那一支）要**截文本**，
+    不能整行丢掉 —— 丢掉的话模型连样本都看不到，只剩一句"太大了"。
+    """
+    kept: list[Mapping[str, Any]] = []
+    budget = SNAPSHOT_MAX_CHARS // 2
+    used = 0
+    for row in rows:
+        piece = len(json.dumps(row, ensure_ascii=False))
+        if used + piece > budget:
+            # 单个文本行（``{"text": <整份>}``）：截它的文本，别把行丢了。
+            cells = {key: value for key, value in row.items() if isinstance(value, str)}
+            if len(row) == 1 and len(cells) == 1 and not kept:
+                (only_key, only_text), = cells.items()
+                room = max(0, budget - used - len(only_key) - 16)
+                kept.append({only_key: only_text[:room]})
+            break
+        kept.append(row)
+        used += piece
+    return {
+        "ref": ref,
+        "truncated": True,
+        "columns": payload.get("columns", []),
+        "rows": kept,
+        "shown_rows": len(kept),
+        "total_rows": len(rows),
+        "original_chars": original_chars,
+        "note": (
+            f"★ 这份来源整份有 {original_chars} 字符，装不进一次调用，"
+            f"这里只回了前 {len(kept)}/{len(rows)} 行。"
+            "**不要拿这个残片作答** —— 它是样本，不是数据。"
+            "取你要的那部分：`sources.read(ref, offset=起始行, limit=行数)` 按行取，"
+            "或 `sources.grep(pattern, ref)` 按正则找你需要的片段。"
+            "两者都带分页，整份读不是唯一选项。"
+        ),
+    }
+
 
 
 def build_registry(
