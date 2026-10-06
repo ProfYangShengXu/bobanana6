@@ -101,7 +101,15 @@ def candidate(
     claims: tuple[Claim, ...] = (),
     definition_versions: Mapping[str, str] | None = None,
     hint: str = "",
+    done: bool = True,
 ) -> Candidate:
+    """A candidate the fixture means as its final answer (``done=True``).
+
+    The loop only terminates on a candidate the model itself declared finished
+    (``loop._gate_phase``); a fixture that hands one over is stating "this is my
+    answer", so ``done`` defaults to True here. A test that needs "still working"
+    passes ``done=False`` explicitly.
+    """
     return Candidate(
         subtask_id=subtask_id,
         source_id=source_id,
@@ -111,6 +119,7 @@ def candidate(
         artifacts=artifacts,
         claims=claims,
         definition_versions=definition_versions or {},
+        done=done,
     )
 
 

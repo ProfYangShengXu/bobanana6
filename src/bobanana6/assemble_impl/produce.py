@@ -982,6 +982,9 @@ def parse_candidate(
         artifacts=(artifact,),
         claims=_claims(document.get("claims"), snapshot_ref=snapshot_ref, locator=locator, reject=reject),
         definition_versions=dict(versions) if isinstance(versions, Mapping) else {},
+        # ★★ 模型自己声明"我干完了"（见 `Candidate.done` 的注记）。缺省 False ——
+        #   **不写就当没干完**，循环会继续给它机会，而不是把这份答案当终稿交出去。
+        done=bool(document.get("done") is True),
     )
 
 
@@ -1186,6 +1189,10 @@ class LoopIOImpl(LoopIO):
                     "- Any issues encountered\n\n"
                     "★ 这份汇报写在答案 JSON 的 `summary` 字段里（判定器不读它，它是你说人话的位置）；"
                     "**产物本身照下面的形状交**。\n"
+                    "★★ 交答案 **不等于** 干完了：答案里写 `\"done\": true` 才代表你**确认交卷**。"
+                    "没写或写 `false`，系统认为你**还在干**，会接着给你轮次；"
+                    "所以**该干的活没干完就不要写 true** —— 空表、占位符、"
+                    "「我打算去读来源」这类东西交上来不算数，写了 `true` 也一样会被拒。\n"
                     + render_prompt_contract(ANSWER_CONTRACT)
                     + BLOCK_COMPLETION_GUIDANCE
                     + TOOL_USE_ENFORCEMENT_GUIDANCE

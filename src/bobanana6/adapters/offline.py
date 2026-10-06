@@ -100,7 +100,26 @@ class EchoToolResultClient:
             )
         if last_tool is None:
             return ModelResponse(text=json.dumps({"rows": [], "columns": []}))
-        return ModelResponse(text=last_tool, usage={"completion_tokens": 0})
+        return ModelResponse(text=_declared_final(last_tool), usage={"completion_tokens": 0})
+
+
+def _declared_final(payload: str) -> str:
+    """The echoed tool payload is this client's **final answer**: say so.
+
+    The loop only terminates on a candidate the model itself declared finished
+    (``loop._gate_phase``). This stand-in answers exactly once and has nothing
+    more to do, so it marks the echoed object ``"done": true``; without it the
+    loop would keep asking and eventually degrade a perfectly good run.
+    A payload that is not a JSON object is returned unchanged.
+    """
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError:
+        return payload
+    if not isinstance(document, dict):
+        return payload
+    document["done"] = True
+    return json.dumps(document, ensure_ascii=False)
 
 
 def _last_tool_content(messages: Sequence[Mapping[str, Any]]) -> str | None:

@@ -616,11 +616,29 @@ class WorkerLoop:
             return self._classify_and_recover(turn, exc)
         turn.gate = gate
         if can_complete(gate, self._config.required_scope):
-            # The closing row is applied by ``run`` (the single delivery point),
-            # so the recovery exits close their tail the same way this one does.
-            turn.final_candidate = proposal.candidate
-            turn.exit_reason = "passed"
-            return PhaseResult.done("passed")
+            # ★★ 过门 ≠ 干完。**只有模型自己声明 `done=True` 才算终结**
+            #   （对齐 Hermes `kanban_complete`：「一条纯文本回复不是终结状态」）。
+            #
+            #   为什么：bb6 原来「交答案」和「我干完了」是同一个动作 ⇒ 模型每开一次口
+            #   都被当成终稿。13f 实测：它交 `{"rows":[], "summary":"尚未开始"}` ——
+            #   明说"还没开始"，系统却把空表当答卷判掉、烧完恢复预算就降级收工。
+            #   加了这道条件之后，它交上来的东西只是"这是我目前的答案"；除非它自己
+            #   说干完了，否则循环继续给它机会。
+            #
+            #   ★ 兜底：预算烧完时 `run` 会走 `resolve_budget_fallback(state.withheld)`
+            #     —— 那份**过门但没声明干完**的答案照样会交出去，所以这道条件
+            #     不会把一份合格的答案弄丢。
+            if proposal.candidate.done:
+                turn.final_candidate = proposal.candidate
+                turn.exit_reason = "passed"
+                return PhaseResult.done("passed")
+            # 过门了但它没说干完：存成目前最好的一份，继续。
+            turn.state = replace(
+                turn.state,
+                withheld=proposal.candidate,
+                attempts=turn.state.attempts + 1,
+            )
+            return PhaseResult.fallthrough()
         # Withheld: keep it for the budget fallback, then try to fix it.
         turn.state = replace(turn.state, withheld=proposal.candidate, attempts=turn.state.attempts + 1)
         return PhaseResult.fallthrough()

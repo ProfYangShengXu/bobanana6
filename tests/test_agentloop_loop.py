@@ -36,8 +36,14 @@ from bobanana6.agentloop.tools import ToolCall, ToolResult
 from bobanana6.core.model import Candidate
 
 
-def candidate(hint: str = "answer") -> Candidate:
-    return Candidate(subtask_id="T-01", source_id="src-1", hint=hint)
+def candidate(hint: str = "answer", *, done: bool = True) -> Candidate:
+    """The fixture's candidate is its final answer unless a test says otherwise.
+
+    The loop only terminates on a candidate the model declared ``done``; the tests
+    here hand over a finished answer, so ``done`` defaults to True. A test whose
+    point is "the model is still working" passes ``done=False``.
+    """
+    return Candidate(subtask_id="T-01", source_id="src-1", hint=hint, done=done)
 
 
 def read(call_id: str) -> ToolCall:

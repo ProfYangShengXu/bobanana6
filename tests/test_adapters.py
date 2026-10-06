@@ -186,7 +186,9 @@ def test_echo_client_asks_for_the_snapshot_then_answers_with_it() -> None:
 
     messages = [{"role": "tool", "tool_call_id": "offline-1", "content": '{"rows": [{"a": 1}]}'}]
     second = client.complete(messages, tools, 10)
-    assert json.loads(second.text) == {"rows": [{"a": 1}]}
+    # ★ the echoed payload is this stand-in's **final answer** ⇒ it declares `done`
+    #   (the loop only terminates on a candidate that says it is finished).
+    assert json.loads(second.text) == {"rows": [{"a": 1}], "done": True}
 
 
 # --------------------------------------------------------------------------- #

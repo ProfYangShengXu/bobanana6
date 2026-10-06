@@ -35,7 +35,9 @@ def _artifact(name: str, rows: tuple[Mapping[str, Any], ...], columns: tuple[str
 def _candidate(*, sid: str, source: str, artifact: Any, provenance: tuple[Any, ...] = ()) -> Any:
     from bobanana6.core.model import Candidate
 
-    return Candidate(subtask_id=sid, source_id=source, artifacts=(artifact,), provenance=provenance)
+    # ★ 脚本替身交的就是它的**最终答案**：不声明 `done`，循环按新语义会一直
+    #   认为它还在干（A05 因此从 retry_local 变成 degrade、且交不出候选）。
+    return Candidate(subtask_id=sid, source_id=source, artifacts=(artifact,), provenance=provenance, done=True)
 
 
 def _snapshot(ref: str) -> Any:

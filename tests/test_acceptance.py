@@ -285,7 +285,7 @@ class _ScriptedBlocks:
             ):
                 # 合并块只能声明它收到的：有一个输入没标单位，这一列的 unit 就不能成立
                 columns = [{key: value for key, value in column.items() if key != "unit"} for column in columns]
-            merged = {"ref": "panel-a", "rows": list(deduped.values()), "columns": columns}
+            merged = {"ref": "panel-a", "rows": list(deduped.values()), "columns": columns, "done": True}
             return ModelResponse(text=json.dumps(merged))
 
         if self.decline_one_read and block == "T-01":
@@ -309,6 +309,8 @@ class _ScriptedBlocks:
                     "columns": _declared_columns(snapshot.get("columns", []), snapshot.get("rows", []))
                     if self.normalise_units
                     else snapshot.get("columns", []),
+                    # ★ 脚本替身交的是**最终答案**：不写 done，循环按新语义不终结。
+                    "done": True,
                 }
             )
         )
@@ -1581,7 +1583,8 @@ class _ChannelTwoClient:
                     _tool_call("w1", self.tool, {"path": self.path, "content": self.content}),
                 )
             )
-        body: dict[str, object] = {"ref": "seed", "columns": [], "rows": []}
+        # ★ 这是一份最终答案：不写 done，循环按新语义不终结。
+        body: dict[str, object] = {"ref": "seed", "columns": [], "rows": [], "done": True}
         if self.path is None:
             body["files"] = {output: self.content}
         return ModelResponse(text=json.dumps(body))

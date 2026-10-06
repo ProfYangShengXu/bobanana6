@@ -98,6 +98,9 @@ class _Service(BaseHTTPRequestHandler):
                             {"name": "amount", "dtype": "str"},
                         ],
                         "rows": [{"obligor": "A-1", "pd": "0.01", "amount": "100"}],
+                        # ★ the stand-in's answer is its final one: the loop only
+                        #   terminates on a candidate that declares itself done.
+                        "done": True,
                     }
                 )
             ),

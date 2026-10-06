@@ -203,6 +203,8 @@ def test_two_source_task_runs_the_pipeline_and_the_merge_block(tmp_path: Path) -
                 "ref": ref,
                 "columns": [{"name": "obligor", "dtype": "str"}, {"name": "pd", "dtype": "str"}],
                 "rows": rows,
+                # ★ 这是该块的**最终答案**：不写 done，循环按新语义不终结。
+                "done": True,
             }
         )
 
@@ -906,7 +908,7 @@ def test_the_block_runtime_hands_the_ports_budget_to_the_producer(tmp_path: Path
 
         def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
             self.max_tokens.append(max_tokens)
-            return ModelResponse(text='{"rows": [{"a": 1}]}')
+            return ModelResponse(text='{"rows": [{"a": 1}], "done": true}')
 
     client = _Client()
     document = parse_contract(ONE_SOURCE.replace("SOURCE_CSV", "x.csv"))
@@ -1240,6 +1242,7 @@ class _RelayRecorder:
                     "columns": [{"name": "obligor", "dtype": "str"}],
                     "ref": "src-1",
                     "rows": [{"obligor": f"seen-by-{block}"}],
+                    "done": True,
                 }
             )
         )
