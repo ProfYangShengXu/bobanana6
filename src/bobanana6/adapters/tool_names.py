@@ -119,6 +119,15 @@ class ToolNameMap:
         """Wire -> internal. A name we never renamed is passed through unchanged."""
         return self.reverse.get(name, name)
 
+    def wire_any(self, name: str) -> str:
+        """Internal -> wire, for a name that may not be in this request's menu.
+
+        An assistant transcript row can name a tool advertised by an *earlier* menu
+        (a resumed turn, say). Falling back to the stateless rule keeps the
+        translation total, so no dotted name can slip onto the wire.
+        """
+        return self.forward.get(name) or wire_name(name)
+
     def wire_tools(self, tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         """Rewrite the advertised tool menu into its wire spelling.
 

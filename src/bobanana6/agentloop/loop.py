@@ -25,6 +25,7 @@ the KMP stream-continuation dedup for truncated output.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -64,6 +65,7 @@ __all__ = [
     "TurnProposal",
     "WorkerLoop",
     "assemble_messages",
+    "assistant_tool_row",
     "close_transcript_tail",
     "common_prefix_length",
     "continuation_overlap_length",
@@ -297,6 +299,36 @@ class TurnProposal:
     text: str = ""
     declined: bool = False
     detail: str = ""
+
+
+def assistant_tool_row(proposal: TurnProposal) -> dict[str, Any]:
+    """The assistant row that must precede this round's tool results.
+
+    ★ One invariant, one place: the rows the loop appends are
+    ``assistant(tool_calls=[id…]) → tool(id₁) → tool(id₂) → …``. The ids come from
+    ``proposal.tool_calls`` -- the same values the results carry -- so the pairing
+    cannot drift (the registry normalizes a missing model id into ``call-<n>``, and
+    reconstructing from the raw response would not).
+
+    ``arguments`` is emitted as the text the caller sent when we have it (the model's
+    exact bytes), falling back to a serialization of the parsed mapping so a call
+    built without raw text is still replayable.
+    """
+    return {
+        "role": "assistant",
+        "content": proposal.text or "",
+        "tool_calls": [
+            {
+                "id": call.call_id,
+                "type": "function",
+                "function": {
+                    "name": call.name,
+                    "arguments": call.raw_arguments or json.dumps(dict(call.arguments), ensure_ascii=False),
+                },
+            }
+            for call in proposal.tool_calls
+        ],
+    }
 
 
 class LoopIO(Protocol):
@@ -642,8 +674,20 @@ class WorkerLoop:
             calls=turn.state.calls + len(proposal.tool_calls),
             done_actions=_merge_actions(turn.state.done_actions, completed),
         )
-        appended = tuple(
-            {"role": "tool", "tool_call_id": result.call_id, "content": result.content} for result in turn.results
+        # ★ 顺序是协议的硬要求（不是风格）：一次工具轮必须落成
+        #   `assistant(tool_calls=[id…]) → tool(id₁) → tool(id₂) → …`。
+        #   只追加 tool 行会让请求直接 400（"Messages with role 'tool' must be a
+        #   response to a preceding message with 'tool_calls'"），而且——即使宽松端点
+        #   放行——模型看到的历史里也**没有它自己刚才调了什么**：每个 tool 行都成了
+        #   没有出处的 JSON 块。
+        #   id 一律取自 `proposal.tool_calls`（注册表归一化过、缺 id 时会补 `call-<n>`），
+        #   所以 assistant 声明的 id 与下面每一条 tool 的 `tool_call_id` **必然**对得上。
+        appended = (
+            assistant_tool_row(proposal),
+            *(
+                {"role": "tool", "tool_call_id": result.call_id, "content": result.content}
+                for result in turn.results
+            ),
         )
         turn.state = replace(turn.state, messages=(*turn.state.messages, *appended), tainted=self._taint.tainted())
         turn.exit_reason = "tool_round"

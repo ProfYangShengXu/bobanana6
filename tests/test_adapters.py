@@ -482,3 +482,75 @@ def test_the_response_schema_label_is_made_wire_compliant() -> None:
         {"type": "json_schema", "json_schema": {"name": "candidate.v2", "schema": {}}}
     )
     assert dotted["json_schema"]["name"] == "candidate_v2"
+
+
+# --------------------------------------------------------------------------- #
+# ★ 出站消息也过边界：assistant 行的工具名换成线格式、壳的记账键不许上线
+# --------------------------------------------------------------------------- #
+
+
+def _transcript() -> list[dict[str, Any]]:
+    return [
+        {"role": "system", "content": "protocol"},
+        {"role": "user", "content": "brief"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call-1", "type": "function", "function": {"name": "semantics.lookup", "arguments": "{}"}},
+                {"id": "call-2", "type": "function", "function": {"name": "sources.read", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "r1"},
+        {"role": "tool", "tool_call_id": "call-2", "content": "r2"},
+        {"role": "assistant", "content": "digest", "candidate": True},
+    ]
+
+
+def test_the_transcript_is_translated_and_internal_bookkeeping_is_dropped() -> None:
+    """★ assistant 行的 `function.name` 与 `tools[]` 受**同一条** pattern 管。
+
+    `candidate` 是壳自己的"这一行交付了答案"标记（`close_transcript_tail`），
+    不是 chat schema 的字段 —— 边界上丢掉，壳内部照旧保留。
+    """
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    opener = _RecordingOpener(_FakeResponse(_reply("ok")))
+    client.opener = opener
+    client.complete(_transcript(), _real_menu(), 8)
+
+    sent = json.loads(opener.requests[0].data.decode())["messages"]
+    calls = sent[2]["tool_calls"]
+    assert [call["function"]["name"] for call in calls] == ["semantics_lookup", "sources_read"]
+    for call in calls:
+        assert re.match(r"^[a-zA-Z0-9_-]+$", call["function"]["name"])
+    assert "candidate" not in sent[-1]
+    assert sent[-1] == {"role": "assistant", "content": "digest"}
+    # 壳内部不变：调用方手里的 transcript 一个字符没动（翻译只发生在出站）
+    assert _transcript()[2]["tool_calls"][0]["function"]["name"] == "semantics.lookup"
+
+
+def test_the_wire_messages_satisfy_the_sequence_the_endpoints_enforce() -> None:
+    """★ 请求里的消息序列本身就是合规的（不只是名字）。"""
+    from bobanana6.agentloop.compress import message_sequence_problem
+
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    opener = _RecordingOpener(_FakeResponse(_reply("ok")))
+    client.opener = opener
+    client.complete(_transcript(), _real_menu(), 8)
+
+    sent = json.loads(opener.requests[0].data.decode())["messages"]
+    assert message_sequence_problem(sent) == ""
+    # 反向：把带 tool_calls 的那条 assistant 行抽掉 ⇒ 同一个检查报出那条 400 的原因
+    without = [row for row in sent if not (row.get("role") == "assistant" and row.get("tool_calls"))]
+    assert "no preceding assistant row" in message_sequence_problem(without)
+
+
+def test_a_transcript_message_without_tool_calls_is_copied_verbatim() -> None:
+    """普通消息原样过（除记账键外不改形状）。"""
+    client = OpenAICompatibleClient(LLMSettings(base_url="http://x.invalid/v1", model="m"))
+    opener = _RecordingOpener(_FakeResponse(_reply("ok")))
+    client.opener = opener
+    client.complete([{"role": "user", "content": "hi", "pinned": True}], [], 8)
+    assert json.loads(opener.requests[0].data.decode())["messages"] == [
+        {"role": "user", "content": "hi", "pinned": True}
+    ]

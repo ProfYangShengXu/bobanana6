@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -505,3 +506,97 @@ def test_the_prose_stays_in_state_errors_while_the_fix_goes_to_the_model() -> No
     injected = str(io.seen[1][-1].get("content", ""))
     assert "AnswerShapeError" in prose  # the human log keeps the class name
     assert "AnswerShapeError" not in injected  # the model-facing text does not
+
+
+# --------------------------------------------------------------------------- #
+# ★ 工具轮的消息序列：assistant(tool_calls) 必须在它那批 tool 结果之前
+#   （缺了这一条，严格端点直接 400；宽松端点放行时模型也看不到自己调过什么）
+# --------------------------------------------------------------------------- #
+
+
+def _round(io: FakeIO) -> list[dict]:
+    """The transcript right after the first tool round."""
+    for state in io.states:
+        roles = [row.get("role") for row in state.messages]
+        if roles[:1] == ["assistant"]:
+            return list(state.messages)
+    raise AssertionError("no tool round ran")
+
+
+def test_the_tool_round_appends_the_assistant_row_before_its_results() -> None:
+    """★ 断言的是【送出去的最后一条 assistant 消息】带 tool_calls，且其后每条 tool 的 id 都在里面。"""
+    from bobanana6.agentloop.compress import message_sequence_problem
+
+    io = FakeIO([TurnProposal(tool_calls=(read("a"), read("b")), text="looking"), TurnProposal(text="done")])
+    WorkerLoop(io).run(task_id="t", worker_id="w")
+    transcript = _round(io)
+
+    assert transcript[0]["role"] == "assistant" and transcript[0]["content"] == "looking"
+    declared = [call["id"] for call in transcript[0]["tool_calls"]]
+    assert declared == ["a", "b"]
+    assert [(row["role"], row["tool_call_id"]) for row in transcript[1:]] == [("tool", "a"), ("tool", "b")]
+    # 顺序读：assistant 声明的名字/参数也在（模型能看到自己调过什么）
+    assert transcript[0]["tool_calls"][0]["function"]["name"] == "read"
+    assert json.loads(transcript[0]["tool_calls"][0]["function"]["arguments"]) == {"path": "a"}
+    assert message_sequence_problem(transcript) == ""
+    # ★ 反向：没有 assistant 行的旧形态**必须**被同一个检查判为不合规（这就是那个 400）
+    assert message_sequence_problem(transcript[1:]) != ""
+
+
+def test_a_write_barrier_still_pairs_every_result_with_one_assistant_row() -> None:
+    """多段执行（写是屏障）之后，三条结果仍与同一条 assistant 的 id 对上、顺序一致。"""
+    from bobanana6.agentloop.compress import message_sequence_problem
+
+    io = FakeIO([TurnProposal(tool_calls=(read("a"), write("w"), read("b"))), TurnProposal(text="done")])
+    WorkerLoop(io).run(task_id="t", worker_id="w")
+    transcript = _round(io)
+
+    assert all(len(batch) == 1 for batch in io.executed)  # 屏障语义没被改坏
+    assert [call["id"] for call in transcript[0]["tool_calls"]] == ["a", "w", "b"]
+    assert [row["tool_call_id"] for row in transcript[1:]] == ["a", "w", "b"]
+    assert message_sequence_problem(transcript) == ""
+
+
+def test_a_call_whose_execution_produced_no_result_still_gets_a_pair() -> None:
+    """★ 没有结果的调用（被守卫拦下 / 执行没回）也必须有一条 tool 行 ——
+
+    `order_results` 会给每个声明的调用合成一条；assistant 行声明的是**全部**调用，
+    所以"声明了但没结果"与"有结果但没声明"两边都不会出现（`AGENTS §7①`）。
+    """
+    from bobanana6.agentloop.compress import message_sequence_problem
+
+    class SilentIO(FakeIO):
+        def execute(self, calls):  # type: ignore[no-untyped-def]
+            self.executed.append(tuple(calls))
+            return ()
+
+    io = SilentIO([TurnProposal(tool_calls=(read("a"), read("b"))), TurnProposal(text="done")])
+    WorkerLoop(io).run(task_id="t", worker_id="w")
+    transcript = _round(io)
+    assert [row["tool_call_id"] for row in transcript[1:]] == ["a", "b"]
+    assert transcript[1]["content"]  # 合成结果不是空的（模型要能看到"为什么没有内容"）
+    assert message_sequence_problem(transcript) == ""
+
+
+def test_every_appended_round_is_a_pair_when_the_model_calls_twice() -> None:
+    """两轮工具调用 ⇒ 两对 assistant(tool_calls) + 它们的结果，交错也合规。"""
+    from bobanana6.agentloop.compress import message_sequence_problem
+
+    io = FakeIO(
+        [
+            TurnProposal(tool_calls=(read("a1"), read("a2"))),
+            TurnProposal(tool_calls=(read("b1"),)),
+            TurnProposal(text="done"),
+        ]
+    )
+    WorkerLoop(io).run(task_id="t", worker_id="w")
+    final = io.states[-1].messages
+    assert [row.get("role") for row in final] == ["assistant", "tool", "tool", "assistant", "tool"]
+    assert message_sequence_problem(final) == ""
+
+
+def test_an_empty_tool_call_list_appends_nothing() -> None:
+    """空 tool_calls 不是工具轮：不许凭空插一条 assistant 行。"""
+    io = FakeIO([TurnProposal(tool_calls=()), TurnProposal(text="done")])
+    WorkerLoop(io).run(task_id="t", worker_id="w")
+    assert io.states[-1].messages == ()

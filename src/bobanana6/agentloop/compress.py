@@ -38,6 +38,7 @@ __all__ = [
     "compact",
     "compression_threshold",
     "estimate_tokens",
+    "message_sequence_problem",
     "recoverable",
     "sanitize_tool_pairs",
     "truncate_tool_results",
@@ -157,6 +158,53 @@ def sanitize_tool_pairs(messages: Sequence[Mapping[str, Any]]) -> tuple[Mapping[
     return tuple(output)
 
 
+def message_sequence_problem(messages: Sequence[Mapping[str, Any]]) -> str:
+    """Why a strict OpenAI-compatible endpoint would refuse these messages (``""`` = it would not).
+
+    The invariant ``sanitize_tool_pairs`` repairs, stated as a check:
+
+    * every ``tool`` row answers a tool call declared by the assistant row **right
+      before it** (the endpoints enforce "must be a response to a preceding message
+      with ``tool_calls``");
+    * the responses to one assistant row arrive contiguously -- a ``user`` /
+      ``system`` / new ``assistant`` row in the middle leaves a dangling call;
+    * the transcript never ends with an unanswered tool call.
+
+    It lives next to the sanitizer on purpose: one invariant, one repair, one check.
+    Tests and the acceptance probe use it to assert the sequence the loop builds; the
+    loop itself does not need to call it (it builds the rows in one place).
+    """
+    pending: set[str] = set()
+    for index, message in enumerate(messages):
+        role = message.get("role")
+        if role == "assistant":
+            if pending:
+                return (
+                    f"message {index}: an assistant row follows {len(pending)} unanswered tool call(s) "
+                    f"{sorted(pending)!r}"
+                )
+            calls = message.get("tool_calls") or ()
+            pending = {str(call.get("id", "")) for call in calls if isinstance(call, Mapping)}
+        elif role == "tool":
+            call_id = str(message.get("tool_call_id", ""))
+            if not pending:
+                return f"message {index}: role 'tool' has no preceding assistant row with tool_calls"
+            if call_id not in pending:
+                return (
+                    f"message {index}: tool_call_id {call_id!r} is not declared by the preceding assistant row "
+                    f"(it declares {sorted(pending)!r})"
+                )
+            pending.discard(call_id)
+        elif pending:
+            return (
+                f"message {index}: role {role!r} interrupts a tool round "
+                f"({len(pending)} call(s) still unanswered)"
+            )
+    if pending:
+        return f"the transcript ends with {len(pending)} unanswered tool call(s) {sorted(pending)!r}"
+    return ""
+
+
 def truncate_tool_results(
     messages: Sequence[Mapping[str, Any]], cap: int
 ) -> tuple[tuple[Mapping[str, Any], ...], tuple[Mapping[str, Any], ...]]:
@@ -177,6 +225,31 @@ def truncate_tool_results(
 
 def _is_protected(message: Mapping[str, Any]) -> bool:
     return message.get("role") == "system" or message.get("pinned") is True
+
+
+def _round_units(messages: Sequence[Mapping[str, Any]]) -> tuple[tuple[int, ...], ...]:
+    """Index groups that have to be dropped **together** to keep the sequence legal.
+
+    ★ A tool round (``assistant(tool_calls)`` + the ``tool`` rows that answer it) is
+    one unit. Compaction picks whole units; a cut that fell between the assistant row
+    and its results would leave orphan ``tool`` rows, which the next request is
+    rejected for outright -- the same 400 this module's sanitizer exists to prevent,
+    reintroduced by the *drop* step instead of the *append* step.
+    """
+    units: list[tuple[int, ...]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            end = index + 1
+            while end < len(messages) and messages[end].get("role") == "tool":
+                end += 1
+            units.append(tuple(range(index, end)))
+            index = end
+        else:
+            units.append((index,))
+            index += 1
+    return tuple(units)
 
 
 def _pin_instruction(messages: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
@@ -207,9 +280,17 @@ def compact(
 
     if estimate_tokens(capped) > threshold and capped:
         recent = set(range(max(0, len(capped) - policy.keep_recent), len(capped)))
-        droppable = [index for index in range(len(capped)) if index not in recent and not _is_protected(capped[index])]
-        drop_from = len(droppable) // 2
-        chosen = droppable[:drop_from]
+        # ★ 丢弃以【工具轮】为单位：一轮的 assistant 行与它的 tool 行要么一起留、要么一起走
+        #   （切在中间会留下孤儿 tool 行 —— 下一个请求直接被端点拒，与 append 那一侧的毛病同源）。
+        units = _round_units(capped)
+        droppable_units = [
+            unit
+            for unit in units
+            if all(index not in recent for index in unit)
+            and all(not _is_protected(capped[index]) for index in unit)
+        ]
+        chosen_units = droppable_units[: len(droppable_units) // 2]
+        chosen = [index for unit in chosen_units for index in unit]
         if chosen:
             chosen_set = set(chosen)
             dropped = tuple(capped[index] for index in chosen)
@@ -226,6 +307,10 @@ def compact(
                 rebuilt.append(message)
 
     rebuilt = _pin_instruction(rebuilt)
+    # ★ 兜底：压缩之后的序列必须**仍然**合法。整轮丢弃已经保证了这一点，这一步是
+    #   "单点收口"（`AGENTS §7③`）—— 将来谁再动丢弃逻辑，也不许把不合法的序列留在
+    #   消息里（它会一路活到下一个请求，然后被端点 400）。
+    rebuilt = list(sanitize_tool_pairs(rebuilt))
     tokens_after = estimate_tokens(rebuilt)
     if dropped and tokens_after >= tokens_before:
         # 坑 10: an attempted compression that does not shrink must not be committed.

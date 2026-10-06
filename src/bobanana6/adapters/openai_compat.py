@@ -68,6 +68,14 @@ class LLMConfigError(RuntimeError):
 #: returning 200, which is the most expensive kind of silence.
 PROTECTED_PAYLOAD_KEYS: tuple[str, ...] = ("model", "messages")
 
+#: Message keys that are **the shell's own bookkeeping**, not part of the chat
+#: schema. ``candidate`` is the loop's "this row closes a delivered answer" marker
+#: (``agentloop/loop.py::close_transcript_tail``); a strict endpoint has every
+#: right to refuse an unknown field, so the boundary drops it. The shell keeps it
+#: internally -- dropping happens on the way out, exactly like the tool-name
+#: translation.
+INTERNAL_MESSAGE_KEYS: tuple[str, ...] = ("candidate",)
+
 DEFAULT_TIMEOUT_S = 60.0
 
 
@@ -150,6 +158,29 @@ def _extra_body_from_env(source: Mapping[str, str]) -> Mapping[str, Any]:
     return dict(parsed)
 
 
+def _wire_message(message: Mapping[str, Any], names: ToolNameMap) -> dict[str, Any]:
+    """One message in wire shape: internal bookkeeping dropped, tool names translated.
+
+    The transcript the shell keeps carries **internal** tool names, so an assistant
+    row's ``tool_calls[].function.name`` has to be translated on the way out too --
+    the model's own call is what that row records, and the endpoint validates the
+    same pattern there.
+    """
+    entry = {key: value for key, value in message.items() if key not in INTERNAL_MESSAGE_KEYS}
+    calls = entry.get("tool_calls")
+    if entry.get("role") != "assistant" or not isinstance(calls, Sequence) or isinstance(calls, (str, bytes)):
+        return entry
+    rewritten: list[Any] = []
+    for call in calls:
+        function = call.get("function") if isinstance(call, Mapping) else None
+        if isinstance(call, Mapping) and isinstance(function, Mapping):
+            rewritten.append({**call, "function": {**function, "name": names.wire_any(str(function.get("name", "")))}})
+        else:
+            rewritten.append(call)
+    entry["tool_calls"] = rewritten
+    return entry
+
+
 def _error_detail(exc: urllib.error.HTTPError, limit: int = 400) -> str:
     """The service's error body, shortened. Best effort: an unreadable body is fine."""
     try:
@@ -189,7 +220,9 @@ class OpenAICompatibleClient:
         )
         payload: dict[str, Any] = {
             "model": self.settings.model,
-            "messages": list(messages),
+            # ★ 消息也过边界：assistant 行里的 `tool_calls[].function.name` 是**壳内部**名字，
+            #   同一条 pattern 约束同样管它；另有壳自己的记账键（`candidate`）不该上线。
+            "messages": [_wire_message(message, names) for message in messages],
             "max_tokens": max_tokens,
         }
         if tools:

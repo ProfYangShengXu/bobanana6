@@ -2143,6 +2143,43 @@ MUTATIONS: tuple[Mutation, ...] = (
         "a workspace write can point outside the workspace again",
     ),
     Mutation(
+        "X48-assistant-row-forgotten",
+        "agentloop/loop.py",
+        "        appended = (\n            assistant_tool_row(proposal),\n            *(\n",
+        "        appended = (\n            *(\n",
+        "tests/test_agentloop_loop.py::test_the_tool_round_appends_the_assistant_row_before_its_results",
+        "tool results go back to having no declaring assistant row（那条 400 的形状）",
+    ),
+    Mutation(
+        "X48-compaction-splits-a-tool-round",
+        "agentloop/compress.py",
+        "        units = _round_units(capped)\n"
+        "        droppable_units = [\n"
+        "            unit\n"
+        "            for unit in units\n"
+        "            if all(index not in recent for index in unit)\n"
+        "            and all(not _is_protected(capped[index]) for index in unit)\n"
+        "        ]\n"
+        "        chosen_units = droppable_units[: len(droppable_units) // 2]\n"
+        "        chosen = [index for unit in chosen_units for index in unit]\n",
+        "        chosen = [\n"
+        "            index for index in range(len(capped)) if index not in recent and not _is_protected(capped[index])\n"
+        "        ]\n"
+        "        chosen = chosen[: len(chosen) // 2]  # mutation: the cut ignores tool-round boundaries\n",
+        "tests/test_agentloop_compress.py::test_compaction_drops_a_tool_round_whole_and_never_splits_it",
+        "compaction drops half a tool round",
+    ),
+    Mutation(
+        "X48-outbound-messages-not-translated",
+        "adapters/openai_compat.py",
+        '    entry = {key: value for key, value in message.items() if key not in INTERNAL_MESSAGE_KEYS}\n'
+        '    calls = entry.get("tool_calls")\n',
+        "    entry = dict(message)  # mutation: outbound messages are not translated\n"
+        "    calls = None\n",
+        "tests/test_adapters.py::test_the_transcript_is_translated_and_internal_bookkeeping_is_dropped",
+        "assistant rows carry internal names (and bookkeeping) onto the wire",
+    ),
+    Mutation(
         "X47N-tool-names-sent-raw",
         "adapters/openai_compat.py",
         "        if tools:\n            payload[\"tools\"] = names.wire_tools(tools)\n",

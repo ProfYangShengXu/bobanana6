@@ -10,6 +10,7 @@ from bobanana6.agentloop.compress import (
     compact,
     compression_threshold,
     estimate_tokens,
+    message_sequence_problem,
     recoverable,
     sanitize_tool_pairs,
     truncate_tool_results,
@@ -170,3 +171,124 @@ def test_recoverable_is_content_based() -> None:
     result = compact(messages, policy)
     assert recoverable(result, messages)
     assert not recoverable(result, messages + ({"role": "user", "content": "brand new"},))
+
+
+# --------------------------------------------------------------------------- #
+# ★ 消息序列合规：assistant(tool_calls) → tool(id…) 的**断言**
+#   （同一个不变量的三面：sanitize 修、message_sequence_problem 检、loop 建）
+# --------------------------------------------------------------------------- #
+
+
+def _round(call_ids: tuple[str, ...], results: tuple[str, ...]) -> tuple[dict, ...]:
+    return (
+        {"role": "system", "content": "protocol"},
+        {"role": "user", "content": "brief"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": call_id, "type": "function", "function": {"name": "sources_read", "arguments": "{}"}}
+                for call_id in call_ids
+            ],
+        },
+        *({"role": "tool", "tool_call_id": call_id, "content": text} for call_id, text in zip(call_ids, results)),
+    )
+
+
+def test_a_well_formed_tool_round_has_no_sequence_problem() -> None:
+    assert message_sequence_problem(_round(("a", "b"), ("ra", "rb"))) == ""
+
+
+def _old_shape(call_ids: tuple[str, ...], results: tuple[str, ...]) -> tuple[dict, ...]:
+    """修复前的形态：只追加 tool 行，assistant(tool_calls) 那条缺席。"""
+    rows = _round(call_ids, results)
+    return (*rows[:2], *rows[3:])
+
+
+def test_the_old_shape_is_exactly_the_400_the_endpoint_returns() -> None:
+    """★ 修复前后都过不了的那一条：assistant 行缺席 ⇒ 每个 tool 行都是孤儿。"""
+    assert "no preceding assistant row" in message_sequence_problem(_old_shape(("a",), ("ra",)))
+
+
+def test_a_tool_row_whose_id_is_not_declared_is_named() -> None:
+    broken = _round(("a", "b"), ("ra", "rb"))
+    broken = (*broken[:3], {"role": "tool", "tool_call_id": "c", "content": "stray"})
+    assert "'c' is not declared" in message_sequence_problem(broken)
+
+
+def test_an_unanswered_declared_call_is_named() -> None:
+    assert "unanswered tool call" in message_sequence_problem(_round(("a", "b"), ("ra",)))
+
+
+def test_a_message_that_interrupts_a_tool_round_is_named() -> None:
+    broken = (*_round(("a", "b"), ("ra", "rb"))[:3], {"role": "user", "content": "wait"})
+    assert "interrupts a tool round" in message_sequence_problem(broken)
+
+
+def test_compressing_a_real_tool_round_keeps_the_whole_chain() -> None:
+    """★ 压缩路径：一串合规的工具轮过 `sanitize_tool_pairs` 之后仍然逐条配得上。
+
+    （这正是旧形态的第二个症状：没有 assistant 行时，sanitizer 会把**所有** tool 行当孤儿丢掉。）
+    """
+    transcript = (
+        *_round(("a", "b"), ("ra", "rb")),
+        {"role": "user", "content": "next"},
+        *_round(("c",), ("rc",)),
+    )
+    assert sanitize_tool_pairs(transcript) == transcript
+    assert message_sequence_problem(sanitize_tool_pairs(transcript)) == ""
+    # 旧形态（只有 tool 行）会被 san 掉 —— 这条是那次静默丢数据的证据
+    assert sanitize_tool_pairs(_old_shape(("a",), ("ra",))) == (
+        {"role": "system", "content": "protocol"},
+        {"role": "user", "content": "brief"},
+    )
+
+
+def _long_round(index: int, *, size: int = 400) -> tuple[dict, ...]:
+    """One tool round big enough to matter for the threshold."""
+    call_id = f"call-{index}"
+    return (
+        {"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "sources_read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": call_id, "content": f"result {index} " + "z" * size},
+    )
+
+
+def test_compaction_drops_a_tool_round_whole_and_never_splits_it() -> None:
+    """★ 压缩的丢弃以【工具轮】为单位：切在 assistant 与它的结果之间会留下孤儿 tool 行。
+
+    旧行为按**下标**取前一半 —— 切点落在轮中间时，assistant 行被丢掉、它的 tool 行留下，
+    下一个请求就变成端点那条 400 的形状。
+    """
+    rows: list[dict] = [{"role": "system", "content": "protocol"}, {"role": "user", "content": "brief"}]
+    for index in range(4):
+        rows.extend(_long_round(index))
+    rows.append({"role": "user", "content": "next"})
+    messages = tuple(rows)
+    policy = CompressionPolicy(context_length=900, max_tokens=100, pct=0.5, tool_result_char_cap=0, keep_recent=2)
+    result = compact(messages, policy)
+    assert result.committed and result.dropped
+    assert message_sequence_problem(result.messages) == ""
+    kept_ids = {
+        call["id"]
+        for message in result.messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls") or ()
+    }
+    tool_ids = {row["tool_call_id"] for row in result.messages if row.get("role") == "tool"}
+    assert tool_ids == kept_ids, (kept_ids, tool_ids)
+    # 丢掉的也是整轮（每个被丢的 assistant 调用都有对应的 tool 行被丢）
+    dropped_assistant = [m for m in result.dropped if m.get("role") == "assistant"]
+    dropped_tools = [m for m in result.dropped if m.get("role") == "tool"]
+    assert len(dropped_assistant) == len(dropped_tools)
+
+
+def test_a_sanitizer_backstop_keeps_the_sequence_legal() -> None:
+    """兜底：把一个**故意被切坏**的序列交给压缩的最后一步，出来仍是合法序列。"""
+    broken = (
+        {"role": "system", "content": "protocol"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "kept"}]},
+        {"role": "tool", "tool_call_id": "kept", "content": "r"},
+        {"role": "tool", "tool_call_id": "orphan", "content": "r"},
+    )
+    assert "no preceding assistant row" in message_sequence_problem(broken)
+    assert message_sequence_problem(sanitize_tool_pairs(broken)) == ""

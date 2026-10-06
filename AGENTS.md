@@ -99,6 +99,29 @@
 - ✅ `#16` 已收口的四条判定缺口：缺失成为一等状态 `MISSING`（A04）· 单位检查读**值里的单位**（A10）·
   归因读**自带病因**、两层互相指认则 `unknown`（A07）· 溯源经 `SnapshotReader` 端口逐点重放
   —— 引用的行要在、值要对得上（A11）。四条都有修前/修后对照读数。
+- ✅ `#48` **工具轮补上带 `tool_calls` 的 assistant 行**（数据 `.bobanana6/b48/报告.md`）。
+  `loop.py::_tool_round` 原来只追加 `role:"tool"` 的结果行 ⇒ 送出去的历史是
+  `[system, user, tool, tool, …]`，严格端点直接 400（`Messages with role 'tool' must be a response
+  to a preceding message with 'tool_calls'`），宽松端点放行但**模型看不到自己调过什么工具、
+  用什么参数调的**（每个 tool 行都是没有出处的 JSON 块）。修法：`assistant_tool_row(proposal)`
+  从 `proposal.tool_calls` 生成 assistant 行，`_tool_round` 一次追加
+  `assistant(tool_calls=[id…]) → tool(id₁) → …`；id 与 `ToolResult.call_id` 同源，模型没给 id 时
+  注册表补 `call-<n>`，所以**从原始响应重建会错、从 `proposal.tool_calls` 重建不会**；
+  `arguments` 用模型原文。★ 一句人话：**这条决定模型有没有"行动记忆"**，400 只是副作用。
+  顺带查出并修掉两处同族问题：① `compress.compact` 的丢弃按**下标**取一半 ⇒ 可能切在工具轮中间
+  留下孤儿 tool 行（旧形态下 `sanitize_tool_pairs` 更会把**所有** tool 行当孤儿丢掉 = 静默吃数据）
+  ⇒ 改成**以工具轮为单位**丢弃 + 收尾再过一次 sanitizer（单点收口）；② `close_transcript_tail`
+  的 `candidate: True` 是壳的记账键 ⇒ 适配器边界按 `INTERNAL_MESSAGE_KEYS` 丢掉；③ assistant 行的
+  `tool_calls[].function.name` 与 `tools[].function.name` 受同一条 pattern 管 ⇒ 出站消息也过
+  `_wire_message`（上一块只换了菜单）。新增 `compress.message_sequence_problem()` 把该不变量写成断言。
+  读数（确定性、零真模型；改前 = `HEAD` 解出的树）：① 真实 transcript 进严格端点 400 → **200**；
+  ② 真实 13f 题：改前 14 次调用 **7×400 / 7 个块** → 改后 21 次调用 **0×400**；
+  ③ **模型看到的历史**：`[system,user,tool(s1)]`（无主语）→ `[system,user,assistant(tool_calls=["s1"]),tool(s1)]`；
+  ④ ★ 反向：宽松端点三次读数逐字相同、既有 **854** 条测试两臂逐条同结果（0 条只在改前、0 失败）、
+  三个主验域读数 JSON 逐字相同；⑤ 压缩后 `rounds_kept_whole / rounds_dropped_whole = True`、
+  序列问题为空。**缺口**：本机没有真端点凭据 ⇒ ②③ 用的是逐字实现同一条规则的本地假端点
+  （报告 §8 写清，并给了有凭据时的闭合命令）。
+  读数：ruff 绿 · arch_guard 37 · **870 passed** · 冒烟 2 · 变异 **253/253 caught** · 42 种子 0/42。
 - ✅ `#47` **把通用文件/终端工具抄进块级工具面**（数据 `.bobanana6/b47/报告.md`）。抄的是**行为契约**，
   不是那 13,129 行：`sources.read`（带行号分页）· `sources.grep`（正则/上下文/分页/按名）·
   `files.write`（整份覆盖 + `append`）· `files.patch`（精确替换、非唯一即拒）· `shell.run`（cwd+超时+后台）·
