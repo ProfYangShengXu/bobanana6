@@ -636,29 +636,15 @@ class WorkerLoop:
             return self._classify_and_recover(turn, exc)
         turn.gate = gate
         if can_complete(gate, self._config.required_scope):
-            # ★★ 过门 ≠ 干完。**只有模型自己声明 `done=True` 才算终结**
-            #   （对齐 Hermes `kanban_complete`：「一条纯文本回复不是终结状态」）。
-            #
-            #   为什么：bb6 原来「交答案」和「我干完了」是同一个动作 ⇒ 模型每开一次口
-            #   都被当成终稿。13f 实测：它交 `{"rows":[], "summary":"尚未开始"}` ——
-            #   明说"还没开始"，系统却把空表当答卷判掉、烧完恢复预算就降级收工。
-            #   加了这道条件之后，它交上来的东西只是"这是我目前的答案"；除非它自己
-            #   说干完了，否则循环继续给它机会。
-            #
-            #   ★ 兜底：预算烧完时 `run` 会走 `resolve_budget_fallback(state.withheld)`
-            #     —— 那份**过门但没声明干完**的答案照样会交出去，所以这道条件
-            #     不会把一份合格的答案弄丢。
-            if proposal.candidate.done:
-                turn.final_candidate = proposal.candidate
-                turn.exit_reason = "passed"
-                return PhaseResult.done("passed")
-            # 过门了但它没说干完：存成目前最好的一份，继续。
-            turn.state = replace(
-                turn.state,
-                withheld=proposal.candidate,
-                attempts=turn.state.attempts + 1,
-            )
-            return PhaseResult.fallthrough()
+            # ★★ 过门即终结。曾经在这里加过一道"必须模型自己声明 `done=true`"的条件
+            #   （想让"交答案"和"我干完了"分开），**实测证明它一次都没起到设计作用**：
+            #   `ansrow` 轮它写了 `done` ⇒ 交了真内容、过；`bigfile` 轮它没写 ⇒ 交的
+            #   **也是真内容**，却因为"没表态"而不终结，一路烧到 `restart_cap` 判死。
+            #   ⇒ 两次实验里它没抓到过一个占位符，只抓死过一个好答案。撤掉。
+            #   （要治"填了形状就交卷"，该加的是**内容层判据**，不是完成标记。）
+            turn.final_candidate = proposal.candidate
+            turn.exit_reason = "passed"
+            return PhaseResult.done("passed")
         # Withheld: keep it for the budget fallback, then try to fix it.
         turn.state = replace(turn.state, withheld=proposal.candidate, attempts=turn.state.attempts + 1)
         return PhaseResult.fallthrough()

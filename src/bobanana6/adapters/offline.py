@@ -104,12 +104,8 @@ class EchoToolResultClient:
 
 
 def _declared_final(payload: str) -> str:
-    """The echoed tool payload is this client's **final answer**: say so.
+    """The echoed tool payload is this client's **final answer**.
 
-    The loop only terminates on a candidate the model itself declared finished
-    (``loop._gate_phase``). This stand-in answers exactly once and has nothing
-    more to do, so it marks the echoed object ``"done": true``; without it the
-    loop would keep asking and eventually degrade a perfectly good run.
     A payload that is not a JSON object is returned unchanged.
     """
     try:
@@ -118,7 +114,6 @@ def _declared_final(payload: str) -> str:
         return payload
     if not isinstance(document, dict):
         return payload
-    document["done"] = True
     return json.dumps(document, ensure_ascii=False)
 
 

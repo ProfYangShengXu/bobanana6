@@ -150,10 +150,6 @@ ANSWER_CONTRACT: tuple[AnswerField, ...] = (
 CANDIDATE_OPTIONAL_PROPERTIES: Mapping[str, Any] = {
     "hint": {"type": "string"},
     "summary": {"type": "string"},
-    # ★★ 「我干完了」的显式声明（见 `core/model.py::Candidate.done`）。
-    # 不写 / false ⇒ 循环认为你**还在干**，会继续给你机会；只有 true 才会把这份
-    # 答案当终稿交出去。对齐 Hermes `kanban_complete`：「纯文本回复不是终结状态」。
-    "done": {"type": "boolean"},
     "text": {"type": "string"},
     "definition_versions": {"type": "object", "additionalProperties": {"type": "string"}},
     "claims": {

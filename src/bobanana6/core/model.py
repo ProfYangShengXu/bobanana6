@@ -953,18 +953,10 @@ class Candidate:
     definition_versions: Mapping[str, str] = field(  # core:kernel —— 先查口径读它
         default_factory=dict
     )
-    #: ★★ 模型**自己声明"我干完了"** —— 把"终结"与"提交一份东西"分开：
-    #: **一条纯文本回复不是终结状态**。
-    #:
-    #: 为什么需要它：bb6 原来只有两种语态 —— **交答案**（=立刻拿去判）与**declined**
-    #: （我干不了）。**没有"我还在干"**。于是模型每一次开口都被当成最终答卷：
-    #: 13f 实测里它交 `{"rows":[], "summary":"尚未开始"}` —— 它明说"还没开始"，
-    #: 系统却把那张空表当答卷判掉、烧完恢复预算就降级收工。
-    #: ⇒ 把「交答案」从**终结动作**降级成**中间动作**：交上来只是"这是我目前的答案"，
-    #:   只有 `done=True` 才代表"我确认干完了"。
-    #: ★ core 只存这个值，**不读它做判定**（判定语义不变）；读它的是循环的终结条件。
-    done: bool = False  # external:agentloop (loop._gate_phase) —— core 只存它，终结条件在循环侧读
-
+    #: ★★ 曾经在这里加过一个 `done` 字段（"模型自己声明我干完了"），让"交答案"与
+    #: "终结"分开。**实测撤掉了**（13f `ansrow` vs `bigfile`）：写不写 `done` 的两次
+    #: 交的都是真内容，它一次没抓到过占位符，却把一次好答案判成 `restart_cap`。
+    #: 真要治"填了形状就交卷"，该加的是**内容层判据**，不是完成标记。
     def __post_init__(self) -> None:
         _require_non_empty(self.subtask_id, "Candidate.subtask_id must not be empty")
         _require_non_empty(self.source_id, "Candidate.source_id must not be empty")
