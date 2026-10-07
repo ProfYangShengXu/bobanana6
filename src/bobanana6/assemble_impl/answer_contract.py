@@ -115,10 +115,19 @@ ANSWER_CONTRACT: tuple[AnswerField, ...] = (
     ),
     AnswerField(
         name="files",
-        domain="a map of workspace-relative path -> the file's full text",
-        granularity="one path per file, the whole file in one string (relative paths only)",
+        domain=(
+            "a map of workspace-relative path -> the file's text; "
+            "★ a file you have already written into the workspace yourself "
+            "(`files.write` / `code.run` / `shell.run`) takes an **empty string** — "
+            "the shell reads it from disk"
+        ),
+        granularity=(
+            "one path per file; the value is the whole file in one string, "
+            '**or "" when you already wrote that file into the workspace yourself** '
+            "(never re-paste a large file: it will not fit, and it is already on disk)"
+        ),
         example='{"input/repo/shared.py": "def total(items):\\n    return sum(items)\\n"}',
-        placeholder='{"<workspace-relative path>": "<file content>"}',
+        placeholder='{"<workspace-relative path>": "<file content, or \\"\\" if already written>"}',
         json_schema={"type": "object", "additionalProperties": {"type": "string"}},
         required=False,
         when="when this block produces files",

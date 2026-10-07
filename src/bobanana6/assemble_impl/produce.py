@@ -1451,6 +1451,14 @@ class LoopIOImpl(LoopIO):
                     expected=f"write only inside {sorted(allowed)!r}",
                 )
             target = self.workspace / name
+            # ★★ 空内容 = 「这份文件我自己已经写进工作区了」——由 `_reconcile_workspace`
+            #   从磁盘取（契约里 `files` 的粒度就是这么说的）。
+            #   不判空直接写，会把块**亲手写出来的交付物覆盖成空文件**：实测 13f
+            #   `ansrow` 轮，T-02 写好的 `effective_holdings.csv`（189KB / 1681 行）
+            #   收尾时只剩 183 字节 —— 它交的是 `files: {路径: ""}`（因为 189KB
+            #   塞不进一次回答），壳照写不误。
+            if content == "" and target.is_file() and target.stat().st_size > 0:
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         self.written = tuple(sorted(payload))
