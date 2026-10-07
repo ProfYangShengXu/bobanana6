@@ -1205,6 +1205,11 @@ class LoopIOImpl(LoopIO):
         upstream_brief = self._upstream_brief()
         if upstream_brief:
             brief["upstream"] = upstream_brief
+        # ★★ 输入缺失不再是"不许开工"：缺哪几份、谁答应的，作为已知事实摆上桌，
+        #   并明确禁止凭名字编（旧前置门靠"不派活"堵 E-0，现在靠"说清 + 禁编 + 溯源兜底"）。
+        input_gaps = self._input_gaps()
+        if input_gaps:
+            brief["input_gaps"] = input_gaps
         contract = self.toolset.task.contract()
         # ★★★ 用户 2026-10-06 定的标准：**普通大学生读完 brief 要能说出"我要做什么"**。
         #   实测前它说不出 —— 块拿到的全部任务信息是
@@ -1700,6 +1705,38 @@ class LoopIOImpl(LoopIO):
             "Look around before concluding that anything is missing.\n"
             "★ 引值时仍要写它出自哪个来源（`ref`）：地址是用来【看】的，名字是用来【溯源】的。\n"
         )
+
+    def _input_gaps(self) -> dict[str, Any]:
+        """本块按计划要、但没到手的输入 —— 拆门之后堵 E-0 的那一半。
+
+        旧前置门用"缺输入就不派活"堵"凭名字编一张表"；门拆掉之后，改成**把它已经知道的
+        事实说出来**（缺哪几份、谁答应的），并明确禁止编 —— 剩下的由溯源层兜底
+        （编出来的行追不到真来源：引用的行不存在 / 值对不上）。
+        """
+        parts = self._upstream_parts()
+        missing = [
+            {"input": name, "producer": str(parts[name].get("producer") or "")}
+            for name in self.subtask.inputs
+            if isinstance(parts.get(name), Mapping) and parts[name].get("missing") is True
+        ]
+        if not missing:
+            return {}
+        return {
+            # ① 你按计划要这几份输入
+            "you_were_expected_to_receive": list(self.subtask.inputs),
+            # ② ★ 其中这几份没有到（答应的块是 <块 id>，它失败了）
+            "these_did_not_arrive": missing,
+            # ③ ★ 不许凭名字猜它们的内容 —— 编出来的数据会被溯源层抓住
+            "do_not_invent": (
+                "上面这几份【没有到】：产出它们的块失败了。不许凭名字猜它们的内容 —— "
+                "编出来的行会被溯源层抓住（引用的行不存在 / 值与来源对不上）。"
+            ),
+            # ④ 两条正当出路
+            "legitimate_ways_out": [
+                "从你自己的 authorized_sources 里取原始来源、自己算（地址在 source_files 里）",
+                "交一份降级的产物，并在 `summary` 里写清你缺什么、你用什么替代的",
+            ],
+        }
 
     def _upstream_parts(self) -> dict[str, Any]:
         """The parts this block was handed, for a block that consumes inputs.

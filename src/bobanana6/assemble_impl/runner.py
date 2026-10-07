@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -255,25 +255,29 @@ class Runner:
         candidates: dict[str, Candidate] = {}
         verdicts: dict[str, Verdict] = {}
         decisions: list[Convergence] = []
+        #: 交付物路径 -> 负责产出它的块 id：输入缺失时要能追到"降级起点"。
+        producer_of = {block.output: block.id for block in plan.subtasks}
         for subtask in plan.subtasks:
+            #: ★★ 输入缺失**不再短路**（旧前置门：一件没到就 0 次调用、记 inputs_unavailable）。
+            #:   实测代价（13f，8 块）：T-01 的答案信封不合法 ⇒ T-02..T-08 **全部**停工，
+            #:   八个块实际只跑过 1 个。第一道工序填错工单，后面七道陪葬。
+            #:   新约束：**照样开工，但不许编** —— 缺哪几份、谁答应的，作为已知事实带进
+            #:   这一块的 brief（`produce.py::_input_gaps`）与证据（下面的 `input_gaps`）；
+            #:   它自己的成败由它自己的产物决定，不再因上游失败被判死。
+            #:   ★ E-0 反例（拿不到输入就按名字编一张表）仍由**溯源层**兜底：
+            #:   编出来的行追不到真来源，会被拒（见 `produce.py` 的继承守卫）。
+            gaps = self._input_gaps(subtask, pieces, producer_of)
             available = [name for name in subtask.inputs if name in pieces]
             if subtask.inputs and not available:
-                # ★ ①(c) 前置门：计划知道它要哪些输入，一件都没到就【不许开工】。
-                #   这是「输入取不回来」（生产它的块失败了），不是「它没去取」——
-                #   不能靠模型自觉发现、更不能让它凭名字编一张表出来（E-0 就是这么编的）。
-                #   0 次模型调用，按具名理由记失败；缺失的一件走 A06 的降级与标记。
-                evidence = {
-                    "exit": "inputs_unavailable",
-                    "cause": "context",
-                    "missing_inputs": list(subtask.inputs),
-                }
-                self._note_gate(subtask, False, evidence)
-                # ★ `failed=("runtime",)` **不是"运行期崩了"**：它与下面 `BlockRuntimeError`
-                #   那一格共用同一个标签，而两者是不同的失败 —— 这里是**前置门**（输入一件都没到，
-                #   0 次模型调用）。真因在 `evidence` 里（`exit="inputs_unavailable"`），
-                #   读读数时先看它，不要从标签猜。
-                verdicts[subtask.id] = Verdict(ok=False, failed=("runtime",), evidence=evidence)
-                continue
+                # ★★ 旧前置门在这个条件下 `continue`：一件输入都没到就**不许开工**
+                #    （0 次模型调用，记 `inputs_unavailable`）。实测代价（13f，8 块）：
+                #    T-01 的答案信封不合法 ⇒ T-02..T-08 全部停工，八个块实际只跑过 1 个。
+                #    现在**不 continue**：照样开工，只把"声明的输入一件都没到"作为降级起点
+                #    记下来（`gaps` 照常带进 brief 与证据），成败由它自己的产物决定。
+                all_inputs_missing = True
+            else:
+                all_inputs_missing = False
+            gap_note = self._gap_note(gaps, all_inputs_missing=all_inputs_missing)
             inherited = tuple(
                 sorted({p.snapshot_ref for name in subtask.inputs for p in piece_provenance.get(name, ())})
             )
@@ -284,8 +288,15 @@ class Runner:
             try:
                 candidate = self.runtime.run(subtask, bundle, ontology, toolset, self.budget)
             except BlockDeclined as declined:
-                self._note_gate(subtask, False, {"exit": declined.exit_reason, "declined": True})
-                verdicts[subtask.id] = Verdict(ok=False, failed=("declined",), evidence={"exit": declined.exit_reason})
+                declined_detail: dict[str, Any] = {"exit": declined.exit_reason, "declined": True}
+                declined_evidence: dict[str, str] = {"exit": declined.exit_reason}
+                if gaps:
+                    declined_detail["input_gaps"] = self._gap_event(gaps)
+                    declined_evidence["input_gaps"] = gap_note
+                self._note_gate(subtask, False, declined_detail)
+                verdicts[subtask.id] = Verdict(
+                    ok=False, failed=("declined",), evidence=declined_evidence
+                )
                 continue
             except BlockRuntimeError as failed:
                 # ★ §7⑫: a withheld candidate was rejected by the *judge*, and the
@@ -297,6 +308,10 @@ class Runner:
                     failure_detail["constraint_rejected"] = True
                 if failure_evidence.get("cause"):
                     failure_detail["cause"] = failure_evidence["cause"]
+                if gaps:
+                    # ★ 降级起点不能丢：这一块是在"缺输入"的前提下失败/成功的，报告要能追到。
+                    failure_detail["input_gaps"] = self._gap_event(gaps)
+                    failure_evidence["input_gaps"] = gap_note
                 self._note_gate(subtask, False, failure_detail)
                 # ★ 同一个 `"runtime"` 标签的第二半：这里**多半是"候选被判定器拒收"**
                 #   （`exit` 是 `degrade_single_agent` / `fix_constraint` 之类），
@@ -314,6 +329,10 @@ class Runner:
             piece_provenance[subtask.output] = candidate.provenance
             judge = self.runtime.last_judge
             verdict = judge.last_verdict if judge is not None and judge.last_verdict is not None else judge.admit(candidate)  # type: ignore[union-attr]
+            if gaps:
+                # ★★ 它自己的产物决定了成败，但"这一条是从缺输入那一步开始降级的"必须留下痕迹 ——
+                #   否则报告看起来一切正常（`exit` 里没有门了，`input_gaps` 就是那条痕迹）。
+                verdict = replace(verdict, evidence={**verdict.evidence, "input_gaps": gap_note})
             verdicts[subtask.id] = verdict
             # ★ judged against this block's slice, not the whole plan's bundle
             decisions.append(converge(block_bundle(bundle, subtask, ontology), (candidate,), context))
@@ -334,6 +353,8 @@ class Runner:
             #   declares it. Written here (not inferred downstream) so attribution
             #   reads a declaration in a *real* run, not only in a hand-made trace.
             gate_detail: dict[str, Any] = {"failed": list(verdict.failed)}
+            if gaps:
+                gate_detail["input_gaps"] = self._gap_event(gaps)
             if not verdict.ok:
                 gate_detail["constraint_rejected"] = True
                 if verdict.cause:
@@ -552,6 +573,11 @@ class Runner:
                 #   cannot tell will keep asking for it (observed: the merge block
                 #   burned its whole budget re-requesting an input nobody produced).
                 upstream[name] = {"name": name, "schema": plan.interfaces.get(name, ""), "missing": True}
+                # ★ 谁答应的这份输入（产出它的块 id）—— 下游 brief 与报告都要能追到
+                #   "这一条从哪一步开始降级"（`produce.py::_input_gaps` 读它）。
+                upstream[name]["producer"] = next(
+                    (block.id for block in plan.subtasks if block.output == name), ""
+                )
             else:
                 upstream[name] = {
                     "schema": plan.interfaces.get(name, ""),
@@ -617,6 +643,31 @@ class Runner:
             if deliverable.name == name:
                 return deliverable
         return DeliverableSpec(name=name)
+
+    @staticmethod
+    def _input_gaps(
+        subtask: Subtask, pieces: Mapping[str, Any], producer_of: Mapping[str, str]
+    ) -> tuple[tuple[str, str], ...]:
+        """(declared input that did not arrive, the block that owed it) pairs.
+
+        Order follows ``subtask.inputs`` so the report reads like the plan.
+        """
+        return tuple(
+            (name, producer_of.get(name, "")) for name in subtask.inputs if name not in pieces
+        )
+
+    @staticmethod
+    def _gap_note(gaps: tuple[tuple[str, str], ...], *, all_inputs_missing: bool = False) -> str:
+        """The gap as one human-readable string for a verdict's evidence (``str -> str``)."""
+        detail = "; ".join(f"{name} (produced by {producer or 'unknown'})" for name, producer in gaps)
+        if all_inputs_missing:
+            detail += " [every declared input is absent]"
+        return detail
+
+    @staticmethod
+    def _gap_event(gaps: tuple[tuple[str, str], ...]) -> list[dict[str, str]]:
+        """The gap as structured event detail (kept structured so a reader can filter it)."""
+        return [{"input": name, "producer": producer} for name, producer in gaps]
 
     def _failure_evidence(self, failed: BlockRuntimeError) -> dict[str, str]:
         """Why the block produced nothing -- including a check that rejected it.

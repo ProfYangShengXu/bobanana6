@@ -1023,24 +1023,90 @@ def test_the_declared_inputs_are_delivered_before_the_merge_block_is_asked() -> 
 
 
 def test_a_block_whose_inputs_never_arrived_is_not_dispatched() -> None:
-    """★ ①(c) 前置门：三个读块全挂 → 合并块一件输入都没到 → 0 次模型调用。
+    """★★ 拆掉"一抓杀停全场"：读块全挂 ⇒ 合并块**仍然开工**（旧行为：0 次调用、直接判死）。
 
-    这是「输入取不回来」（生产者失败），不是「它没去取」；不能让它凭名字编一张表
-    （E-0 基线就是这么编的）。
+    ★ 函数名是旧行为的遗留（这个条件以前是 `continue`）；本条现在测的是**新约束**：
+    照样开工，但缺哪几份、谁答应的要摆进 brief 与证据，降级起点必须留痕。
+    实测代价（13f，8 块）：T-01 的答案信封不合法 ⇒ T-02..T-08 全部停工，八块只跑过一块。
     """
     asked: list[str] = []
+    briefs: dict[str, dict] = {}
 
     class _EmptyReads:
         def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
-            asked.append(_block_of(messages))
+            block = _block_of(messages)
+            asked.append(block)
+            briefs.setdefault(block, _briefing(messages))
             return ModelResponse(text=json.dumps({"ref": "panel-a", "rows": [], "columns": []}))
 
     run = run_task(ACCEPTANCE / "main" / "panel-three-sources", client=_EmptyReads(), env={})
-    assert "T-04" not in asked, asked
+
+    # ② 上游缺失 ⇒ 下游【真的被叫了】（旧行为：T-04 从没被问过）、不再记 inputs_unavailable
+    assert "T-04" in asked, asked
     verdict = run.verdicts["T-04"]
-    assert verdict.evidence.get("exit") == "inputs_unavailable", verdict.evidence
-    assert verdict.evidence.get("missing_inputs") == ["part-panel-a.csv", "part-panel-b.csv", "part-panel-c.csv"]
-    assert run.report.assembly_passed is False  # 该拼不上还是拼不上
+    assert verdict.evidence.get("exit") != "inputs_unavailable", verdict.evidence
+    # ★ 降级起点留痕：缺哪几份 + 答应的块（不许静默）
+    gaps = str(verdict.evidence.get("input_gaps") or "")
+    assert "part-panel-a.csv (produced by T-01)" in gaps, gaps
+    assert "part-panel-b.csv (produced by T-02)" in gaps, gaps
+    assert "part-panel-c.csv (produced by T-03)" in gaps, gaps
+    # ③ 模型收到的 brief 里能看到"缺的是哪几份" + "不许编"
+    delivered = briefs["T-04"].get("input_gaps") or {}
+    assert delivered.get("you_were_expected_to_receive") == [
+        "part-panel-a.csv",
+        "part-panel-b.csv",
+        "part-panel-c.csv",
+    ], delivered
+    assert [entry["input"] for entry in delivered.get("these_did_not_arrive", [])] == [
+        "part-panel-a.csv",
+        "part-panel-b.csv",
+        "part-panel-c.csv",
+    ], delivered
+    assert "不许凭名字猜" in str(delivered.get("do_not_invent") or ""), delivered
+    assert len(delivered.get("legitimate_ways_out") or []) == 2, delivered
+    # 该拼不上还是拼不上
+    assert run.report.assembly_passed is False
+
+
+def test_an_invented_table_for_missing_inputs_is_still_caught_by_provenance() -> None:
+    """★★ ④ E-0 反例必须仍然被挡住：拿不到输入就【按输入的名字编一张表】。
+
+    拆门前靠"不派活"堵它；拆门后靠"说清缺什么 + 明令禁编 + 溯源兜底"三重。
+    这条钉的是第三重：编出来的行追不到真来源 —— `parts` 里那几件是 `missing`，
+    没有可继承的行，于是继承守卫当场拒收。
+    """
+    invented = [
+        {"obligor": "part-panel-a.csv", "pd": "0.1", "amount": "100"},
+        {"obligor": "part-panel-b.csv", "pd": "0.2", "amount": "200"},
+        {"obligor": "part-panel-c.csv", "pd": "0.3", "amount": "300"},
+    ]
+
+    class _Inventing:
+        def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+            if _block_of(messages) != "T-04":
+                # 三个读块交空表 ⇒ 它们的产物不进 pieces（上游失败）
+                return ModelResponse(text=json.dumps({"ref": "panel-a", "rows": [], "columns": []}))
+            # ★ E-0：拿不到输入，就按【输入的名字】编一张看起来像真的表
+            return ModelResponse(
+                text=json.dumps(
+                    {
+                        "ref": "panel-a",
+                        "columns": [
+                            {"name": "obligor", "dtype": "str"},
+                            {"name": "pd", "dtype": "str"},
+                            {"name": "amount", "dtype": "str"},
+                        ],
+                        "rows": invented,
+                        "done": True,
+                    }
+                )
+            )
+
+    run = run_task(ACCEPTANCE / "main" / "panel-three-sources", client=_Inventing(), env={})
+    verdict = run.verdicts["T-04"]
+    assert verdict.ok is False, verdict.evidence
+    facts = " ".join(str(value) for value in verdict.evidence.values())
+    assert "matches no row this block was handed" in facts, facts
 
 
 def test_the_batch_tool_returns_every_declared_input_at_once() -> None:
