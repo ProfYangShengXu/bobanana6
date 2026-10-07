@@ -369,6 +369,26 @@ def assistant_tool_row(proposal: TurnProposal) -> dict[str, Any]:
     return row
 
 
+def answer_row(text: str) -> dict[str, Any]:
+    """The assistant row that records an answer the loop refused.
+
+    ★ 与 `assistant_tool_row` 同一条不变式，只是管的是**终局那一步**：
+    **模型说过的每一句，都要在它自己的 transcript 里有一行** —— 只许压缩，
+    不许按需挑选（`架构设计.md` 的上下文完整性不变式）。
+
+    为什么需要它（实测 13f `b90`）：被拒的答案原来**只在错误提示里留一句被截断的
+    引文**（`what you sent: …` 末尾是 `[truncated]`，正好截在内容开始的地方）。
+    于是下一轮它**看不见自己上一遍填了什么**，只能从零重编 —— 第一遍它填了
+    `ref: "submission"`（合法），第二遍却交了个 `ref: ""`、`files: {路径: ""}`、
+    `rows: [{""：""}]` 的**空壳**。
+
+    ReAct 的读法：工具轮是 Thought → Action → Observation，每一轮都建了行；
+    **终局回答不带工具调用**，它不是 Action，就是"我交卷了"本身 —— 壳原来
+    恰恰没为它建行，于是轨迹在非终局处完整、**断在终局**。
+    """
+    return {"role": "assistant", "content": text}
+
+
 class LoopIO(Protocol):
     """The loop's collaborators. All injected, so tests never need a model."""
 
@@ -845,9 +865,16 @@ class WorkerLoop:
             # ★ The structured fix, not the prose: lec9:125 wants code + reason +
             #   advice, and the prose (which is what state.errors keeps) is not that.
             assert feedback is not None  # guaranteed by decide_recovery
+            # ★★ 先把它自己交的那份**记成它自己的一轮**，再发反馈（`answer_row`）。
+            #   只发反馈 = 它看不见自己写了什么，重填只能从零编 —— 实测交了个空壳。
+            rows: list[dict[str, Any]] = []
+            sent = str(feedback.get("got") or "")
+            if sent.strip():
+                rows.append(answer_row(sent))
+            rows.append({"role": "user", "content": reformat_message(classified.reason, feedback)})
             turn.state = replace(
                 turn.state,
-                injected=({"role": "user", "content": reformat_message(classified.reason, feedback)},),
+                injected=tuple(rows),
                 reflections=turn.state.reflections + 1,
             )
             turn.exit_reason = "reformat"
