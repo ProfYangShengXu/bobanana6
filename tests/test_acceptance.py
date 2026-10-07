@@ -1109,6 +1109,118 @@ def test_an_invented_table_for_missing_inputs_is_still_caught_by_provenance() ->
     assert "matches no row this block was handed" in facts, facts
 
 
+def _chain_task(tmp_path: Path, *, name: str, statement: str = "") -> Path:
+    """A two-block chain (``a.csv`` -> ``b.csv``) with a workspace.
+
+    The upstream block's deliverable can land on disk even when its verdict fails
+    (the thing本次改动 covers); ``statement`` optionally declares which source is
+    the题面.
+    """
+    task = tmp_path / name
+    (task / "input").mkdir(parents=True)
+    (task / "input" / "seed.txt").write_text("draft\n", encoding="utf-8")
+    (task / "ontology.yaml").write_text(
+        "domain: text\nversion: \"2026.1\"\nconcepts:\n  obligor: {label: 主体, kind: entity}\n",
+        encoding="utf-8",
+    )
+    (task / "task.yaml").write_text(
+        "task_id: chain\ngoal: chain two products\nversion: 1\n"
+        + (f"statement: {statement}\n" if statement else "")
+        + "deliverables:\n"
+        "  - {name: a.csv, schema: {obligor: str}}\n"
+        "  - {name: b.csv, schema: {obligor: str}, depends_on: [a.csv]}\n"
+        "sources:\n  - {ref: seed, locator: input/seed.txt}\n"
+        "constraints:\n  hard:\n"
+        "    - {id: C-1, kind: presence, target: \"*\", spec: {min_rows: 1}, rationale: \"no empty products\"}\n",
+        encoding="utf-8",
+    )
+    return task
+
+
+def test_a_failed_block_whose_artifact_is_on_disk_still_feeds_downstream(tmp_path: Path) -> None:
+    """★★ 判定失败 ≠ 产物不存在：上游只是**信封没封好**（散文开头），产物照样给下游。
+
+    边界：`pieces` 管"下游拿得到什么"、`verdicts` 管"谁通过了" —— 产物进了 `pieces`，
+    但上游的 verdict **仍然是 ok=False**；交接件里留 `from_disk` / `producer_verdict`
+    两个显式标记（不许静默降级）。
+    """
+    task = _chain_task(tmp_path, name="disk-artifact-chain")
+    briefs: dict[str, dict] = {}
+    data = "obligor\nA-1\n"
+
+    class _Client:
+        def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+            block = _block_of(messages)
+            briefs.setdefault(block, _briefing(messages))
+            tool_count = sum(1 for message in messages if message.get("role") == "tool")
+            if block == "T-01":
+                if tool_count == 0:
+                    return ModelResponse(tool_calls=(_tool_call("r1", "sources.snapshot", {"ref": "seed"}),))
+                if tool_count == 1:
+                    return ModelResponse(
+                        tool_calls=(_tool_call("w1", "files.write", {"path": "a.csv", "content": data}),)
+                    )
+                # ★ 信封没封好：开头是散文 ⇒ 格式门拒收；但 a.csv 已经在磁盘上。
+                return ModelResponse(text="I am still working on it.")
+            return ModelResponse(
+                text=json.dumps(
+                    {
+                        "ref": "seed",
+                        "columns": [{"name": "obligor", "dtype": "str"}],
+                        "rows": [{"obligor": "A-1"}],
+                        "done": True,
+                    }
+                )
+            )
+
+    run = run_task(task, client=_Client(), env={}, workspace=True)
+
+    upstream = run.verdicts["T-01"]
+    assert upstream.ok is False  # ★ ④ 绝不许因为产物在磁盘上就改成通过
+    assert upstream.evidence.get("artifact_on_disk") == "a.csv"
+    assert (run.workspace / "a.csv").read_text(encoding="utf-8") == data
+    entry = (briefs["T-02"].get("upstream") or {}).get("a.csv") or {}
+    assert entry.get("rows") == 1, entry  # ★ ② 下游拿到的是【内容】，不再是 missing
+    assert entry.get("producer_verdict") == "failed", entry  # ★ 看得出它来自没通过判定的块
+    assert entry.get("from_disk") is True, entry
+    assert not (briefs["T-02"].get("input_gaps") or {}), briefs["T-02"].get("input_gaps")
+
+
+def test_the_statement_full_text_reaches_every_block_brief(tmp_path: Path) -> None:
+    """★★ 契约声明的题面，**全文**出现在**每个块**的 brief 里。
+
+    原来题面只是一条普通来源，块要自己调 `sources.snapshot` 去取 —— 八个块各自读、
+    各自理解。现在壳在派活前把同一份原文内联进每个 brief。
+    """
+    task = _chain_task(tmp_path, name="statement-chain", statement="seed")
+    briefs: dict[str, dict] = {}
+
+    class _Client:
+        def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+            block = _block_of(messages)
+            briefs.setdefault(block, _briefing(messages))
+            if not any(message.get("role") == "tool" for message in messages):
+                return ModelResponse(tool_calls=(_tool_call("r1", "sources.snapshot", {"ref": "seed"}),))
+            return ModelResponse(
+                text=json.dumps(
+                    {
+                        "ref": "seed",
+                        "columns": [{"name": "obligor", "dtype": "str"}],
+                        "rows": [{"obligor": "A-1"}],
+                        "done": True,
+                    }
+                )
+            )
+
+    run_task(task, client=_Client(), env={}, workspace=True)
+
+    assert {"T-01", "T-02"} <= set(briefs), sorted(briefs)
+    for block, brief in briefs.items():
+        statement = brief.get("statement") or {}
+        assert statement.get("ref") == "seed", (block, statement)
+        assert statement.get("text") == "draft\n", (block, statement)
+
+
 def test_the_batch_tool_returns_every_declared_input_at_once() -> None:
     """★ ①(b) 兜底：一次把全部声明输入取回来（"忘了取"的代价 = 一次调用）。"""
     from bobanana6.services.registry import build_registry

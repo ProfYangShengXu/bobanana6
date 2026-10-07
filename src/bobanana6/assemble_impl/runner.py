@@ -45,6 +45,7 @@ from ..core.consist import ConsistencyReport, check_consistency
 from ..core.kernel import compare_across, converge
 from ..core.model import (
     DEFAULT_LIMITS,
+    Artifact,
     AssemblyOutcome,
     Budget,
     Candidate,
@@ -77,6 +78,7 @@ from ..services import (
     judge_environment_problems,
 )
 from ..sources import SnapshotStore, SourceError
+from .produce import artifact_from_disk
 from .runtime import (
     BlockDeclined,
     BlockRuntime,
@@ -293,6 +295,10 @@ class Runner:
                 if gaps:
                     declined_detail["input_gaps"] = self._gap_event(gaps)
                     declined_evidence["input_gaps"] = gap_note
+                # ★★ 判定失败 ≠ 产物不存在：它可能只是信封没封好，活早就干完了。
+                if self._publish_disk_artifact(subtask, pieces, handoffs) is not None:
+                    declined_evidence["artifact_on_disk"] = subtask.output
+                    declined_detail["artifact_on_disk"] = subtask.output
                 self._note_gate(subtask, False, declined_detail)
                 verdicts[subtask.id] = Verdict(
                     ok=False, failed=("declined",), evidence=declined_evidence
@@ -312,6 +318,11 @@ class Runner:
                     # ★ 降级起点不能丢：这一块是在"缺输入"的前提下失败/成功的，报告要能追到。
                     failure_detail["input_gaps"] = self._gap_event(gaps)
                     failure_evidence["input_gaps"] = gap_note
+                # ★★ 判定失败 ≠ 产物不存在（见 `_publish_disk_artifact`）：产物照样给下游，
+                #   但 `verdicts` 仍是 ok=False —— 两件事独立，绝不因为它在盘上就改成通过。
+                if self._publish_disk_artifact(subtask, pieces, handoffs) is not None:
+                    failure_evidence["artifact_on_disk"] = subtask.output
+                    failure_detail["artifact_on_disk"] = subtask.output
                 self._note_gate(subtask, False, failure_detail)
                 # ★ 同一个 `"runtime"` 标签的第二半：这里**多半是"候选被判定器拒收"**
                 #   （`exit` 是 `degrade_single_agent` / `fix_constraint` 之类），
@@ -613,6 +624,9 @@ class Runner:
             upstream=upstream,
             checks=checks,
             inherited_sources=inherited_sources,
+            # ★ 题面声明（`ContractDocument.statement`）—— 每个块都拿到同一个 ref，
+            #   由 `produce.py::_statement_entry` 把题面**全文**内联进它的 brief。
+            statement=self.document.statement,
         )
 
     def _split_report_for(self, plan: SplitPlan, bundle: ConstraintBundle, ontology: Ontology) -> SplitReport:
@@ -643,6 +657,41 @@ class Runner:
             if deliverable.name == name:
                 return deliverable
         return DeliverableSpec(name=name)
+
+    def _publish_disk_artifact(
+        self,
+        subtask: Subtask,
+        pieces: dict[str, Any],
+        handoffs: dict[str, dict[str, Any]],
+    ) -> Artifact | None:
+        """Hand a failed block's on-disk deliverable to downstream anyway.
+
+        ★★ 根因：壳原来把「块判定失败」和「产物不存在」当成一回事。它们独立 ——
+        块可能只是**信封没封好**（散文开头、格式不对），它干出来的活早写到磁盘上了。
+        13f 实测：T-03..T-06 四个块只是交答案时写了句散文，四份产物却都被下游当成
+        `missing`，逼得 T-08 自己绕过 brief 去磁盘上找。
+
+        边界（这条最要紧）：`pieces` 管「下游拿得到什么」，`verdicts` 管「谁通过了」。
+        这里**只动** `pieces` / `handoffs`，调用方的 `verdicts[...]` 始终是 ok=False。
+
+        ★ 不许静默降级：交接件里写明 `from_disk: true` + `producer_verdict: "failed"`，
+        下游 brief 与最终报告都看得见这份产物来自一个没通过判定的块。
+        """
+        if self.workspace is None:
+            return None
+        path = Path(self.workspace) / subtask.output
+        if not path.is_file():
+            return None
+        artifact = artifact_from_disk(subtask.output, path)
+        pieces[subtask.output] = artifact
+        handoffs[subtask.output] = {
+            "from": subtask.id,
+            "files": [],
+            "note": "",
+            "from_disk": True,
+            "producer_verdict": "failed",
+        }
+        return artifact
 
     @staticmethod
     def _input_gaps(

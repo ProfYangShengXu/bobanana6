@@ -261,6 +261,35 @@ def test_a_contract_without_depends_on_stays_empty() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# ★ 题面声明：`statement` 指向一个已声明的来源；不填 = 不声明
+# --------------------------------------------------------------------------- #
+
+
+def test_a_contract_may_declare_which_source_is_the_statement() -> None:
+    document = parse_contract(VALID.replace("sources:", "statement: src-1\nsources:"))
+    assert document.statement == "src-1"
+
+
+def test_a_contract_without_a_statement_declaration_stays_empty() -> None:
+    assert parse_contract(VALID).statement == ""
+
+
+def test_a_statement_ref_that_is_not_declared_is_refused() -> None:
+    text = VALID.replace("sources:", "statement: ghost\nsources:")
+    with pytest.raises(ContractParseError) as error:
+        parse_contract(text, source="task.yaml")
+    message = str(error.value)
+    assert "$.statement" in message
+    assert "not a declared source" in message and "'ghost'" in message
+    assert "rule: statement" in message
+
+
+def test_a_statement_that_is_not_a_string_is_refused() -> None:
+    with pytest.raises(ContractParseError, match=r"\$\.statement"):
+        parse_contract(VALID.replace("sources:", "statement: 3\nsources:"))
+
+
+# --------------------------------------------------------------------------- #
 # ★ 字段声明：deliverables[].schema 从「透传类型名」升为「解析声明」
 # --------------------------------------------------------------------------- #
 

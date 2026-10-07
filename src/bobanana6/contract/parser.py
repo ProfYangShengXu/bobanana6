@@ -60,6 +60,8 @@ _TOP_LEVEL_KEYS = frozenset(
         "blind",
         "unmapped",
         "limits",
+        # ★ 声明「哪份来源是题面」—— 题面全文要内联进每个块的 brief。
+        "statement",
         # ★ ③: 声明"这些来源共享同一份状态"（多份局部视图 / 同一份账本）
         "sources_share_state",
     }
@@ -84,6 +86,10 @@ class ContractDocument:
 
     contract: TaskContract
     version: int = 1
+    #: ★ 任务声明的「哪份来源是**题面**」—— 一个已声明的 source ref；空 = 不声明。
+    #: 题面全文会被内联进**每个块**的 brief（`produce.py::_statement_entry`），
+    #: 而不是让八个块各自去取、各自理解。
+    statement: str = ""
     hard: tuple[Constraint, ...] = ()
     soft: tuple[Constraint, ...] = ()
     blind: tuple[str, ...] = ()
@@ -395,6 +401,18 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
     #: ★ 字段声明的 `source.ref` 要在解析 deliverables 时就能对照已声明来源，
     #: 所以 sources 先解析（契约错误仍在文件旁边当场报，只是顺序固定）。
     sources = _sources(data, source)
+    # ★ 题面来源：值必须是**已声明**的 source ref；不填就是不声明（退回今天的行为）。
+    #   指向不存在的 ref ⇒ 具名拒（说清"你指的哪份来源不存在"），绝不静默忽略。
+    statement = data.get("statement", "") or ""
+    if not isinstance(statement, str):
+        _fail(source, "$.statement", "statement must be a declared source ref", "type")
+    if statement and statement not in {item.ref for item in sources}:
+        _fail(
+            source,
+            "$.statement",
+            f"{statement!r} is not a declared source; known refs: {sorted(item.ref for item in sources)!r}",
+            "statement",
+        )
     contract = TaskContract(
         task_id=data["task_id"],
         goal=data["goal"],
@@ -406,6 +424,7 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
     return ContractDocument(
         contract=contract,
         version=version,
+        statement=statement,
         hard=_constraints(constraints.get("hard"), source=source, group="hard"),
         soft=_constraints(constraints.get("soft"), source=source, group="soft"),
         blind=_blind(data, source),

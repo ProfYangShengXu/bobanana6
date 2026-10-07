@@ -113,6 +113,10 @@ class BoundTask(TaskTools):
     contract_document: TaskContract
     upstream_parts: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     allowed_inputs: tuple[str, ...] = ()
+    #: ★ 契约声明的「哪份来源是题面」（已声明的 source ref；空 = 不声明）。
+    #: `produce.py` 用它把题面**全文**内联进每个块的 brief —— 八个块读同一份原文，
+    #: 而不是各自去取、各自理解。这里只搬运，不读盘、不判定。
+    statement: str = ""
 
     def mysubtask(self) -> Mapping[str, Any]:
         block = self.subtask
@@ -231,6 +235,7 @@ def build_toolset(
     checks: BoundChecks,
     inherited_sources: tuple[str, ...] = (),
     workspace: WorkspaceTools | None = None,
+    statement: str = "",
 ) -> ToolSet:
     """Bind the tool surface to one block.
 
@@ -252,7 +257,13 @@ def build_toolset(
     return ToolSet(
         subtask=subtask.id,
         semantics=BoundSemantics(ontology=ontology),
-        task=BoundTask(subtask=subtask, contract_document=contract, upstream_parts=upstream, allowed_inputs=subtask.inputs),
+        task=BoundTask(
+            subtask=subtask,
+            contract_document=contract,
+            upstream_parts=upstream,
+            allowed_inputs=subtask.inputs,
+            statement=statement,
+        ),
         check=checks,
         sources=sources,
         workspace=workspace,

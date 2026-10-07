@@ -3,6 +3,9 @@
 task_id: 13f-amendment-aware-crowding
 goal: 重建目标管理人的有效持仓并产出四类分析（集中度/换手/重叠/拥挤），按 instruction.md 的 8 个产物规格写到 output/
 version: 1
+# ★ 题面声明：`instruction` 这份来源就是**题面**。它的**全文**会被内联进每个块的 brief，
+#   八个块读同一份原文 —— 而不是各自去 `sources.snapshot` 取、各自理解。
+statement: instruction
 
 deliverables:
   # ★ 层次切分：产物之间的真实数据流由【契约】声明（instruction.md L31/L33/L35 的散文

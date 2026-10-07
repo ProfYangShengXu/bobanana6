@@ -79,6 +79,7 @@ __all__ = [
     "LoopIOImpl",
     "OutputLimitUnitError",
     "ResponseFormatSupport",
+    "artifact_from_disk",
     "candidate_response_format",
     "expected_shape",
     "model_output_cap",
@@ -246,6 +247,10 @@ _UPSTREAM_BRIEF_BUDGET = 2000
 _UPSTREAM_BRIEF_MIN_QUOTA = 160
 _HANDOFF_NOTE_FIRST = 300
 _HANDOFF_FILE_CAP = 40
+#: ★ 题面全文内联进每个块 brief 的字符预算。题面是**最短、最该共享**的那份规格
+#: （13f 的 `input/instruction.md` 只有 5,355 字节），所以预算给得比交付输入小得多。
+#: 超预算要**可见地**截断（`…[truncated]` + 省了多少字），不许静默截。
+_STATEMENT_BRIEF_BUDGET = 40_000
 
 
 def _brief_size(value: Any) -> int:
@@ -1113,6 +1118,19 @@ def _artifact_from_disk(artifact: Artifact, path: Path, content: str) -> Artifac
     return replace(artifact, columns=columns, rows=rows, text=content)
 
 
+def artifact_from_disk(name: str, path: Path) -> Artifact:
+    """Read one deliverable off disk and parse it into an ``Artifact``.
+
+    ★ 判定失败 ≠ 没干活：块可能只是**信封没封好**（散文开头、格式不对），它干出来的活
+    早就在磁盘上了。壳在这里只**读盘**，不碰任何判定语义 —— `runner` 用它在失败块的
+    两条出口上问一句"它的交付物在磁盘上吗"。
+
+    无法解析成行列的分隔文本退回只填 `text`（判定器会照常具名失败，不在 loader 炸整块）。
+    """
+    content = path.read_text(encoding="utf-8", errors="replace")
+    return _artifact_from_disk(Artifact(name=name), path, content)
+
+
 @dataclass
 class LoopIOImpl(LoopIO):
     """The loop's three collaborators: produce, execute, verify.
@@ -1210,6 +1228,11 @@ class LoopIOImpl(LoopIO):
         input_gaps = self._input_gaps()
         if input_gaps:
             brief["input_gaps"] = input_gaps
+        # ★★ 题面全文（契约声明的那份来源）—— **每个块**都拿到同一份原文，
+        #   而不是各自去取、各自理解（13f：八种读法，一个块偏了随产物级联）。
+        statement = self._statement_entry()
+        if statement:
+            brief["statement"] = statement
         contract = self.toolset.task.contract()
         # ★★★ 用户 2026-10-06 定的标准：**普通大学生读完 brief 要能说出"我要做什么"**。
         #   实测前它说不出 —— 块拿到的全部任务信息是
@@ -1630,6 +1653,55 @@ class LoopIOImpl(LoopIO):
                 paths[ref] = locator
         return paths
 
+    def _statement_entry(self) -> dict[str, Any]:
+        """★ 题面**全文**（契约声明的 source ref）—— 每个块都拿到同一份原文。
+
+        **为什么内联、不给路径**：一次调用 = 一次往返；凡壳在派活前已知、且模型必须
+        知道的，就内联进 brief（`_upstream_brief` 同一条规则）。原来题面只是一条普通来源，
+        块要自己调 `sources.snapshot(ref=...)` 去取 —— 走不走过去壳不管；实测后果是
+        **八个块各自去读、各自理解 ⇒ 同一份题面八种读法**，一个块理解偏了，它的偏差
+        随产物级联到下游，下游无从对照。
+
+        题面本来就是声明的来源 ⇒ 它已经在 `_fetch_sources` 的快照里（不用重新取网）。
+        超预算时**可见地**截断（`…[truncated]` + 省了多少字），不许静默截。
+        """
+        ref = str(getattr(self.toolset.task, "statement", "") or "")
+        sources = getattr(self.toolset, "sources", None)
+        if not ref or sources is None:
+            return {}
+        text = self._statement_text(ref, sources)
+        if not text:
+            return {}
+        budget = _STATEMENT_BRIEF_BUDGET
+        if len(text) <= budget:
+            return {"ref": ref, "text": text}
+        return {
+            "ref": ref,
+            "text": text[:budget] + "…[truncated]",
+            "truncated_chars": len(text) - budget,
+        }
+
+    def _statement_text(self, ref: str, sources: Any) -> str:
+        """题面原文：优先工作区里那份（模型读的就是它），否则读冻结载体。"""
+        encoding = "utf-8"
+        for source in getattr(sources, "authorized", ()) or ():
+            if getattr(source, "ref", "") == ref and getattr(source, "encoding", ""):
+                encoding = str(source.encoding)
+                break
+        locator = sources.locator(ref) if hasattr(sources, "locator") else ""
+        if self.workspace is not None and locator:
+            path = Path(self.workspace) / locator
+            if path.is_file():
+                return path.read_text(encoding=encoding, errors="replace")
+        try:
+            snapshot = sources.snapshot(ref)
+        except (AttributeError, LookupError, PermissionError):
+            return ""
+        try:
+            return Path(snapshot.body_path).read_text(encoding=encoding, errors="replace")
+        except OSError:
+            return ""
+
     def _upstream_brief(self) -> dict[str, Any]:
         """★★ 上游的一切直接摆上桌，不让下游再花一轮去问（`#66`）。
 
@@ -1670,6 +1742,12 @@ class LoopIOImpl(LoopIO):
                 entry["from"] = str(handoff.get("from") or "")
                 note = str(handoff.get("note") or "").strip()
                 files = sorted(str(item) for item in handoff.get("files") or [])
+                # ★★ 这份产物是从一个**没通过判定**的块来的（它只是信封没封好，活已经干完）
+                #   —— 下游必须看得见，不许静默降级。
+                if handoff.get("producer_verdict"):
+                    entry["producer_verdict"] = str(handoff.get("producer_verdict"))
+                if handoff.get("from_disk"):
+                    entry["from_disk"] = True
 
             # ③ 交接说明首句（有就给 —— 下游靠它复现口径）
             if note and quota - _brief_size(entry) > 80:
