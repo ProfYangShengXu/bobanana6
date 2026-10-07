@@ -1637,10 +1637,11 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "Z05-schema-sent-on-the-first-call",
         "assemble_impl/produce.py",
-        "        return self.response_format.enabled and self.calls > 1",
-        "        return self.response_format.enabled  # mutation: schema from turn one",
+        "        return not (self._must_read_sources() and not self.read_sources)",
+        "        return True  # mutation: schema before it has read its sources",
         "tests/test_services.py::test_the_first_call_is_free_form_and_later_calls_ask_for_the_shape",
-        "a strict answer schema on turn one stops the model from calling any tool",
+        "a strict answer schema stops the model from calling any tool -- sending it while "
+        "the block has not read its sources makes read-before-produce unsatisfiable",
     ),
     Mutation(
         "Z06-schema-refusal-becomes-fatal",

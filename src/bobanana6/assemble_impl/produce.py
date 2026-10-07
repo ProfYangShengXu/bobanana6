@@ -1135,6 +1135,13 @@ class LoopIOImpl(LoopIO):
         block = self.toolset.task.mysubtask()
         authorized = list(self.authorized_sources())
         brief: dict[str, Any] = {"subtask": dict(block), "authorized_sources": authorized}
+        # ★★★ 名字**和地址**一起给（见 `_source_paths` 的注记）：只给名字的后果是
+        #   块分不清"来源清单"和"来源内容"，而取数入口只有一次机会。
+        #   `authorized_sources` 保住溯源（判定器按 ref 查表），`source_files`
+        #   补上可解性（载体就在它工作区里）。
+        source_paths = self._source_paths()
+        if source_paths:
+            brief["source_files"] = source_paths
         contract = self.toolset.task.contract()
         # ★★★ 用户 2026-10-06 定的标准：**普通大学生读完 brief 要能说出"我要做什么"**。
         #   实测前它说不出 —— 块拿到的全部任务信息是
@@ -1181,6 +1188,7 @@ class LoopIOImpl(LoopIO):
                     "YOUR TASK:\n"
                     + (self.subtask.goal or self.subtask.output)
                     + ("\n\nCONTEXT:\n" + contract.goal if contract.goal.strip() else "")
+                    + self._workspace_line()
                     + "\n\nComplete this task using the tools available to you. "
                     "When finished, provide a clear, concise summary of:\n"
                     "- What you did\n"
@@ -1473,6 +1481,49 @@ class LoopIOImpl(LoopIO):
         inherited = tuple(getattr(self.toolset, "inherited_sources", ()) or ())
         return own + inherited
 
+    def _source_paths(self) -> dict[str, str]:
+        """★ 每个授权来源**指向哪个载体** —— 名字旁边的地址。
+
+        为什么必须一起给：`authorized_sources` 是**句柄**（溯源主键 + 能力边界，
+        两者都要求它稳定），而模型需要的是**可解**。只给名字的实测后果（13f 五轮）：
+        块分不清"来源清单"和"来源内容" —— 它调 `task.contract` 拿到的是一模一样的
+        那串名字，于是以为看清单就是看来源。而载体其实**就在它的工作区里**
+        （`code.run` 的 cwd 就是那儿），只是从来没人告诉过它。
+
+        ★ `SourcePort.locator` 的 docstring 本来就写着它是 "a hint for the payload"
+        —— 这句话到今天才第一次真的成立。给地址**不增加任何能力**（文件本来就在
+        工作区里、它本来就能读），只补上它缺的那条信息。
+
+        继承来的 ref（合并块）不在本块的 sources 端口里 —— `locator` 返回空串，跳过。
+        """
+        sources = getattr(self.toolset, "sources", None)
+        if sources is None or not hasattr(sources, "locator"):
+            return {}
+        paths: dict[str, str] = {}
+        for ref in self.authorized_sources():
+            locator = sources.locator(ref) or ""
+            if locator:
+                paths[ref] = locator
+        return paths
+
+    def _workspace_line(self) -> str:
+        """抄 Hermes 子代理骨架里那句 `WORKSPACE PATH:`（bb6 一直没实现）。
+
+        没有它，块手上有 `code.run` / `shell.run` 却不知道 cwd 在哪、素材就在脚下。
+        有了它，两条路各干各的：**地址用来导航与取数，名字用来溯源**。
+        """
+        if self.workspace is None:
+            return ""
+        return (
+            "\n\nWORKSPACE PATH:\n"
+            + str(self.workspace)
+            + "\nYour tools run inside this directory. The task's own material is already "
+            "here -- look under `input/` (use `code.run` / `shell.run` to list and read it); "
+            "`output/` is where deliverables land.\n"
+            "Look around before concluding that anything is missing.\n"
+            "★ 引值时仍要写它出自哪个来源（`ref`）：地址是用来【看】的，名字是用来【溯源】的。\n"
+        )
+
     def _upstream_parts(self) -> dict[str, Any]:
         """The parts this block was handed, for a block that consumes inputs.
 
@@ -1495,11 +1546,21 @@ class LoopIOImpl(LoopIO):
 
         ★ Not on the very first call of a block: until the model has had one turn
         it may legitimately need to call a tool, and a strict answer schema is
-        exactly what stops it. From the second turn on, either it has data (and
-        should answer) or its first answer was unusable (and structure is what it
-        needs) -- both want the schema.
+        exactly what stops it.
+
+        ★★ 也**不能在"它还没取到数"的时候**挂：`response_format` 一旦挂上，输出就被
+        约束成答案对象，模型**再也发不出工具调用**。而 read-before-produce 的反馈
+        （"你还没读来源"）恰恰是发在这一轮里的 ⇒ **那道门成了一道永远满足不了的门**。
+        实测（全档 7 个 tag）：可调工具的请求 67 次 → 工具调用 166 次；
+        带 schema 的请求 **110 次 → 工具调用 0 次**，一次例外都没有。
+        块的一生只有第一次调用能调工具 —— 它把那一次拿去问了 `task.contract`。
+
+        ⇒ 判据从"第 2 回合起"改成"**它已经能答题了**才锁"。取数路没走完，
+        这一轮问的是"下一步"，不是"答案"。
         """
-        return self.response_format.enabled and self.calls > 1
+        if not self.response_format.enabled or self.calls <= 1:
+            return False
+        return not (self._must_read_sources() and not self.read_sources)
 
     def _complete(self, state: LoopState, max_tokens: int) -> ModelResponse:
         """One model call, with capability negotiation around the answer schema.
