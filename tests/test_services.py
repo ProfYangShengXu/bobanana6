@@ -1089,7 +1089,7 @@ def test_named_source_refs_reads_nested_specs_and_only_keeps_authorized_names() 
     assert named_source_refs({"a": "interface"}, ()) == ()
 
 
-def _merge_io(tmp_path: Path, answer: str, observe_dir: Path | None) -> Any:
+def _merge_io(tmp_path: Path, answer: str, observe_dir: Path | None, *, client: Any = None) -> Any:
     """一个真的 `LoopIOImpl`：合并块、手里有一件上游部件、可开观测目录（`#43`）。"""
     from bobanana6.assemble_impl import LoopIOImpl, ResponseFormatSupport
     from bobanana6.services import build_registry
@@ -1119,7 +1119,7 @@ def _merge_io(tmp_path: Path, answer: str, observe_dir: Path | None) -> Any:
         inherited_sources=("panel-c",),
     )
     return LoopIOImpl(
-        client=_AnsweringClient(answer),
+        client=client if client is not None else _AnsweringClient(answer),
         toolset=tools,
         registry=build_registry(tools, SnapshotStore(root=tmp_path / "s").read),
         judge=BlockJudge(bundle=bundle(), subtask=block, context=CheckContext(ontology=mini_ontology())),
@@ -1138,6 +1138,79 @@ class _AnsweringClient:
 
     def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
         return ModelResponse(text=self.answer)
+
+
+class _ScriptedAnswers:
+    """按顺序答不同文本；记下每次调用有没有带 `response_format`（schema 轮）。"""
+
+    def __init__(self, answers: list[str]) -> None:
+        self.answers = list(answers)
+        self.calls = 0
+        self.with_schema: list[bool] = []
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        self.with_schema.append("response_format" in kw)
+        return ModelResponse(text=self.answers[min(self.calls - 1, len(self.answers) - 1)])
+
+
+#: 一件上游部件的一行 —— 合并块照抄它才算"引用+搬运"，过得了继承守卫。
+_VALID_MERGE_ANSWER = '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000.0}]}'
+
+
+def test_a_valid_candidate_is_not_reasked(tmp_path: Path) -> None:
+    """★ ① 直接交合法候选 ⇒ 不重问，往返数不变（不许回归）。"""
+    client = _ScriptedAnswers([_VALID_MERGE_ANSWER])
+    io = _merge_io(tmp_path, _VALID_MERGE_ANSWER, None, client=client)
+
+    proposal = io.produce(_state())
+
+    assert proposal.candidate is not None
+    assert client.calls == 1, client.calls
+
+
+def test_a_prose_turn_is_reasked_with_the_schema_instead_of_being_killed(tmp_path: Path) -> None:
+    """★★ ② 它想交卷但只写了散文 ⇒ 不当废卷判死；带 schema 重问一次，那一次才是答案轮。
+
+    改前：散文那一轮被格式门判死（`CandidateFormatError`），下一轮才挂 schema ——
+    13f 实测 5/8 个块死在这里。改后：同一轮里重问一次，块拿到合法 JSON（还是两轮，
+    只是第一轮的语义从"废品"变成"意图信号"）。
+    """
+    client = _ScriptedAnswers(["The panel is done — let me hand it over.", _VALID_MERGE_ANSWER])
+    io = _merge_io(tmp_path, _VALID_MERGE_ANSWER, None, client=client)
+
+    proposal = io.produce(_state())
+
+    assert proposal.candidate is not None, "散文之后的重问必须拿到候选，而不是判死"
+    assert client.calls == 2, client.calls
+    assert client.with_schema == [False, True], client.with_schema  # ★ 重问那一次才带 schema
+
+
+def test_the_prose_reask_is_bounded(tmp_path: Path) -> None:
+    """★ ③ 一直交散文 ⇒ 重问**有界**：一次之后才失败，不许无限循环。"""
+    from bobanana6.assemble_impl.produce import CandidateFormatError
+
+    client = _ScriptedAnswers(["I am still working on it.", "Still not done, sorry."])
+    io = _merge_io(tmp_path, "unused", None, client=client)
+
+    with pytest.raises(CandidateFormatError):
+        io.produce(_state())
+    assert client.calls == 2, client.calls  # 首次 + 一次重问，到此为止
+
+
+def test_pandas_and_numpy_are_importable_in_the_block_execution_environment(tmp_path: Path) -> None:
+    """★ ④ 块的执行环境（`code.run` 用 `sys.executable`）真的能 import pandas / numpy。
+
+    没有它们时，块只能手工逐行读 CSV、手工决定写几位小数 —— 13f 的 `hhi` 就是这么
+    撒掉精度的（相对误差 7.45e-5 > `np.allclose` 的 rtol=1e-5）。
+    依赖是**构建期**装好的（`pyproject.toml`），不是运行期 pip install。
+    """
+    workspace = BoundWorkspace(root=tmp_path / "ws", write_region=("out.csv",), frozen_paths=())
+    result = workspace.run_code("import pandas, numpy\nprint(pandas.__version__, numpy.__version__)")
+    workspace.close()
+
+    assert result["ok"] is True, result
+    assert len(str(result["stdout"]).split()) >= 2, result
 
 
 def test_the_inheritance_guard_writes_its_observation_only_when_it_refuses(tmp_path: Path) -> None:

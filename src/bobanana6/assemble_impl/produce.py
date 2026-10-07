@@ -592,6 +592,14 @@ def _describe_json_failure(text: str, exc: Exception, *, output_cap: int | None)
     return "malformed_json", f"the answer starts and ends like JSON but is not valid: {exc}"
 
 
+#: ★★ 只有**信封**失败才值得"带 schema 重问一次"：散文 / ```json 包着 / 截断 / 交了个非对象。
+#: 内容失败（`untraceable_row` 等）保持原样 —— 重问改不了内容，且会把继承守卫的观测
+#: 写第二遍，而它本来就有具名反馈。判据是**确定性**的：这些码由 `parse_candidate` 逐条声明。
+_ENVELOPE_FAILURE_CODES: frozenset[str] = frozenset(
+    {"empty", "not_json", "truncated_answer", "malformed_json", "not_an_object"}
+)
+
+
 def expected_shape(authorized_sources: Sequence[str]) -> str:
     """The required shape, plus *which* snapshots may be cited when we know them.
 
@@ -1175,6 +1183,9 @@ class LoopIOImpl(LoopIO):
     #: 「还在调工具」= 还在干活；「没调」= 在答题。锁 schema 会禁掉工具调用，
     #: 所以只能在它确实在答题的那一轮锁（见 `wants_structured_output`）。
     last_had_tool_calls: bool = False
+    #: ★★ "信封没封好 ⇒ 带 schema 重问一次"的上限：**每块最多一次**（有界，见
+    #: `_reask_with_schema`）。散文/```json 包着/截断不是废卷，换一个时机再问一次。
+    reasked: bool = False
     #: ★ `#33`: 这一跑的工作区（代码落盘到这里）。`None` = 这个部署没有工作区 ——
     #: 那就**不许**交代码类产物（具名拒绝，不静默丢）。
     workspace: Path | None = None
@@ -1409,31 +1420,91 @@ class LoopIOImpl(LoopIO):
                 ),
             )
         try:
-            candidate = parse_candidate(
-                response.text,
-                subtask=self.subtask,
-                source_id=self.source_id,
-                authorized_sources=self.authorized_sources(),
-                output_cap=cap,
-                parts=self._upstream_parts(),
-                hit_output_cap=_hit_output_cap(response.usage, cap),
-                # ★★ 它自己取过料没有 —— 决定它算不算"纯拼接块"（见 `parse_candidate`
-                #   里 `if parts and not read_own_sources` 的注记）。
-                read_own_sources=self.read_sources,
-                observe=self._guard_observer(),
-            )
+            candidate = self._parse_answer(response.text, cap, response.usage)
         except CandidateFormatError as rejected:
-            # ★ `#65`: 这一类的生产者【只有模型自己】——答案的结构性错误（不是 JSON /
-            #   缺必需字段 / 行对不上）在进程内是可判的；而"语义答错"在进程内与
-            #   "上下文不够"分不开（`#17` 已论证），所以这里【只声明结构性错误】，
-            #   不加启发式硬判。声明走事件流（`detail["cause"]`），归因层照 `#16` 的
-            #   规矩先读声明，不再把这一类记成 `None`。
-            self._declare_model_failure(rejected)
-            raise
+            # ★★ 它想交卷，但**信封没封好**（散文 / ```json 包着 / 截断 / 交了个非对象）
+            #   —— 不是废卷。今天：这一轮被格式门判死，下一轮才挂上 schema；下一轮它交出
+            #   合法 JSON，但这一轮白烧、块还可能因此失败（13f 实测 5/8 个块）。
+            #   改法：**立刻带 schema 重问一次**，把刚才的结论按格式交出来 —— 那一次才是
+            #   答案轮。★ 这是【换一个时机再问】，不是放宽格式：答案契约与
+            #   `parse_candidate` 的判定语义一字未动，散文永远不会被当成合法答案。
+            #   ★ 只对**信封**失败重问：内容失败（`untraceable_row` 等）保持原样 ——
+            #   重问改不了内容，且会把继承守卫的观测写第二遍，而它本来就有具名反馈。
+            retry = None
+            if str(rejected.feedback().get("code", "")) in _ENVELOPE_FAILURE_CODES:
+                retry = self._reask_with_schema(state, cap)
+            if retry is None:
+                self._declare_model_failure(rejected)
+                raise
+            retry_calls = self.registry.calls(retry.tool_calls)
+            if retry_calls:
+                # 重问之后它改为调工具（严格端点少见）—— 尊重它的下一步，别把这轮算成答案。
+                return TurnProposal(
+                    tool_calls=retry_calls, text=retry.text, carry_back=dict(retry.carry_back or {})
+                )
+            response = retry
+            try:
+                candidate = self._parse_answer(retry.text, cap, retry.usage)
+            except CandidateFormatError as second:
+                # 重问也没封好 ⇒ 才走原来的失败路径（反馈的是**重问那一次**的错，更贴切）。
+                self._declare_model_failure(second)
+                raise
         if candidate.files:
             self._persist_files(response.text, candidate)
         candidate = self._reconcile_workspace(candidate, response.text)
         return TurnProposal(candidate=candidate, text=response.text)
+
+    def _parse_answer(self, text: str, cap: int, usage: Mapping[str, Any] | None) -> Candidate:
+        """把模型的文本变成候选 —— **唯一**的解析入口（判定语义原样，只是复用它）。"""
+        return parse_candidate(
+            text,
+            subtask=self.subtask,
+            source_id=self.source_id,
+            authorized_sources=self.authorized_sources(),
+            output_cap=cap,
+            parts=self._upstream_parts(),
+            hit_output_cap=_hit_output_cap(usage, cap),
+            # ★★ 它自己取过料没有 —— 决定它算不算"纯拼接块"（见 `parse_candidate`
+            #   里 `if parts and not read_own_sources` 的注记）。
+            read_own_sources=self.read_sources,
+            observe=self._guard_observer(),
+        )
+
+    def _reask_with_schema(self, state: LoopState, cap: int) -> ModelResponse | None:
+        """★ 带 schema 重问一次（每块最多一次）。
+
+        **为什么这不是"多花一轮"**：今天也是两轮（自由轮 + schema 轮），只是第一轮的
+        输出被当废品判死；改完还是两轮，第一轮的语义从"废品"变成"意图信号"。
+        而本来就直接交 JSON 的块，情况 a 让它**省一轮**。
+
+        边界：① 有界（`reasked`）；② 计入模型调用预算（`budget.max_calls`，
+        它就是 `LoopConfig.max_turns` 的来源，见 `runtime.py`）；③ 端点不支持 schema
+        时重问没有意义，直接退回原来的失败路径。
+        """
+        if self.reasked or not self.response_format.enabled:
+            return None
+        if self.calls >= self.budget.max_calls:
+            return None
+        self.reasked = True
+        self.calls += 1
+        try:
+            response = self.client.complete(
+                self.prompt(state),
+                tool_schemas(self.toolset),
+                cap,
+                response_format=candidate_response_format(),
+            )
+        except Exception as exc:
+            if rejects_response_format(exc):
+                # 端点不认 schema：重问没有意义，退回原来的失败路径。
+                # ★ 与 `_complete` 同一处理（赋值顺序故意相反：让变异锚点保持唯一）。
+                self.response_format.refused = True
+                self.response_format.enabled = False
+                return None
+            raise
+        # ★ 记下"这一轮它在干活还是在答题"：下一轮要不要锁 schema 由它决定。
+        self.last_had_tool_calls = bool(getattr(response, "tool_calls", ()) or ())
+        return response
 
     def _reconcile_workspace(self, candidate: Candidate, text: str) -> Candidate:
         """★ `#47` 通道 2 的对账：块**直接写/执行**出来的文件，在这里变成可追溯的产物。
