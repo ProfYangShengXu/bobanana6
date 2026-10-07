@@ -1015,6 +1015,32 @@ _TRANSFORMED = '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000
 _VERBATIM = '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000.0}]}'
 
 
+def test_the_handoff_note_is_read_into_the_candidate_so_it_can_be_passed_down() -> None:
+    """★★ `#66`：`summary` 原来只在契约里放行了名字，**没人接** —— 它该传下去。
+
+    下游块要复现上游的口径（13f：T-02 得知道 T-01 怎么定 amend 动作），
+    原来只能从数据反推。这里把它接进 `Candidate.summary`，`runner` 再放进交接件。
+    """
+    from bobanana6.assemble_impl.produce import parse_candidate
+
+    answer = json.dumps({
+        "ref": "panel-c",
+        "rows": [{"obligor": "C-001", "amount": 90_000.0}],
+        "summary": "① 决定：RESTATEMENT → replace_restatement ② 规则：按 COVERPAGE 的 AMENDMENTTYPE",
+    })
+    candidate = parse_candidate(
+        answer, subtask=_MERGE_BLOCK, source_id="T-04",
+        authorized_sources=("panel-c",), parts=_MERGE_PARTS,
+    )
+    assert candidate.summary.startswith("① 决定：RESTATEMENT")
+    # 不写就是空串，不许编
+    bare = parse_candidate(
+        _VERBATIM, subtask=_MERGE_BLOCK, source_id="T-04",
+        authorized_sources=("panel-c",), parts=_MERGE_PARTS,
+    )
+    assert bare.summary == ""
+
+
 def test_a_block_that_read_its_own_sources_is_not_forced_to_carry_rows_verbatim() -> None:
     """★★ 同一个"变换过的行"，块**自己取过料** ⇒ 不该被逐字匹配拒。
 

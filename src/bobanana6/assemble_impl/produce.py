@@ -231,6 +231,22 @@ EXECUTION_DISCIPLINE = (
 CANDIDATE_SCHEMA: Mapping[str, Any] = dict(candidate_schema(ANSWER_CONTRACT))
 
 
+#: ★★ `#66` 交接件的**总预算**（重复 `#37` 的教训：不设上限早晚把下游的上下文撑爆）。
+#: ★ 关键不是"每一项多大"，是**这一段整体多大** —— 所以按上游【个数】平分预算：
+#:   上游少 ⇒ 每个额度大 ⇒ 能展开；上游多 ⇒ 每个额度小 ⇒ 只给索引。
+#:   **这样 brief 的量与上游个数无关地有界，不用写"3 个以上就……"这种魔法阈值。**
+#: 截断必须**可见**（写 `…[truncated]` / "还有 N 个未展开"），不许静默截。
+_UPSTREAM_BRIEF_BUDGET = 2000
+_UPSTREAM_BRIEF_MIN_QUOTA = 160
+_HANDOFF_NOTE_FIRST = 300
+_HANDOFF_FILE_CAP = 40
+
+
+def _brief_size(value: Any) -> int:
+    """一个 brief 片段占多少字符（按最终 JSON 文本量，不按 Python 长度估）。"""
+    return len(json.dumps(value, ensure_ascii=False))
+
+
 def candidate_response_format() -> Mapping[str, Any]:
     """The ``response_format`` payload for one answer (the *before* layer)."""
     return {"type": "json_schema", "json_schema": {"name": "candidate", "schema": dict(CANDIDATE_SCHEMA)}}
@@ -1002,6 +1018,8 @@ def parse_candidate(
         artifacts=(artifact,),
         claims=_claims(document.get("claims"), snapshot_ref=snapshot_ref, locator=locator, reject=reject),
         definition_versions=dict(versions) if isinstance(versions, Mapping) else {},
+        # ★★ 上游写给接手人的交接说明 —— 不进判定，但要传给下游（见 `Candidate.summary`）。
+        summary=str(document.get("summary") or ""),
     )
 
 
@@ -1163,6 +1181,11 @@ class LoopIOImpl(LoopIO):
         source_paths = self._source_paths()
         if source_paths:
             brief["source_files"] = source_paths
+        # ★★ `#66` 上游的一切直接摆上桌（见 `_upstream_brief`）：产物形状 + 上游写过哪些
+        #   文件 + 上游写给接手人的说明。下游不再需要花一轮去问"我手上有什么"。
+        upstream_brief = self._upstream_brief()
+        if upstream_brief:
+            brief["upstream"] = upstream_brief
         contract = self.toolset.task.contract()
         # ★★★ 用户 2026-10-06 定的标准：**普通大学生读完 brief 要能说出"我要做什么"**。
         #   实测前它说不出 —— 块拿到的全部任务信息是
@@ -1216,8 +1239,17 @@ class LoopIOImpl(LoopIO):
                     "- What you found or accomplished\n"
                     "- Any files you created or modified\n"
                     "- Any issues encountered\n\n"
-                    "★ 这份汇报写在答案 JSON 的 `summary` 字段里（判定器不读它，它是你说人话的位置）；"
+                    "★ 这份汇报写在答案 JSON 的 `summary` 字段里（判定器不读它）；"
                     "**产物本身照下面的形状交**。\n"
+                    "★★ 它不是日记，是**写给接手这个产物的人看的交接说明** —— 后面还有块要接着干，"
+                    "它只拿得到你的产物和这段话。按四格写：\n"
+                    "  ① 我做了什么决定（例：RESTATEMENT 的申报 → `replace_restatement`）\n"
+                    "  ② 我按什么规则做的（接手的人必须沿用同一套口径，别让他重推一遍）\n"
+                    "  ③ 你接手时要注意什么\n"
+                    "  ④ 我哪里不确定\n"
+                    "★ brief 里若有 `upstream`，那是上游留下的：`files` 是它写过哪些文件（客观，"
+                    "可以直接去读、复用它的脚本）、`handoff_note` 是**上游自己的说法、未经判定**"
+                    "（以你自己核过的产物为准）。\n"
                     "★★ 交上来的东西就是你的答卷：**空表、占位符、「我打算去读来源」这类东西不算数，"
                     "会被判回来**。\n"
                     + render_prompt_contract(ANSWER_CONTRACT)
@@ -1535,6 +1567,73 @@ class LoopIOImpl(LoopIO):
             if locator:
                 paths[ref] = locator
         return paths
+
+    def _upstream_brief(self) -> dict[str, Any]:
+        """★★ 上游的一切直接摆上桌，不让下游再花一轮去问（`#66`）。
+
+        规则：**凡壳在派活前已经知道、而模型必须知道的，就内联进 brief。**
+        一次调用 = 一次往返 —— 下游原来第一轮必花 `task.contract` / `task.upstream`
+        去问"我手上有什么"，而这两样壳收块时就全有了（实测 13f：T-01 首轮固定烧在
+        问任务上，而 brief 里 `subtask` 那一格与 `task.mysubtask` 的返回**完全重复**）。
+
+        ★★ **渐进式披露**：预算按上游【个数】平分，额满即止。
+        上游≤2 时每个都能展开（列名 + 文件清单 + 交接说明）；上游一多，每个只剩
+        `from / 行数 / 列数 / 说明首句` 的索引形态 —— **整段大小与上游个数无关地有界**，
+        要细节模型自己 `task.upstream('<名字>')` 取。这样就不用写"3 个以上就……"。
+
+        `files` 是**客观**的（来自上游的 `Candidate.files`，壳记的）；`note` 是**自述**，
+        所以键名就叫 `handoff_note`，系统提示里也明说它未经判定 —— 不许把上游的误解
+        当事实传下去。
+
+        ★ 只给"有哪些、多大"，**不给内容**：189KB 那种塞不进一次回答（实测
+        `effective_holdings.csv`）。要内容它自己按路径去读。
+        """
+        parts = self._upstream_parts()
+        ordered = [name for name in sorted(parts) if isinstance(parts[name], Mapping)]
+        if not ordered:
+            return {}
+        quota = max(_UPSTREAM_BRIEF_MIN_QUOTA, _UPSTREAM_BRIEF_BUDGET // len(ordered))
+        brief: dict[str, Any] = {}
+        collapsed: list[str] = []
+        for name in ordered:
+            payload = parts[name]
+            rows = payload.get("rows") or []
+            columns = payload.get("columns") or []
+            # ①② 必有：找谁 + 规模。这两格小到可以无条件给。
+            entry: dict[str, Any] = {"rows": len(rows), "columns": len(columns)}
+            handoff = payload.get("handoff")
+            note = ""
+            files: list[str] = []
+            if isinstance(handoff, Mapping):
+                entry["from"] = str(handoff.get("from") or "")
+                note = str(handoff.get("note") or "").strip()
+                files = sorted(str(item) for item in handoff.get("files") or [])
+
+            # ③ 交接说明首句（有就给 —— 下游靠它复现口径）
+            if note and quota - _brief_size(entry) > 80:
+                first = note if len(note) <= _HANDOFF_NOTE_FIRST else note[:_HANDOFF_NOTE_FIRST] + "…"
+                entry["handoff_note"] = first
+                if len(note) > _HANDOFF_NOTE_FIRST:
+                    entry["handoff_note_truncated"] = True
+            # ④ 列名全表（额度够才给 —— 它是接口，值得花）
+            if columns and quota - _brief_size(entry) > _brief_size(columns) + 20:
+                entry["columns_detail"] = [dict(column) for column in columns]
+            # ⑤ 文件清单（额度够才给）
+            if files and quota - _brief_size(entry) > 60:
+                keep = min(len(files), _HANDOFF_FILE_CAP)
+                entry["files"] = files[:keep]
+                if len(files) > keep:
+                    entry["files_truncated"] = f"…还有 {len(files) - keep} 个未列出"
+            if "columns_detail" not in entry or "files" not in entry:
+                collapsed.append(name)
+            brief[name] = entry
+        if collapsed:
+            # ★ 截断必须可见：明说"可以接着要"，而不是让下游以为"就这些"。
+            brief["_collapsed"] = (
+                f"{len(collapsed)} 个上游只给了索引（{', '.join(collapsed)}）；"
+                "要细节用 `task.upstream('<名字>')`"
+            )
+        return brief
 
     def _workspace_line(self) -> str:
         """抄 Hermes 子代理骨架里那句 `WORKSPACE PATH:`（bb6 一直没实现）。

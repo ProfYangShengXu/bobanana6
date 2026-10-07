@@ -953,6 +953,11 @@ class Candidate:
     definition_versions: Mapping[str, str] = field(  # core:kernel —— 先查口径读它
         default_factory=dict
     )
+    #: ★★ 上游写给**接手的人**的交接说明（`#66`）。它**不进判定**（`core/checkers/`
+    #: 一个都不读它），但它要**传下去** —— 下游块靠它复现上游的口径与决定，
+    #: 而不是从数据里反推。契约里那一格原来只放行了名字、没人接。
+    #: 为什么不让判定器读：一旦有判据读它，就会回到「判据只查形状 ⇒ 学最小可过形态」。
+    summary: str = ""  # external:runner —— 交接件（`handoffs`）取它给下游
     #: ★★ 曾经在这里加过一个 `done` 字段（"模型自己声明我干完了"），让"交答案"与
     #: "终结"分开。**实测撤掉了**（13f `ansrow` vs `bigfile`）：写不写 `done` 的两次
     #: 交的都是真内容，它一次没抓到过占位符，却把一次好答案判成 `restart_cap`。

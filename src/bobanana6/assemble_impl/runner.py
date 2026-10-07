@@ -248,6 +248,9 @@ class Runner:
         )
         self.runtime.context = context
         pieces: dict[str, Any] = {}
+        #: ★★ 交接件：产物之外，把"上游写过哪些文件 + 它写给接手人的说明"也带下去。
+        #: 键与 `pieces` 同源（交付物路径），所以下游按 `subtask.inputs` 找得到。
+        handoffs: dict[str, dict[str, Any]] = {}
         piece_provenance: dict[str, tuple[Provenance, ...]] = {}
         candidates: dict[str, Candidate] = {}
         verdicts: dict[str, Verdict] = {}
@@ -275,7 +278,8 @@ class Runner:
                 sorted({p.snapshot_ref for name in subtask.inputs for p in piece_provenance.get(name, ())})
             )
             toolset = self._toolset(
-                plan, subtask, bundle, ontology, snapshots, pieces, piece_provenance, inherited, context
+                plan, subtask, bundle, ontology, snapshots, pieces, piece_provenance, inherited, context,
+                handoffs,
             )
             try:
                 candidate = self.runtime.run(subtask, bundle, ontology, toolset, self.budget)
@@ -316,6 +320,15 @@ class Runner:
             artifact = candidate.artifact(subtask.output)
             if artifact is not None:
                 pieces[subtask.output] = artifact
+                # ★★ 交接件（`#66`）：产物之外，把上游**写过哪些文件**（客观，来自
+                #   `candidate.files`）与**它写给接手人的说明**（自述，标注未判定）一起带上。
+                #   为什么：下游原来只能从数据反推上游的口径（13f 实测 T-02 重读
+                #   instruction.md / test_outputs.py 重推一遍），而这两样壳在收块时就知道了。
+                handoffs[subtask.output] = {
+                    "from": subtask.id,
+                    "files": sorted(str(name) for name in candidate.files),
+                    "note": candidate.summary,
+                }
             # ★ §7⑫: this verdict comes from the judge, so its ``failed`` names the
             #   constraints that rejected the block -- the judge is the party that
             #   declares it. Written here (not inferred downstream) so attribution
@@ -526,6 +539,7 @@ class Runner:
         piece_provenance: Mapping[str, tuple[Provenance, ...]],
         inherited_sources: tuple[str, ...],
         context: CheckContext,
+        handoffs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> Any:
         # ★ The upstream tool hands over the *content* of the declared inputs, not
         #   a summary: a block that can only see a row count cannot merge anything.
@@ -542,6 +556,9 @@ class Runner:
                 upstream[name] = {
                     "schema": plan.interfaces.get(name, ""),
                     **artifact_payload(artifact),
+                    # ★★ `#66` 交接件：上游写过哪些文件（客观）+ 它写给接手人的说明（自述）。
+                    #   下游据此能直接复用上游的脚本、并沿用同一套口径，而不是从数据反推。
+                    **({"handoff": dict(handoffs[name])} if handoffs and name in handoffs else {}),
                     # ★ A11: the part's own per-row citations travel with it, so the
                     #   consumer can inherit a truthful chain instead of inventing one.
                     "provenance": [
