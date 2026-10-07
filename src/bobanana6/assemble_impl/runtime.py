@@ -301,7 +301,14 @@ class BlockRuntime:
         )
         loop = WorkerLoop(
             io,
-            config=LoopConfig(required_scope=self.required_scope),
+            # ★★ 轮次上限跟着**声明的 budget** 走，不是这个 adapter 自己留的数。
+            #   原来这里写死 `LoopConfig()`（`max_turns=6`），与契约声明的
+            #   `max_calls=64` 打架 —— 6 悄悄赢，块永远够不到自己的预算。
+            #   实测（13f `alive` 轮）：块读 3 份来源 + 连摸 4 次数据，然后
+            #   `exit=budget_exhausted` —— 死在 6 轮上，不是死在能力上。
+            #   本文件上方那句注释本来就是这个意思："that declaration is what
+            #   caps the model call -- not a number this adapter keeps for itself"。
+            config=LoopConfig(required_scope=self.required_scope, max_turns=budget.max_calls),
             store=self.checkpoints,
             gate=self.gate,
             routes=self.route_table,

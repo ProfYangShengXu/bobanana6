@@ -166,6 +166,7 @@ def run_task(
     workspace: bool = False,
     workspace_seed: Callable[[Path], None] | None = None,
     observe: bool = False,
+    max_calls: int | None = None,
 ) -> TaskRun:
     """Run one acceptance task through the real assembly point.
 
@@ -233,6 +234,10 @@ def run_task(
         "--snapshots",
         str(snapshots),
     ]
+    if max_calls is not None:
+        # ★ 轮次上限跟着声明的 budget 走（`runtime.py` 的 `LoopConfig(max_turns=budget.max_calls)`），
+        #   所以这一个开关同时管"多少次模型调用"和"多少轮"。
+        argv.extend(["--max-calls", str(max_calls)])
     if offline:
         argv.append("--offline")
     if workspace:
