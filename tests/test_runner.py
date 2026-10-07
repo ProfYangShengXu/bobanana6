@@ -1015,6 +1015,33 @@ _TRANSFORMED = '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000
 _VERBATIM = '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000.0}]}'
 
 
+def test_a_block_that_read_its_own_sources_is_not_forced_to_carry_rows_verbatim() -> None:
+    """★★ 同一个"变换过的行"，块**自己取过料** ⇒ 不该被逐字匹配拒。
+
+    反证：`_TRANSFORMED` 原样喂进去，只把 `read_own_sources` 从 False 翻成 True ——
+    判定必须从"拒"变成"收"。这正是 13f 下游块的形状：读 INFOTABLE 取原始数据、
+    用上游结果定范围、算出一张新表；它的每一行都不是上游行的逐字拷贝。
+    实测（`nodone` 轮）：T-02 算出 1681 行、与 verifier 的算法逐值吻合，仍被判
+    `row 0 … matches no row this block was handed`，于是 T-03..T-08 全部连锁饿死。
+    """
+    from bobanana6.assemble_impl.produce import parse_candidate
+
+    # ① 没取过料（纯拼接）⇒ 既有规则一字不动，照样拒。
+    with pytest.raises(CandidateFormatError) as error:
+        parse_candidate(
+            _TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
+            authorized_sources=("panel-c",), parts=_MERGE_PARTS,
+        )
+    assert error.value.feedback()["code"] == "untraceable_row"
+
+    # ② 自己取过料 ⇒ 走"自己引用"那条路，收。
+    candidate = parse_candidate(
+        _TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
+        authorized_sources=("panel-c",), parts=_MERGE_PARTS, read_own_sources=True,
+    )
+    assert candidate.artifacts[0].rows == ({"obligor": "C-001", "amount": 90000000.0},)
+
+
 def test_a_refused_merge_row_explains_itself_with_the_pool_and_the_diff() -> None:
     """★ `#43`: 拒收文案一个字没变，但**观测**把"它手里有什么"说清楚了。"""
     from bobanana6.assemble_impl.produce import parse_candidate

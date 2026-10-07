@@ -858,6 +858,7 @@ def parse_candidate(
     output_cap: int | None = None,
     parts: Mapping[str, Mapping[str, Any]] | None = None,
     hit_output_cap: bool = False,
+    read_own_sources: bool = False,
     observe: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> Candidate:
     """Read one answer into a ``Candidate``, or fail loudly.
@@ -870,7 +871,14 @@ def parse_candidate(
     positionally (``source_row`` = its own row). A block that only merges parts
     (``parts`` handed in) read no snapshot itself, so its citations are
     *inherited* from the rows it was actually given -- and a row that matches no
-    input row is refused instead of being given a citation it cannot support.
+    input is refused.
+
+    ★★ ``read_own_sources``: 一个块可以【两者都是】—— 既拿到了上游的部件，又自己去读了
+    来源（13f 的下游块全是这样：读 INFOTABLE 取原始数据，用上游结果定范围，算出一张新表）。
+    那种块**不是**纯拼接块：它的每一行都不会是上游行的逐字拷贝，逼它逐字匹配等于让它永远
+    过不了（实测 `nodone` 轮：T-02 算出 1681 行、与 verifier 逐值吻合，仍被判
+    ``matches no row this block was handed``）。所以它走"自己引用"那条路 ——
+    引用必须落在一份**真的读过、且行真的在**的来源上（内容级校验），比逐字匹配更强。
     """
     # ★ One place builds the fix, and every rejection carries it: what the model
     #   sent, which rule it broke, and the shape that would be accepted.
@@ -961,13 +969,25 @@ def parse_candidate(
             for index, line in enumerate(artifact_text.splitlines())
             if line
         )
-    if parts:
+    if parts and not read_own_sources:
         # ★ A11: the block read no snapshot of its own, so its citations cannot be
         #   positional. They are inherited from the rows it was handed; a row that
         #   matches no input is refused (never given a citation it cannot support).
         provenance = list(
             _inherited_provenance(artifact, parts, reject, observe=observe, subtask_id=subtask.id)
         )
+    # ★★ 读过来源的块【不是】纯拼接块，不逼它逐字匹配上游的行。
+    #   `_inherited_provenance` 的 docstring 自己写着这个缺口：一行对不上时，
+    #   "it is either fabricated or **transformed**, and the system cannot yet tell
+    #   those apart" —— 分不清就一律拒收。
+    #   而 13f 的下游块**全是 transformed**：读 INFOTABLE（原始来源）+ 用上游结果定范围
+    #   ⇒ 算出一张新表。它的每一行都不是上游那些行的逐字拷贝 ⇒ **结构上永远过不了**。
+    #   实测（`nodone` 轮）：T-02 把 `effective_holdings.csv` 1681 行真做出来了、
+    #   与 verifier 自己的算法逐值吻合，仍被判
+    #   `row 0 … matches no row this block was handed`。
+    #   ⇒ 判据分流：**自己取过料的，走"自己引用"那条路** —— 引用的行必须在它读过的那份
+    #   来源里真的存在、值要对得上（A11 的内容级校验），比"逐字匹配上游行"更强；
+    #   没取过料的（纯拼接）保持原规则不动。
     versions = document.get("definition_versions")
     return Candidate(
         subtask_id=subtask.id,
@@ -1318,6 +1338,9 @@ class LoopIOImpl(LoopIO):
                 output_cap=cap,
                 parts=self._upstream_parts(),
                 hit_output_cap=_hit_output_cap(response.usage, cap),
+                # ★★ 它自己取过料没有 —— 决定它算不算"纯拼接块"（见 `parse_candidate`
+                #   里 `if parts and not read_own_sources` 的注记）。
+                read_own_sources=self.read_sources,
                 observe=self._guard_observer(),
             )
         except CandidateFormatError as rejected:
