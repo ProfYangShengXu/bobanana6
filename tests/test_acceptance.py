@@ -1689,22 +1689,24 @@ def test_the_same_deliverable_through_the_answer_json_still_works(tmp_path: Path
     assert (run.workspace / "out.txt").read_text(encoding="utf-8") == "EXPECTED\n"
 
 
-def test_a_channel_two_write_outside_the_write_region_never_lands(tmp_path: Path) -> None:
-    """★ 通道 2 **不是后门**（其一）：`files.write` 写到写区之外 ⇒ 工具当场具名拒。
+def test_a_channel_two_write_into_a_frozen_path_never_lands(tmp_path: Path) -> None:
+    """★ 通道 2 **不是后门**（其一）：`files.write` 写到【frozen 路径】（声明的来源）⇒ 具名拒。
 
-    于是交付物从来没出现过，判据命令（读工作区）必然失败 —— 这既证明了写区边界，也证明了
-    "绕过判据器"这条路走不通。
+    旧靶子是"写区之外的草稿纸"—— 那条旧规则已退役（草稿纸现在合法）。职责没变：
+    **撞到别人的东西（别的交付物 / 任务声明的来源）必须拒**，所以靶子换成 frozen 里的
+    `input/seed.txt`，断言强度不动：拒绝 + 那份来源一个字都不许变。
     """
-    task = _workspace_task(tmp_path, name="outside-region")
-    run = run_task(task, client=_ChannelTwoClient(path="elsewhere.txt"), env={}, workspace=True)
+    task = _workspace_task(tmp_path, name="frozen-target-region")
+    run = run_task(task, client=_ChannelTwoClient(path="input/seed.txt"), env={}, workspace=True)
 
     assert run.report.block_pass_rate < 1.0, run.verdicts
-    assert not (run.workspace / "elsewhere.txt").exists(), "越权写必须一个字都没落盘"
+    # ★ 声明的来源是 frozen：写它必须被拒，盘上那份一个字都不许变
+    assert (run.workspace / "input" / "seed.txt").read_text(encoding="utf-8") == "draft\n"
     assert not (run.workspace / "out.txt").exists(), "交付物根本没被写出来"
 
 
 class _ShellWritingClient(_ChannelTwoClient):
-    """走 `shell.run` 在写区之外落一个文件 —— 工具看不出来，只有块结束时的对账能抓住。"""
+    """走 `shell.run` 落一个文件到【frozen 路径】—— 工具看不出来，只有块结束时的对账能抓住。"""
 
     def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
         self.calls += 1
@@ -1719,18 +1721,20 @@ class _ShellWritingClient(_ChannelTwoClient):
         if answered == 1:
             return ModelResponse(
                 tool_calls=(
-                    _tool_call("w1", "shell.run", {"command": "echo stray > elsewhere.txt"}),
+                    # ★ 靶子是 frozen：写任务【声明的来源】，不是写一块草稿纸。
+                    _tool_call("w1", "shell.run", {"command": "echo stray > input/seed.txt"}),
                 )
             )
         return ModelResponse(text=json.dumps({"ref": "seed", "columns": [], "rows": [], "files": {output: "EXPECTED\n"}}))
 
 
-def test_a_shell_command_that_writes_outside_the_region_is_caught_at_block_end(tmp_path: Path) -> None:
+def test_a_shell_command_that_writes_into_a_frozen_path_is_caught_at_block_end(tmp_path: Path) -> None:
     """★ 通道 2 **不是后门**（其二）：`shell.run` 的副作用壳看不到参数 —— 由块结束时的对账兜住。
 
+    旧靶子是"写区之外的草稿纸"（已退役）；职责不变：**撞 frozen 必须在块末被抓**。
     这就是"只登记 `files.write`"会留的那个洞：能执行代码之后，写文件的路不止一条。
     """
-    task = _workspace_task(tmp_path, name="shell-outside-region")
+    task = _workspace_task(tmp_path, name="shell-frozen-target")
     run = run_task(task, client=_ShellWritingClient(), env={}, workspace=True)
 
     assert run.report.block_pass_rate < 1.0, run.verdicts

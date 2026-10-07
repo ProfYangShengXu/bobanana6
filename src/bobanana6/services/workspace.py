@@ -125,40 +125,78 @@ def may_write(path: str, write_region: tuple[str, ...], frozen_paths: tuple[str,
 
 @dataclass
 class WriteBudget:
-    """本块已写字节的累计器 —— 一道闸，多个写入口共用（写工具 / 答案里的 files / 命令副作用）。
+    """本块在工作区里的**净占用**闸 —— 一道闸，多个写入口共用。
+
+    ★ 判定看的是**当前占用**（本块写过的路径现在在磁盘上的字节和），**不是**累计写入量：
+    "堆满盘" = 净占用。一个块写了 1GB 又删掉、或合法地反复覆写同一个大文件，都不该被拒
+    —— 按累计判会误伤后者（高精度低召回：宁可漏，不可错杀）。
+    ``written_total`` 只作**证据**（诊断"它在反复写什么"），不参与判定。
 
     ``limit`` 默认取 `_WORKSPACE_WRITE_BUDGET_BYTES`；要从外部改上限就传
-    ``WriteBudget(limit=...)``，函数体里不写死数字。同一块的多次写在这里累加。
+    ``WriteBudget(limit=...)``，函数体里不写死数字。
     """
 
     limit: int = _WORKSPACE_WRITE_BUDGET_BYTES
-    used: int = 0
-    #: 已经按整份内容计过费的路径：块结束时的副作用对账不再对它重复计费。
-    _charged: set[str] = field(default_factory=set)
+    #: 本块写过的路径（去重）：判定看的是它们**现在**在磁盘上的字节和。
+    paths: set[str] = field(default_factory=set)
+    #: 累计写入量 —— 只作证据，不参与判定。
+    written_total: int = 0
+    #: 只给副作用对账用一次观察量的路径（同一份文件不再按当前大小重复记账）。
+    _observed: set[str] = field(default_factory=set)
 
-    def spend(self, amount: int, *, where: str) -> None:
-        """Charge ``amount`` bytes, refusing by name once the limit is crossed."""
-        if amount <= 0:
-            return
-        if self.used + amount > self.limit:
-            raise WriteBudgetExceeded(
-                f"{where}: this block has already written {self.used} bytes; the limit is "
-                f"{self.limit} bytes, and this write adds {amount} more"
-            )
-        self.used += amount
+    def note_write(self, path: str) -> None:
+        """Remember that this block wrote ``path`` (idempotent)."""
+        self.paths.add(_normalized(path))
 
-    def charge(self, path: str, amount: int, *, where: str) -> None:
-        """Charge a shell-driven write (``files.write`` / ``files.patch`` / answer files)."""
-        self.spend(amount, where=where)
-        self._charged.add(_normalized(path))
+    def note_bytes(self, amount: int) -> None:
+        """Add to the cumulative-written evidence (never used for the decision)."""
+        self.written_total += max(0, amount)
 
-    def charge_observed(self, path: str, amount: int, *, where: str) -> None:
-        """Charge a file the ledger saw change, once (skip paths the shell already charged)."""
+    def note_observed(self, path: str, size: int) -> None:
+        """Record a file the ledger saw change, once (its size is an approximation)."""
         normalized = _normalized(path)
-        if normalized in self._charged:
+        self.paths.add(normalized)
+        if normalized in self._observed:
             return
-        self.spend(amount, where=where)
-        self._charged.add(normalized)
+        self._observed.add(normalized)
+        self.written_total += max(0, size)
+
+    def _size(self, root: Path | None, name: str) -> int:
+        if root is None:
+            return 0
+        target = Path(root) / name
+        try:
+            return target.stat().st_size if target.is_file() else 0
+        except OSError:  # a file that vanished mid-scan is not a current occupant
+            return 0
+
+    def occupancy(self, root: Path | None) -> int:
+        """本块写过的路径**现在**在磁盘上的字节和（写过的又删了的 = 0）。"""
+        return sum(self._size(root, name) for name in self.paths)
+
+    def project(self, root: Path | None, path: str, *, new_size: int) -> int:
+        """这次写完之后本块的净占用预测（写之前算，好早拒）。
+
+        已经在本块账上的路径：用新大小替换它当前的大小；不在账上的：整份都是新增
+        （哪怕是覆写一份预先存在的文件 —— 改动之后它也算本块的足迹）。
+        """
+        normalized = _normalized(path)
+        current = self.occupancy(root)
+        if normalized in self.paths:
+            return current - self._size(root, normalized) + max(0, new_size)
+        return current + max(0, new_size)
+
+    def ensure(self, total: int, *, where: str, attempted: int | None = None) -> None:
+        """Refuse by name once the block's (projected) occupancy is over the limit."""
+        if total <= self.limit:
+            return
+        detail = (
+            f"this block would occupy {total} bytes in the workspace; the limit is {self.limit} bytes"
+        )
+        if attempted is not None:
+            detail += f", and this write adds {attempted} more"
+        detail += f" (it has written {self.written_total} bytes in total)"
+        raise WriteBudgetExceeded(f"{where}: {detail}")
 
 
 @dataclass
@@ -245,11 +283,15 @@ class BoundWorkspace:
                 "limit for one call -- write the file in several calls (append=true)"
             )
         self._check_region(path)
-        # ★ 总字节闸：同一块的多次写在这里累加（写区放宽之后，旧规则的"防堆满盘"靠它）。
-        self.write_budget.charge(path, size, where=f"files.write({path!r})")
         self._note()
         root = self._require_root()
         target = self._inside(root, path)
+        old_size = target.stat().st_size if target.is_file() else 0
+        projected = self.write_budget.project(root, path, new_size=old_size + size if append else size)
+        # ★ 早拒比晚拒好：按"这次写完之后本块的**净占用**"预检（累计会误伤反复覆写同一个大文件）。
+        self.write_budget.ensure(projected, where=f"files.write({path!r})", attempted=size)
+        self.write_budget.note_write(path)
+        self.write_budget.note_bytes(size)
         target.parent.mkdir(parents=True, exist_ok=True)
         mode = "a" if append else "w"
         with target.open(mode, encoding="utf-8") as handle:
@@ -278,10 +320,13 @@ class BoundWorkspace:
                 "give a longer unique old_string or set replace_all=true"
             )
         replacements = occurrences if replace_all else 1
-        # ★ 总字节闸只记"本块自己加进去的那部分"（缩水不退还，涨出来的才算）。
+        # ★ 净占用：只按改过之后的那份文件算（缩水会退还，涨出来的才算）。
         delta = replacements * (len(new_string.encode("utf-8")) - len(old_string.encode("utf-8")))
-        if delta > 0:
-            self.write_budget.charge(path, delta, where=f"files.patch({path!r})")
+        old_size = target.stat().st_size
+        projected = self.write_budget.project(root, path, new_size=max(0, old_size + delta))
+        self.write_budget.ensure(projected, where=f"files.patch({path!r})", attempted=max(0, delta))
+        self.write_budget.note_write(path)
+        self.write_budget.note_bytes(max(0, delta))
         target.write_text(text.replace(old_string, new_string), encoding="utf-8")
         return {**_written(root, target), "replacements": replacements}
 

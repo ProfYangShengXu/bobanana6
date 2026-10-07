@@ -1440,9 +1440,10 @@ def test_writing_a_declared_source_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_block_that_writes_past_its_total_byte_budget_is_refused(tmp_path: Path) -> None:
-    """★ 写区放宽之后顶替旧规则的那道闸：本块总写入量有上限，超了具名拒。
+    """★ 写区放宽之后顶替旧规则的那道闸：本块**净占用**有上限，超了具名拒。
 
-    上限从外部传（`WriteBudget(limit=...)`），同一块的多次写累加。
+    上限从外部传（`WriteBudget(limit=...)`）；判定按"这些路径现在在磁盘上的字节和"，
+    不是累计写入量。这里用 append 把同一份文件写到上限，再写 1 字节就被拒。
     """
     from bobanana6.services.workspace import WriteBudget, WriteBudgetExceeded
 

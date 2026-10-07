@@ -1452,19 +1452,23 @@ class LoopIOImpl(LoopIO):
             )
 
         root = Path(self.workspace)
-        # ★ 总字节闸：命令副作用（`shell.run` / `code.run`）落下的文件在这里一次性计费；
-        #   写工具/答案已经按整份内容计过的路径不重复计（见 `WriteBudget.charge`）。
+        # ★ 总字节闸（**净占用**）：命令副作用（`shell.run` / `code.run`）落下的文件在这里
+        #   记进本块账上，然后按"这些路径现在在磁盘上的字节和"判定 —— 写过的又删了 = 0，
+        #   反复覆写同一个大文件不会被累计误伤（见 `services/workspace.py::WriteBudget`）。
+        for name in changed:
+            target = root / name
+            size = target.stat().st_size if target.is_file() else 0
+            self.write_budget.note_observed(name, size)
         try:
-            for name in changed:
-                target = root / name
-                size = target.stat().st_size if target.is_file() else 0
-                self.write_budget.charge_observed(name, size, where=f"workspace side effect ({name!r})")
+            self.write_budget.ensure(
+                self.write_budget.occupancy(root), where="workspace side effects at block end"
+            )
         except WriteBudgetExceeded as exceeded:
             raise CandidateFormatError(
                 str(exceeded),
                 code="write_budget_exceeded",
                 got=text[:200],
-                expected=f"keep the block's total writes under {self.write_budget.limit} bytes",
+                expected=f"keep the block's workspace occupancy under {self.write_budget.limit} bytes",
             ) from exceeded
         #: 文件级溯源要指回一个**登记在册**的快照 —— 用本块有权引用的那些（自己读的 + 继承的）。
         #: 一个都没有时只登记文件、不编一个指向不了的引用（宁可不编，不造假）。
@@ -1553,17 +1557,22 @@ class LoopIOImpl(LoopIO):
             if content == "" and target.is_file() and target.stat().st_size > 0:
                 continue
             # ★ 总字节闸与写工具共用（`runtime` 传进来的是同一个 `WriteBudget`）。
-            try:
-                self.write_budget.charge(name, len(content.encode("utf-8")), where=f"answer files ({name!r})")
-            except WriteBudgetExceeded as exceeded:
-                raise CandidateFormatError(
-                    str(exceeded),
-                    code="write_budget_exceeded",
-                    got=text[:200],
-                    expected=f"keep the block's total writes under {self.write_budget.limit} bytes",
-                ) from exceeded
+            self.write_budget.note_write(name)
+            self.write_budget.note_bytes(len(content.encode("utf-8")))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+        # ★ 判定以**块末净占用**为准（写过的又删了 = 0；反复覆写不累计）。
+        try:
+            self.write_budget.ensure(
+                self.write_budget.occupancy(self.workspace), where="answer files at block end"
+            )
+        except WriteBudgetExceeded as exceeded:
+            raise CandidateFormatError(
+                str(exceeded),
+                code="write_budget_exceeded",
+                got=text[:200],
+                expected=f"keep the block's workspace occupancy under {self.write_budget.limit} bytes",
+            ) from exceeded
         self.written = tuple(sorted(payload))
 
     def _declare_model_failure(self, rejected: CandidateFormatError) -> None:
