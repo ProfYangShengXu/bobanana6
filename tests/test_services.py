@@ -1392,6 +1392,72 @@ def test_a_write_outside_the_write_region_is_refused_before_it_lands(tmp_path: P
     assert nested.write("deep/out.csv", "x\n")["path"] == "deep/out.csv"
 
 
+# --------------------------------------------------------------------------- #
+# ★★ 写区守卫收口：`may_write` 的三条语义 + fail-closed + 总字节闸
+# --------------------------------------------------------------------------- #
+
+
+def test_a_block_without_a_frozen_declaration_stays_fail_closed(tmp_path: Path) -> None:
+    """① `frozen_paths=None`（没声明别人的东西是哪些）⇒ 退回旧规则，写区之外必拒。
+
+    ★ fail-closed 本身要有人守：默认 `()` 的话，"不知道"会换来"随便写"。
+    """
+    workspace = BoundWorkspace(root=tmp_path / "ws", write_region=("out.csv",))  # frozen_paths=None
+    with pytest.raises(WriteOutsideRegion):
+        workspace.write("_tmp_scratch.json", "{}")
+    assert not (tmp_path / "ws" / "_tmp_scratch.json").exists()
+
+
+def test_a_declared_frozen_set_lets_the_block_write_its_own_scratch_file(tmp_path: Path) -> None:
+    """② 声明了 frozen 之后，写 `_tmp_scratch.json`（既非写区、也非别人的东西）⇒ 放行且落盘。"""
+    workspace = BoundWorkspace(
+        root=tmp_path / "ws",
+        write_region=("out.csv",),
+        frozen_paths=("other/out.csv", "input/seed.txt"),
+    )
+    workspace.write("_tmp_scratch.json", '{"x": 1}')
+    assert (tmp_path / "ws" / "_tmp_scratch.json").read_text(encoding="utf-8") == '{"x": 1}'
+
+
+def test_writing_another_blocks_deliverable_is_refused(tmp_path: Path) -> None:
+    """③ 写【别人的交付物】（在 frozen 里）⇒ 必拒，且一个字都不落盘。"""
+    workspace = BoundWorkspace(
+        root=tmp_path / "ws", write_region=("out.csv",), frozen_paths=("other/out.csv",)
+    )
+    with pytest.raises(WriteOutsideRegion):
+        workspace.write("other/out.csv", "stolen")
+    assert not (tmp_path / "ws" / "other").exists()
+
+
+def test_writing_a_declared_source_is_refused(tmp_path: Path) -> None:
+    """④ 写【任务声明的来源】（在 frozen 里）⇒ 必拒，载体不许被块改写。"""
+    workspace = BoundWorkspace(
+        root=tmp_path / "ws", write_region=("out.csv",), frozen_paths=("input/seed.txt",)
+    )
+    with pytest.raises(WriteOutsideRegion):
+        workspace.write("input/seed.txt", "tampered")
+    assert not (tmp_path / "ws" / "input").exists()
+
+
+def test_a_block_that_writes_past_its_total_byte_budget_is_refused(tmp_path: Path) -> None:
+    """★ 写区放宽之后顶替旧规则的那道闸：本块总写入量有上限，超了具名拒。
+
+    上限从外部传（`WriteBudget(limit=...)`），同一块的多次写累加。
+    """
+    from bobanana6.services.workspace import WriteBudget, WriteBudgetExceeded
+
+    budget = WriteBudget(limit=10)
+    workspace = BoundWorkspace(
+        root=tmp_path / "ws", write_region=("out.csv",), frozen_paths=(), write_budget=budget
+    )
+    workspace.write("out.csv", "12345")  # 5 bytes
+    workspace.write("out.csv", "67890", append=True)  # +5 = 10, exactly the limit
+    with pytest.raises(WriteBudgetExceeded) as error:
+        workspace.write("out.csv", "x", append=True)  # +1 would be 11
+    message = str(error.value)
+    assert "10 bytes" in message and "1 more" in message, message
+
+
 def test_a_patch_that_matches_more_than_once_is_refused_unless_replace_all(tmp_path: Path) -> None:
     """★ 局部改的契约：精确替换，非唯一匹配必须报错（否则改错地方没人知道）。"""
     from bobanana6.services import WorkspaceError

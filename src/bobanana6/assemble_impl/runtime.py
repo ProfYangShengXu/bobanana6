@@ -275,8 +275,20 @@ class BlockRuntime:
         #   only starts observing when the block first uses channel 2, so a block
         #   that never does pays nothing and its reading is unchanged.
         region = write_region(self.contract, subtask)
+        # ★★ `frozen_paths`：**谁都不许写**的路径 = 所有块的交付物 ∪ 任务声明的来源。
+        #   写区互斥改判据之后，它就是唯一挡住"撞别人东西"的那道门（见
+        #   `produce.py::_reconcile_workspace` 与 `services/workspace.py::_check_region`）。
+        #   用途：块可以写临时文件，但碰不了别人的交付物、也改不了声明的载体。
+        frozen = tuple(
+            sorted(
+                {deliverable.name for deliverable in self.contract.deliverables}
+                | {source.locator for source in self.contract.sources if source.locator}
+            )
+        )
         ledger = WorkspaceLedger(root=self.workspace, region=region)
-        workspace = BoundWorkspace(root=self.workspace, write_region=region, ledger=ledger)
+        workspace = BoundWorkspace(
+            root=self.workspace, write_region=region, frozen_paths=frozen, ledger=ledger
+        )
         tools = replace(tools, workspace=workspace)
         # ★ `#32`: 派活前按任务声明的形式规整载体（encoding / eol）—— 规整清单来自契约，动作只有一套。
         registry = build_registry(tools, self.store.read, forms=forms_for(self.contract.sources))
@@ -295,6 +307,10 @@ class BlockRuntime:
             workspace=self.workspace,
             observe_dir=self.observe_dir,
             write_region=region,
+            frozen_paths=frozen,
+            # ★ 写工具的账本与答案 `files` 的账本是**同一个**对象：一块的总写入量
+            #   要一起累加（见 `services/workspace.py::WriteBudget`）。
+            write_budget=workspace.write_budget,
             ledger=ledger,
             epoch=self.epoch,
             response_format=self.response_format,

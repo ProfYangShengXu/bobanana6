@@ -54,7 +54,13 @@ from ..core.model import (
 from ..core.ports import LLMClient, ToolSet
 from ..services.checks import SHELL_COMMAND_CHECK, BlockJudge
 from ..services.registry import ToolRegistry
-from ..services.workspace import WorkspaceLedger, relative_parts
+from ..services.workspace import (
+    WorkspaceLedger,
+    WriteBudget,
+    WriteBudgetExceeded,
+    may_write,
+    relative_parts,
+)
 from .answer_contract import (
     ANSWER_CONTRACT,
     candidate_schema,
@@ -1156,6 +1162,19 @@ class LoopIOImpl(LoopIO):
     workspace: Path | None = None
     #: ★ 这一块能写哪些**工作区相对路径**（由 partition 决定，写区互斥的执行点）。
     write_region: tuple[str, ...] = ()
+    #: ★★ 谁都不许写的路径：**别的块的交付物 + 任务声明的来源**。
+    #: 为什么需要它（实测 `handoff` 轮）：写区原来只等于"我自己那份交付物"，
+    #: 于是块**连临时文件都建不了** —— T-02 要把 631KB 的中间产物先落盘，
+    #: 写 `_tmp_answer.json` 被拒（`changed [...], which is outside its write region`），
+    #: 最后只能塞一小撮样品进 `rows` 被判"不全"。
+    #: 写区互斥本来要防的是"**别撞别人的东西**"，不是"**只许碰自己那一份**"。
+    #: ★★ `None` = **没有声明"别人的东西是哪些"** ⇒ 退回旧规则（不在写区里就拒）。
+    #: 默认必须是 None（fail-closed）：一个不知道别人有什么的调用方，不该因此获得"随便写"。
+    frozen_paths: tuple[str, ...] | None = None
+    #: ★ 本块的总写入字节闸（默认 64 MiB，见 `services/workspace.py::WriteBudget`）。
+    #: `runtime` 把 `BoundWorkspace` 的那一份同时交给它 —— 写工具的、答案 `files` 的、
+    #: 以及命令副作用的字节，记在同一本账上。
+    write_budget: WriteBudget = field(default_factory=WriteBudget)
     #: 这一块实际落盘了哪些路径（证据；空 = 没交代码类产物）。
     written: tuple[str, ...] = ()
     #: ★ `#43`: 继承守卫拒收时把"池子 + 交上来的行"落盘到这里（`None` = 不观测，零开销）。
@@ -1412,18 +1431,36 @@ class LoopIOImpl(LoopIO):
         if not changed:
             return candidate
 
-        allowed = {"/".join(relative_parts(name)) for name in self.write_region}
-        outside = [name for name in changed if name not in allowed]
+        # ★★ 只拒"撞到别人的东西"：别人的交付物 + 任务声明的来源。
+        #   别的一律放行 —— 块要能建临时文件（见 `frozen_paths` 的注记）。
+        #   ★ 判定走 `services/workspace.py::may_write`：与 `files.write` / 答案 `files`
+        #     是**同一个函数**，否则换个工具就换个规矩。
+        outside = [name for name in changed if not may_write(name, self.write_region, self.frozen_paths)]
         if outside:
+            allowed = sorted({"/".join(relative_parts(name)) for name in self.write_region})
             raise CandidateFormatError(
                 f"block {self.subtask.id!r} changed {outside!r}, which is outside its write region "
-                f"{sorted(allowed)!r}",
+                f"{allowed!r}",
                 code="write_outside_region",
                 got=text[:200],
-                expected=f"write only inside {sorted(allowed)!r}",
+                expected=f"write only inside {allowed!r}",
             )
 
         root = Path(self.workspace)
+        # ★ 总字节闸：命令副作用（`shell.run` / `code.run`）落下的文件在这里一次性计费；
+        #   写工具/答案已经按整份内容计过的路径不重复计（见 `WriteBudget.charge`）。
+        try:
+            for name in changed:
+                target = root / name
+                size = target.stat().st_size if target.is_file() else 0
+                self.write_budget.charge_observed(name, size, where=f"workspace side effect ({name!r})")
+        except WriteBudgetExceeded as exceeded:
+            raise CandidateFormatError(
+                str(exceeded),
+                code="write_budget_exceeded",
+                got=text[:200],
+                expected=f"keep the block's total writes under {self.write_budget.limit} bytes",
+            ) from exceeded
         #: 文件级溯源要指回一个**登记在册**的快照 —— 用本块有权引用的那些（自己读的 + 继承的）。
         #: 一个都没有时只登记文件、不编一个指向不了的引用（宁可不编，不造假）。
         authorized = tuple(self.authorized_sources())
@@ -1490,15 +1527,16 @@ class LoopIOImpl(LoopIO):
                 expected="run with --workspace <dir> so produced files have somewhere to land",
             )
         payload = _file_payloads(json.loads(text), _reject_plain)
-        allowed = set(self.write_region)
+        # ★ 同一套判定（`services/workspace.py::may_write`），`frozen_paths=None` 时 fail-closed。
         for name, content in payload.items():
-            if allowed and name not in allowed:
+            if not may_write(name, self.write_region, self.frozen_paths):
+                allowed = sorted({"/".join(relative_parts(entry)) for entry in self.write_region})
                 raise CandidateFormatError(
                     f"block {self.subtask.id!r} may not write {name!r}: "
-                    f"its write region is {sorted(allowed)!r}",
+                    f"its write region is {allowed!r}",
                     code="write_outside_region",
                     got=text[:200],
-                    expected=f"write only inside {sorted(allowed)!r}",
+                    expected=f"write only inside {allowed!r}",
                 )
             target = self.workspace / name
             # ★★ 空内容 = 「这份文件我自己已经写进工作区了」——由 `_reconcile_workspace`
@@ -1509,6 +1547,16 @@ class LoopIOImpl(LoopIO):
             #   塞不进一次回答），壳照写不误。
             if content == "" and target.is_file() and target.stat().st_size > 0:
                 continue
+            # ★ 总字节闸与写工具共用（`runtime` 传进来的是同一个 `WriteBudget`）。
+            try:
+                self.write_budget.charge(name, len(content.encode("utf-8")), where=f"answer files ({name!r})")
+            except WriteBudgetExceeded as exceeded:
+                raise CandidateFormatError(
+                    str(exceeded),
+                    code="write_budget_exceeded",
+                    got=text[:200],
+                    expected=f"keep the block's total writes under {self.write_budget.limit} bytes",
+                ) from exceeded
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         self.written = tuple(sorted(payload))

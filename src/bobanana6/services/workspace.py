@@ -38,12 +38,20 @@ __all__ = [
     "WorkspaceError",
     "WorkspaceLedger",
     "WorkspaceUnavailable",
+    "WriteBudget",
+    "WriteBudgetExceeded",
     "WriteOutsideRegion",
+    "may_write",
     "relative_parts",
 ]
 
 #: 单个窗口/单次写入的字节上限（与 `produce.MAX_CODE_BYTES` 同一量级：越过它就该分次写）。
 MAX_WRITE_BYTES = 200_000
+#: ★ 一块能往工作区写的**总字节上限**（默认 64 MiB）。
+#: 写区规则从"不在写区里就拒"改成"只拒撞到别人的东西"之后，旧规则顺带防着的
+#: "块乱写堆满盘"就没人管了 —— 这个常量就是那道替补闸。默认值只在这里写一次，
+#: 上限通过 `WriteBudget(limit=...)` 从外部传（测试给一个小上限不必改函数体）。
+_WORKSPACE_WRITE_BUDGET_BYTES = 64 * 1024 * 1024
 #: 一条命令默认/最长跑多久（秒）。超时是**具名**结果，不是静默截断。
 DEFAULT_TIMEOUT_S = 60.0
 MAX_TIMEOUT_S = 600.0
@@ -74,6 +82,10 @@ class WriteOutsideRegion(WorkspaceError):
     """The path is not in this block's write region (or the block has none)."""
 
 
+class WriteBudgetExceeded(WorkspaceError):
+    """This block has written more than its total workspace write budget."""
+
+
 def relative_parts(path: str) -> tuple[str, ...]:
     """Validate a caller-supplied path and return its parts (relative only)."""
     if not isinstance(path, str) or not path.strip():
@@ -89,6 +101,66 @@ def relative_parts(path: str) -> tuple[str, ...]:
     return parts
 
 
+def _normalized(path: str) -> str:
+    return "/".join(relative_parts(path))
+
+
+def may_write(path: str, write_region: tuple[str, ...], frozen_paths: tuple[str, ...] | None) -> bool:
+    """这块能不能写这个路径。★ 三处调用点必须走同一个判定，否则换个工具就换个规矩。
+
+    ``write_region`` 是本块 partition 声明的那几个路径（自己那份，永远可以写）；
+    ``frozen_paths`` 是"谁都不许写"的路径（别人的交付物 + 任务声明的来源）。
+    ``frozen_paths is None`` = 调用方**没有声明**别人的东西是哪些 ⇒ 退回旧规则，
+    只有写区内的路径可以写（fail-closed：不知道就别放开）。
+    其余一律放行 —— 那是块自己的草稿纸。
+    """
+    normalized = _normalized(path)
+    allowed = {_normalized(name) for name in write_region}
+    if normalized in allowed:
+        return True
+    if frozen_paths is None:
+        return False
+    return normalized not in {_normalized(name) for name in frozen_paths}
+
+
+@dataclass
+class WriteBudget:
+    """本块已写字节的累计器 —— 一道闸，多个写入口共用（写工具 / 答案里的 files / 命令副作用）。
+
+    ``limit`` 默认取 `_WORKSPACE_WRITE_BUDGET_BYTES`；要从外部改上限就传
+    ``WriteBudget(limit=...)``，函数体里不写死数字。同一块的多次写在这里累加。
+    """
+
+    limit: int = _WORKSPACE_WRITE_BUDGET_BYTES
+    used: int = 0
+    #: 已经按整份内容计过费的路径：块结束时的副作用对账不再对它重复计费。
+    _charged: set[str] = field(default_factory=set)
+
+    def spend(self, amount: int, *, where: str) -> None:
+        """Charge ``amount`` bytes, refusing by name once the limit is crossed."""
+        if amount <= 0:
+            return
+        if self.used + amount > self.limit:
+            raise WriteBudgetExceeded(
+                f"{where}: this block has already written {self.used} bytes; the limit is "
+                f"{self.limit} bytes, and this write adds {amount} more"
+            )
+        self.used += amount
+
+    def charge(self, path: str, amount: int, *, where: str) -> None:
+        """Charge a shell-driven write (``files.write`` / ``files.patch`` / answer files)."""
+        self.spend(amount, where=where)
+        self._charged.add(_normalized(path))
+
+    def charge_observed(self, path: str, amount: int, *, where: str) -> None:
+        """Charge a file the ledger saw change, once (skip paths the shell already charged)."""
+        normalized = _normalized(path)
+        if normalized in self._charged:
+            return
+        self.spend(amount, where=where)
+        self._charged.add(normalized)
+
+
 @dataclass
 class BoundWorkspace:
     """The block's working area, bound to one block and one write region.
@@ -100,7 +172,15 @@ class BoundWorkspace:
 
     root: Path | None
     write_region: tuple[str, ...] = ()
+    #: ★★ 谁都不许写的路径：别的块的交付物 + 任务声明的来源（见 `_check_region`）。
+    #: **`None` = 没有声明 ⇒ 退回旧规则（不在写区里就拒）** —— 默认必须 fail-closed：
+    #: 一个不知道"别人的东西是哪些"的调用方，不该因此获得"随便写"的权限。
+    #: `runtime` 会显式传入它，那才是放宽的唯一入口。
+    frozen_paths: tuple[str, ...] | None = None
     ledger: WorkspaceLedger | None = None
+    #: ★ 本块的总写入字节闸（见 `WriteBudget`）。默认一块一份；`runtime` 会把这个对象
+    #: 同时交给答案 `files` 通道，于是"写工具写的 + 答案写写的"在同一本账上累加。
+    write_budget: WriteBudget = field(default_factory=WriteBudget)
     #: Long-lived helpers owned by this block (the code session, background jobs).
     _code_session: Any = None
     _background: list[subprocess.Popen[bytes]] = field(default_factory=list)
@@ -126,14 +206,20 @@ class BoundWorkspace:
         return candidate
 
     def _check_region(self, path: str) -> None:
-        """★ 写区互斥的执行点：不在本块 partition 里的路径不许写（空区 = 没有权限）。"""
-        parts = relative_parts(path)
-        normalized = "/".join(parts)
-        allowed = {"/".join(relative_parts(name)) for name in self.write_region}
-        if normalized not in allowed:
-            raise WriteOutsideRegion(
-                f"block may not write {normalized!r}: its write region is {sorted(allowed)!r}"
-            )
+        """★ 写区互斥的执行点：**撞到别人的东西**才拒（空区 ≠ 没有权限）。
+
+        ★★ 原来这里是"不在本块 partition 里的路径一律不许写" —— 太严：块连临时文件
+        都建不了（实测 `handoff` 轮 T-02 写 `_tmp_answer.json` 被拒，只能塞一小撮样品
+        进 `rows` 被判"不全"）。写区互斥要防的是"别撞别人的交付物/来源"，
+        **不是"只许碰自己那一份"**。规则与 `produce.py::_reconcile_workspace` /
+        `_persist_files` 一致 —— 三处不一样的话，换个工具就换个规矩。
+        """
+        if may_write(path, self.write_region, self.frozen_paths):
+            return
+        allowed = sorted({_normalized(name) for name in self.write_region})
+        raise WriteOutsideRegion(
+            f"block may not write {_normalized(path)!r}: its write region is {allowed!r}"
+        )
 
     def _note(self) -> None:
         if self.ledger is not None:
@@ -152,12 +238,15 @@ class BoundWorkspace:
         """
         if not isinstance(content, str):
             raise WorkspaceError(f"content must be text, got {type(content).__name__}")
-        if len(content.encode("utf-8")) > MAX_WRITE_BYTES:
+        size = len(content.encode("utf-8"))
+        if size > MAX_WRITE_BYTES:
             raise WorkspaceError(
-                f"content is {len(content.encode('utf-8'))} bytes, over the {MAX_WRITE_BYTES}-byte "
+                f"content is {size} bytes, over the {MAX_WRITE_BYTES}-byte "
                 "limit for one call -- write the file in several calls (append=true)"
             )
         self._check_region(path)
+        # ★ 总字节闸：同一块的多次写在这里累加（写区放宽之后，旧规则的"防堆满盘"靠它）。
+        self.write_budget.charge(path, size, where=f"files.write({path!r})")
         self._note()
         root = self._require_root()
         target = self._inside(root, path)
@@ -188,8 +277,13 @@ class BoundWorkspace:
                 f"cannot patch {path!r}: old_string appears {occurrences} times; "
                 "give a longer unique old_string or set replace_all=true"
             )
+        replacements = occurrences if replace_all else 1
+        # ★ 总字节闸只记"本块自己加进去的那部分"（缩水不退还，涨出来的才算）。
+        delta = replacements * (len(new_string.encode("utf-8")) - len(old_string.encode("utf-8")))
+        if delta > 0:
+            self.write_budget.charge(path, delta, where=f"files.patch({path!r})")
         target.write_text(text.replace(old_string, new_string), encoding="utf-8")
-        return {**_written(root, target), "replacements": occurrences if replace_all else 1}
+        return {**_written(root, target), "replacements": replacements}
 
     def run(
         self,
