@@ -213,10 +213,12 @@ def test_the_chain_recovers_from_prose_and_from_a_refused_schema(
     assert "exit      : passed" in printed.out
 
     sent = _Service.requests
-    # turn 1 读来源（read-before-produce），turn 2 free-form 被要求形状、
-    # 服务端拒绝，turn 3 再 free-form，turn 4 带结构化修正交付。
-    # ★ 协商模式 `False → True → False` 原样保留在头部：被提供一次，然后记住。
-    assert [("response_format" in body) for body in sent] == [False, True, False, False]
+    # turn 1 读来源（read-before-produce）⇒ free；turn 2 它还在干活（上一轮有工具调用）
+    # ⇒ 也 free；turn 3 free-form 被要求形状、服务端拒绝；turn 4 再 free-form 交付修正。
+    # ★ 协商模式 `False → True → False` 原样保留在尾部：被提供一次，然后记住。
+    # ★★ 头部多出的那次 False 就是本次改动：**schema 只在它不再发工具调用的那一轮才挂**
+    #   —— 挂上就禁掉工具调用（实测 110 次锁定请求 0 次调用），早挂 = 它再也读不到数据。
+    assert [("response_format" in body) for body in sent] == [False, False, True, False]
     # ① the last call carries the structured fix, and the transcript stays clean
     last = sent[-1]["messages"]
     feedback = [m for m in last if isinstance(m.get("content"), str) and "required shape" in m["content"]]
@@ -259,5 +261,8 @@ def test_a_service_without_structured_output_is_asked_only_once(
 
     # ★ Within one run it is offered once and then remembered; a fresh run is a
     #   fresh negotiation (the flag lives in the run's assembly, not in a module global).
-    #   每一跑的第一个 False 是 read-before-produce 的读来源调用。
-    assert per_run == [[False, True, False, False], [False, True, False, False]]
+    #   ★★ 前两个 False 是"它还在干活"的轮次：第 1 次是 read-before-produce 的读来源
+    #   调用，第 2 次是紧接着的工具轮 —— schema 只在【它不再发工具调用】的那一轮才挂
+    #   （挂上就禁掉工具调用，早挂 = 它再也读不了数据，实测 110 次锁定请求 0 次调用）。
+    #   那个 True 是答题轮，末尾的 False 是它答题后又去调了工具。
+    assert per_run == [[False, False, True, False], [False, False, True, False]]

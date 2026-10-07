@@ -1112,6 +1112,10 @@ class LoopIOImpl(LoopIO):
     #: ★ 只在【被授权读来源】的块上生效（`authorized_sources` 非空）——
     #:   纯合并块本来就读不到来源，不该被这条拦住。
     read_sources: bool = False
+    #: ★★ 上一轮模型是否发了工具调用 —— 决定下一轮要不要锁成答案形状。
+    #: 「还在调工具」= 还在干活；「没调」= 在答题。锁 schema 会禁掉工具调用，
+    #: 所以只能在它确实在答题的那一轮锁（见 `wants_structured_output`）。
+    last_had_tool_calls: bool = False
     #: ★ `#33`: 这一跑的工作区（代码落盘到这里）。`None` = 这个部署没有工作区 ——
     #: 那就**不许**交代码类产物（具名拒绝，不静默丢）。
     workspace: Path | None = None
@@ -1560,6 +1564,12 @@ class LoopIOImpl(LoopIO):
         """
         if not self.response_format.enabled or self.calls <= 1:
             return False
+        # ★★ 上一轮它还在调工具 ⇒ **它还在干活**，这一轮别锁 —— 锁了它就再也调不动，
+        #   于是"读了一份规格"就被当成"读完了"。实测（`addrgate`）：它 turn1 读了
+        #   `instruction`（5KB 规格），schema 立刻锁上，**再也读不到 `infotable`
+        #   （261KB 数据）**。⇒ 判据必须是"它在干活还是在答题"，不是"它读过没有"。
+        if self.last_had_tool_calls:
+            return False
         return not (self._must_read_sources() and not self.read_sources)
 
     def _complete(self, state: LoopState, max_tokens: int) -> ModelResponse:
@@ -1573,15 +1583,21 @@ class LoopIOImpl(LoopIO):
         prompt = self.prompt(state)
         schemas = tool_schemas(self.toolset)
         if not self.wants_structured_output():
-            return self.client.complete(prompt, schemas, max_tokens)
-        try:
-            return self.client.complete(prompt, schemas, max_tokens, response_format=candidate_response_format())
-        except Exception as exc:
-            if not rejects_response_format(exc):
-                raise
-            self.response_format.enabled = False
-            self.response_format.refused = True
-            return self.client.complete(prompt, schemas, max_tokens)
+            response = self.client.complete(prompt, schemas, max_tokens)
+        else:
+            try:
+                response = self.client.complete(
+                    prompt, schemas, max_tokens, response_format=candidate_response_format()
+                )
+            except Exception as exc:
+                if not rejects_response_format(exc):
+                    raise
+                self.response_format.enabled = False
+                self.response_format.refused = True
+                response = self.client.complete(prompt, schemas, max_tokens)
+        # ★★ 记下"这一轮它在干活还是在答题"：下一轮要不要锁 schema 由它决定。
+        self.last_had_tool_calls = bool(getattr(response, "tool_calls", ()) or ())
+        return response
 
     def execute(self, calls: tuple[ToolCall, ...]) -> tuple[ToolResult, ...]:
         results = self.registry.execute(calls)

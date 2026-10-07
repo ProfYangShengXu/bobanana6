@@ -1662,8 +1662,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "Z08-rejection-ships-without-a-shape",
         "assemble_impl/produce.py",
-        "            self.response_format.enabled = False\n            self.response_format.refused = True",
-        "            self.response_format.refused = True",
+        "                self.response_format.enabled = False\n                self.response_format.refused = True",
+        "                self.response_format.refused = True",
         "tests/test_services.py::test_a_refusal_is_learned_once_for_the_whole_run",
         "the refusal is remembered but not acted on, so every call pays the probe again",
     ),
