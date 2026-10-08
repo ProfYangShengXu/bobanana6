@@ -352,7 +352,7 @@ class BoundWorkspace:
                 command, shell=True, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT
             )
             self._background.append(process)
-            return {"background": True, "pid": process.pid, "cwd": _relative(root, cwd), "command": command}
+            return {"background": True, "pid": process.pid, "cwd": str(cwd), "command": command}
         completed = subprocess.run(
             command,
             shell=True,
@@ -365,7 +365,9 @@ class BoundWorkspace:
         return {
             "background": False,
             "exit_code": completed.returncode,
-            "cwd": _relative(root, cwd),
+            # ★★ 绝对路径，不是 `"."`（实测那一条见 `_DRIVER` 上方注记）：
+            #   每一轮返回都给模型一次校准机会 —— "我现在站在哪里"。不改任何判据。
+            "cwd": str(cwd),
             "stdout": (completed.stdout or "")[:4000],
             "stderr": (completed.stderr or "")[:4000],
             "truncated": len(completed.stdout or "") > 4000 or len(completed.stderr or "") > 4000,
@@ -387,7 +389,13 @@ class BoundWorkspace:
             self._code_session = None
         if self._code_session is None or not self._code_session.alive:
             self._code_session = _CodeSession(root)
-        return self._code_session.execute(code)
+        # ★★ `code.run` 的返回也带上**绝对** cwd：以前它一个 `cwd` 字段都没有，
+        #   模型跑完代码看不到自己站在哪 —— 实测（`qwen4b` 第 34 轮）它正是在
+        #   连续 27 轮 `code.run` 之后自己 `mkdir -p <repo>/…/output` 猜了一个输出目录。
+        #   与 `run()` 同一个真值来源（`_require_root()` 已经 resolve 过），不改任何判据。
+        answer = dict(self._code_session.execute(code))
+        answer["cwd"] = str(root)
+        return answer
 
     # -- lifecycle ---------------------------------------------------------- #
 

@@ -1536,6 +1536,11 @@ class LoopIOImpl(LoopIO):
         #   恒定的那些进 system 的**恒定前缀**，brief 里**不再出现**（不许两边都放）。
         constant_entries = self._constant_brief_entries()
         brief: dict[str, Any] = {"subtask": dict(block), "authorized_sources": authorized}
+        # ★★ 写区（**按块变** ⇒ 进 brief，不进恒定前缀）：本块被授权写哪儿 + 谁都不许写哪儿。
+        #   以前 brief 里只有 `subtask.output` 一个相对路径，没有任何一句说"以谁为基准"。
+        write_scope = self._write_region_entry()
+        if write_scope:
+            brief["write_region"] = write_scope
         # ★★★ 名字**和地址**一起给（见 `_source_paths` 的注记）：只给名字的后果是
         #   块分不清"来源清单"和"来源内容"，而取数入口只有一次机会。
         #   `authorized_sources` 保住溯源（判定器按 ref 查表），`source_files`
@@ -1664,6 +1669,10 @@ class LoopIOImpl(LoopIO):
             "source_files": lambda _subtask: self._source_paths(),
             "what_this_task_is": lambda _subtask: contract.goal.strip(),
             "task": lambda subtask: task_nature(contract, self.judge.bundle, subtask),
+            # ★★ 工作区根：**整跑级**的值，对每个块都取得到、且同值 ⇒ 全 DAG 恒定。
+            #   它只是"可能恒定"的候选之一；真正决定进不进 system 的是下面那次逐块比较
+            #   （§4 三条 fail-closed 一条都不少）。空工作区返回 `""` ⇒ 空值不算恒定。
+            "workspace": lambda _subtask: self._workspace_value(),
             # ↓ 三个都绑在本块的 toolset / 上游件上：对兄弟块拿不到 ⇒ 永不恒定
             "authorized_sources": lambda _subtask: unavailable,
             "upstream": lambda _subtask: unavailable,
@@ -1702,7 +1711,14 @@ class LoopIOImpl(LoopIO):
         `what_this_task_is` 72B 对所有块相同，`subtask` 只 210B）。
         """
         contract = self.toolset.task.contract()
-        static = {key: value for key, value in sorted(constant.items()) if key != "what_this_task_is"}
+        # ★★ `workspace` 也走恒定判据，但**不进这段 JSON**：它的渲染是下面那段可读散文
+        #   （`_workspace_line`），不是 STATIC REFERENCE 里一行转义的 JSON —— 4B 模型
+        #   读散文比读转义 JSON 省力。判据一样跑，只是渲染方式不同。
+        static = {
+            key: value
+            for key, value in sorted(constant.items())
+            if key not in ("what_this_task_is", "workspace")
+        }
         parts = [
             "You are a focused subagent working on a specific delegated task.",
             "",
@@ -1716,7 +1732,12 @@ class LoopIOImpl(LoopIO):
                 "repeated in the per-block brief below):",
                 json.dumps(static, ensure_ascii=False, sort_keys=True, default=str),
             ]
-        parts.append(self._workspace_line())
+        # ★★ 工作区行**只在判据说它全 DAG 恒定时**才出现 —— 这不是"手工塞进 system"：
+        #   `constant` 是 `_constant_brief_entries()` 按 §4 三条 fail-closed 算出来的。
+        #   拿不到全 DAG（`dag_subtasks` 为空 / 不含本块）⇒ 判据一个字都不动 ⇒ 这里也不加
+        #   （宁可不给地址，也不让前缀随块变 —— 那会从第 0 个 token 起破坏缓存）。
+        if "workspace" in constant:
+            parts.append(self._workspace_line())
         return "\n".join(parts)
 
     # -- ② 交接件：cleanliness（干净 / 污染） ------------------------------ #
@@ -2370,18 +2391,104 @@ class LoopIOImpl(LoopIO):
             )
         return brief
 
+    def _write_region_entry(self) -> dict[str, Any]:
+        """★ 本块的**写区**（相对工作目录）—— 按块变，所以进 brief（不进恒定前缀）。
+
+        实测（`qwen4b` 第 34 轮）：模型把产物写到 `<repo>/13f-crowding/output/`，
+        而判定器读的是 `<workspace>/output/` —— brief 里只有一个 `subtask.output`
+        相对路径，**没有一句话说"以谁为基准"、"哪些能写、哪些碰不得"**。
+
+        三个子键与 `services/workspace.py::may_write` **同源、同优先级**（写区优先于冻结）：
+          · `you_may_write`：`write_region(contract, subtask)` 现算的路径，本块自己的产物；
+          · `never_write`：`frozen_paths`（所有块的交付物 ∪ 任务声明的来源）里**不在**写区中的；
+          · `rule`：口径（相对工作目录）+ 边界（产物必须落在写区里、不许写到工作目录之外）。
+
+        ★ 这是**告知**，不是判据：拦截仍然只在 `may_write` / `_reconcile_workspace` 那一处。
+        ★★ 文案必须照**执行语义**写，不能说教一条比 `may_write` 更严的规矩：
+          `may_write` 的真实规则是「写区永远可写 + `frozen_paths` 之外也可以写（草稿纸）」，
+          只有 `frozen_paths is None` 时才退回「不在写区就拒」。写成"写区之外一律不许写"
+          会与执行层相反 —— 那正是 `AGENTS.md` 说的"harness 说的和做的不一致"；
+          所以下面按 `frozen_paths` 的两种取值分开渲染，`you_may_write` 为空时也据实说明。
+        """
+        if self.workspace is None:
+            return {}
+        # ★ 空串不是路径：`partition="deliverable:"`（冒号后为空）会让 `write_region` 返回
+        #   `("",)`。那是一个**已经坏掉的声明**，但"告知"里不该把它当成一条"可以写的路径"
+        #   发出去 —— 过滤掉，不给模型制造一个幻觉地址（这条只影响文案，不动 `may_write`）。
+        allowed = [str(name) for name in self.write_region if str(name)]
+        allowed_set = set(allowed)
+        # ★ 与 `may_write` 的优先级一致：写区优先 ⇒ 写区里的路径不再列进"碰不得"。
+        #   否则同一句话里"能写 X"和"不许写 X"并存（自己改自己那份交付物是合法的）。
+        frozen = [str(name) for name in (self.frozen_paths or ()) if str(name) not in allowed_set]
+        if self.frozen_paths is None:
+            # `may_write(..., frozen_paths=None)`：不在写区就拒 —— 只有写区放行。
+            outside = "`you_may_write` 之外一律不许写（调用方没有声明别人的东西是哪些）。"
+            empty = "（`you_may_write` 为空 = 这一块不许写任何文件：产物写在答案 JSON 里。）"
+        else:
+            # `may_write(..., frozen_paths=…)`：写区永远可写 + frozen 之外也可以写（草稿纸）。
+            outside = (
+                "`never_write`（别人的交付物、任务声明的来源）一个字节都不许改；"
+                "工作目录里 `never_write` 之外的其它路径可以写（临时文件）。"
+            )
+            empty = (
+                "（`you_may_write` 为空 = 这一块没有文件形式的交付区："
+                "把产物写在答案 JSON 里，别去猜一个路径。）"
+            )
+        return {
+            "you_may_write": allowed,
+            "never_write": frozen,
+            "rule": (
+                "以上路径都**相对工作目录**（见 system 里的 `WORKSPACE PATH`，那里给的是绝对路径）。"
+                "`you_may_write` 里的路径**永远可以写**；"
+                + outside
+                + "★ 你的**产物必须落在 `you_may_write` 里** —— 不要写到工作目录【之外】："
+                "判定器只读工作目录，写到别处等于没交。"
+                "`code.run` / `shell.run` 能写到任何地方：用它们时一律用相对路径，"
+                "或用 system 里那个前缀拼出来的绝对路径。"
+                + (empty if not allowed else "")
+            ),
+        }
+
+    def _workspace_value(self) -> str:
+        """工作区根的**绝对路径** —— `_brief_candidates` 里 `workspace` 那个值。
+
+        它是整跑级的（每个块同一个值），所以能过 §4 的全 DAG 比较；没有工作区 ⇒ **空串**
+        （空值不算恒定，见 `_constant_brief_entries` 的第一条 fail-closed）。
+        """
+        if self.workspace is None:
+            return ""
+        return str(Path(self.workspace).resolve())
+
     def _workspace_line(self) -> str:
         """抄 Hermes 子代理骨架里那句 `WORKSPACE PATH:`（bb6 一直没实现）。
 
         没有它，块手上有 `code.run` / `shell.run` 却不知道 cwd 在哪、素材就在脚下。
         有了它，两条路各干各的：**地址用来导航与取数，名字用来溯源**。
+
+        ★★ 实测追加（`qwen4b` 第 34 轮：43 次调用、零产物）：**只丢一个路径字符串不够。**
+          那一轮 system 里本来就有这一行，模型仍然照题面里写死的 `/app/data/` 走，
+          又自己 `find` 出题目原目录的绝对路径，最后 `mkdir -p <repo>/…/output`
+          把产物写到了**工作区之外** —— 判定器只读工作区，于是无限重试。
+          ⇒ 补齐三件事（都是【告知】，不是新判据）：
+            ① 路径本身（**绝对**，由 `_workspace_value()` 现算）；
+            ② **口径**：brief 里的相对路径以它为基准，不是"相对某个不知道的地方"；
+            ③ **边界**：不许自己推断/猜测绝对路径；题面里的其它绝对路径属于原环境。
+
+        ★ 它是**全 DAG 恒定**的（工作区根是整跑级的），所以放在 system 的恒定前缀里
+          （`_system_prefix`），不占每块 brief 的预算，也不破坏前缀缓存。
+          **出现与否由 §4 的恒定判据决定**（`"workspace" in constant`），不是无条件直插。
         """
-        if self.workspace is None:
+        root = self._workspace_value()
+        if not root:
             return ""
         return (
             "\n\nWORKSPACE PATH:\n"
-            + str(self.workspace)
-            + "\nYour tools run inside this directory. The task's own material is already "
+            + root
+            + "\n★ 这就是你的工作目录。**brief 里所有相对路径都以它为基准** —— "
+            "`output/xxx.csv` 指的就是 `" + root + "/output/xxx.csv`。\n"
+            "★ 不许自己推断或猜测绝对路径：需要绝对路径时，一律拿上面这个前缀去拼。"
+            "题面或说明里出现的其它绝对路径（例如 `/app/...`）属于原环境，在这里不成立。\n"
+            "Your tools run inside this directory. The task's own material is already "
             "here -- look under `input/` (use `code.run` / `shell.run` to list and read it); "
             "`output/` is where deliverables land.\n"
             "Look around before concluding that anything is missing.\n"
