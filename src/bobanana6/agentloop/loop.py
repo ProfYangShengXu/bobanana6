@@ -304,15 +304,15 @@ def common_prefix_length(left: Sequence[Mapping[str, Any]], right: Sequence[Mapp
 
 @dataclass(frozen=True)
 class LoopConfig:
-    max_turns: int = 6
+    max_turns: int = 6  # blame: fail-closed — 省略即给一个**有上限**的回合数，方向保守
     #: ★ An uncapped restart refunds the iteration budget forever.
-    max_restarts: int = 2
-    required_scope: str = "full"
-    max_retries: int = 2
-    max_reflections: int = 1
-    taint_threshold: int = 3
+    max_restarts: int = 2  # blame: fail-closed — 省略即上限 2（注释已写明"无上限的重启会永久退款预算"）
+    required_scope: str = "full"  # blame: fail-closed — 省略即要求**最严**的验证范围
+    max_retries: int = 2  # blame: fail-closed — 省略即上限 2
+    max_reflections: int = 1  # blame: fail-closed — 省略即上限 1
+    taint_threshold: int = 3  # blame: fail-closed — 省略即 3 次就 taint
     #: False when the block cannot be independently verified (the split is wrong).
-    block_verifiable: bool = True
+    block_verifiable: bool = True  # blame: fail-open — 省略即假定"这个块可判定"；真正的不可判定块会被当成"验证失败"而不是"没法验"
 
     def __post_init__(self) -> None:
         if self.max_turns < 1:

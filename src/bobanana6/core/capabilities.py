@@ -87,7 +87,7 @@ class MatchIssue(StrEnum):
 
 @dataclass(frozen=True)
 class WorkerLimits:
-    max_output: int = 0
+    max_output: int = 0  # blame: fail-open — ★该改，但受"不动 core/"约束（§五①）：0 是"无限"还是"无容量"没钉死，省略时按哪一种都说得通
     concurrency: int = 1
     context: int = 0
 

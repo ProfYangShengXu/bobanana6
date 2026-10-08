@@ -981,3 +981,22 @@ def test_the_layered_gate_schedules_every_registered_checker() -> None:
         "the delivery layer must not be selected by checker kind: it is the five whole-run "
         "judgments in core/, not a per-kind dispatch"
     )
+
+
+def test_the_default_scanner_is_pure_ast() -> None:
+    """★ 补充规格 §五⑤ + §一①：默认值扫描器**不许 import 被测模块**。
+
+    理由不是洁癖：有些默认值恰恰是**在 import 期**生效的（模块级常量、字段默认值），
+    "扫源码"一旦变成"执行源码"，扫出来的东西就不再是源码的事实。
+    """
+    path = REPO / "tools" / "default_audit.py"
+    assert path.is_file(), f"the default scanner is missing: {path}"
+    source = path.read_text(encoding="utf-8")
+    offenders = [
+        module
+        for module in resolved_imports("tools.default_audit", source)
+        if module.startswith("bobanana6.")
+    ]
+    assert offenders == [], f"the scanner imports the modules it scans: {offenders}"
+    # 反向：它确实 import 了 ast（不然"纯 ast"是空话）
+    assert "ast" in resolved_imports("tools.default_audit", source)

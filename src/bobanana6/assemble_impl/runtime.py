@@ -234,7 +234,7 @@ class BlockRuntime:
     #: Replaced by the runner with the per-run context (snapshots, injected
     #: ``now``, limits, custom checks) as soon as they exist.
     context: CheckContext = field(default_factory=CheckContext)
-    budget: Budget = field(default_factory=lambda: Budget(max_calls=64, max_wall_s=3600, max_output=8192))
+    budget: Budget = field(default_factory=lambda: Budget(max_calls=64, max_wall_s=3600, max_output=8192))  # blame: fail-closed — 省略即给一组**有上限**的预算（64 调用 / 3600s / 8192 输出），方向保守；真正的风险是它被复制成第二份
     event_log: EventLog = field(default_factory=EventLog)
     checkpoints: PerWorkerCheckpointStore = field(default_factory=PerWorkerCheckpointStore)
     route_table: RouteTable = field(default_factory=lambda: RouteTable(routes={}))
@@ -245,7 +245,8 @@ class BlockRuntime:
     compression: Any = None
     summarize: Callable[[tuple[Mapping[str, Any], ...]], str] | None = None
     #: ``subtask -> newest edit time of its outputs`` (0.0 when nothing is on disk).
-    edit_clock: Callable[[Subtask], float] = lambda _subtask: 0.0
+    # blame: fail-closed — 省略即"这份产物的最新改动时间是【无限新】"⇒ 任何既有验证都算过期（is_stale 恒真）。改前是 `lambda: 0.0`，省略即恒假 ⇒ 旧验证永久有效（危险方向）。
+    edit_clock: Callable[[Subtask], float] = lambda _subtask: float("inf")
     #: Monotonic seconds for tool evidence timestamps; injected, never read here.
     epoch: Callable[[], float] = time.monotonic
     #: Structured-output support, learned once per run and shared by every block.

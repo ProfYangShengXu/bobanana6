@@ -260,7 +260,7 @@ def pinned_version(concept_id: str, ontology: Ontology) -> str | None:
 
 def pin_is_explicit(concept_id: str, ontology: Ontology) -> bool:
     """★ 这一条 pin 是【本体声明的】还是【字典序兜底】的？兜底要说出来，不静默。"""
-    declared = ontology.pins.get(concept_id, "")  # 与 pinned_version 的那一行刻意不同：见证变体只打前一处
+    declared = ontology.pins.get(concept_id, "")  # 与 pinned_version 的那一行刻意不同：见证变体只打前一处  # blame: fail-open — ★该改但不动 core（§五①）：无显式 pin ⇒ 回落到字典序口径（#25 实测过那条）
     if not isinstance(declared, str) or not declared:
         return False
     return any(

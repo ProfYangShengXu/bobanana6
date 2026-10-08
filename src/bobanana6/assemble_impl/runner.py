@@ -164,7 +164,7 @@ class Runner:
     #: chain honestly degrades to the name check.
     reader: SnapshotReader | None = None
     limits: Limits = DEFAULT_LIMITS
-    budget: Budget = field(default_factory=lambda: Budget(max_calls=64, max_wall_s=3600, max_output=8192))
+    budget: Budget = field(default_factory=lambda: Budget(max_calls=64, max_wall_s=3600, max_output=8192))  # blame: fail-open — 与 runtime.py 的同一份默认**重复出现**⇒两处会漂移；该收成单一来源后由它派生，不是各自写一遍
     #: The capabilities the deployment declares. ``None`` means "nothing was
     #: declared", and then capability matching is not evaluated at all rather
     #: than being reported as a gap (an undeclared pool is not a missing pool).

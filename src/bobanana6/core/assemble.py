@@ -168,7 +168,7 @@ def check_assembly(
     for subtask in sorted(plan.subtasks, key=lambda s: s.id):
         partition_by_id[subtask.id] = subtask.partition
         if subtask.mode == "write":
-            writes_by_layer.setdefault(depth.get(subtask.id, 0), []).append(subtask.id)
+            writes_by_layer.setdefault(depth.get(subtask.id, 0), []).append(subtask.id)  # blame: fail-open — ★该改但不动 core（§五①）：缺项按 0 ⇒ 会被当成首层，可能漏报 layer_lateral
     for layer in sorted(writes_by_layer):
         writers = writes_by_layer[layer]
         if len(writers) <= 1:

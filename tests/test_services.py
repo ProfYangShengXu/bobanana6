@@ -620,6 +620,9 @@ def test_verify_uses_the_recorded_command_evidence() -> None:
         subtask=subtask("T-01", output="out.csv", mode="write"),
         context=CheckContext(ontology=mini_ontology(), custom_checks={SHELL_COMMAND_CHECK: check}),
         evidence=evidence,
+        # ★ 显式写出「验证发生在最后一次改动之后」。**省略**它现在是 fail-closed 的
+        #   （默认 +inf ⇒ 一律算过期），断言一个字没改，只是把原来依赖默认值的地方写明。
+        last_edit_at=0.0,
     )
     verdict = judge.verify(candidate(artifacts=(artifact(rows=({"a": 1},)),)))
     assert verdict.status == "passed"

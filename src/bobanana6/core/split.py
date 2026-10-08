@@ -205,7 +205,7 @@ def check_split(
                 # ★ 计划【写下来的顺序】必须能被执行：块按 subtasks 顺序串行跑，上游排在
                 #   下游后面 ⇒ 下游开工时输入还没有（前置门 `inputs_unavailable`，0 次调用）。
                 #   这不是"运行时运气"，是计划本身的合法性。
-                if position.get(upstream.id, 0) > position.get(subtask.id, 0):
+                if position.get(upstream.id, 0) > position.get(subtask.id, 0):  # blame: fail-open — ★该改但不动 core（§五①）：缺项按 0 ⇒ 会与首层混淆
                     add(
                         "layer_wiring",
                         f"block {subtask.id!r} is listed before its upstream {upstream.id!r} ({name!r})",
@@ -263,10 +263,10 @@ def check_split(
     # -- axis_uniform ------------------------------------------------------
     axis_by_layer: dict[int, set[str]] = {}
     for subtask in sorted(plan.subtasks, key=lambda s: s.id):
-        axis_by_layer.setdefault(depth.get(subtask.id, 0), set()).add(subtask.axis)
+        axis_by_layer.setdefault(depth.get(subtask.id, 0), set()).add(subtask.axis)  # blame: fail-open — ★该改但不动 core（§五①）：缺项按 0 ⇒ 同层判定可能漏报
     for layer in sorted(axis_by_layer):
         if len(axis_by_layer[layer]) > 1:
-            members = sorted(s.id for s in plan.subtasks if depth.get(s.id, 0) == layer)
+            members = sorted(s.id for s in plan.subtasks if depth.get(s.id, 0) == layer)  # blame: fail-open — ★同上（同一判据的另一半）
             add("axis_uniform", f"layer {layer} mixes axes {sorted(axis_by_layer[layer])!r}", *members)
 
     # -- no_orphan ---------------------------------------------------------
@@ -284,7 +284,7 @@ def check_split(
     writes_by_layer: dict[int, list[Subtask]] = {}
     for subtask in plan.subtasks:
         if subtask.mode == "write":
-            writes_by_layer.setdefault(depth.get(subtask.id, 0), []).append(subtask)
+            writes_by_layer.setdefault(depth.get(subtask.id, 0), []).append(subtask)  # blame: fail-open — ★同上
     for layer in sorted(writes_by_layer):
         writers = sorted(writes_by_layer[layer], key=lambda s: s.id)
         if len(writers) <= 1:
@@ -295,7 +295,7 @@ def check_split(
         else:
             counts: dict[str, int] = {}
             for partition in partitions:
-                counts[str(partition)] = counts.get(str(partition), 0) + 1
+                counts[str(partition)] = counts.get(str(partition), 0) + 1  # blame: fail-closed — 缺项按 0 ⇒ 更容易触发 partition_conflict，方向保守
             shared = sorted(name for name, count in counts.items() if count > 1)
             if shared:
                 add("write_serial", f"layer {layer} writes share partitions {shared!r}", *(s.id for s in writers))

@@ -219,7 +219,7 @@ def decide_recovery(
     max_retries: int,
     max_reflections: int,
     gate: GateVerdict | None = None,
-    block_verifiable: bool = True,
+    block_verifiable: bool = True,  # blame: fail-open — 与 LoopConfig.block_verifiable 同源同风险：省略即假定可判定
     taint: TaintTracker | None = None,
     tool_name: str | None = None,
     failure: str = "",

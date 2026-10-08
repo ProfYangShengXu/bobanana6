@@ -219,9 +219,9 @@ def call_signature(call: ToolCall) -> str:
 
 @dataclass(frozen=True)
 class GuardrailConfig:
-    repeat_block_after: int = 4
-    same_tool_block_after: int = 6
-    max_calls_per_turn: int = 0  # 0 = unlimited
+    repeat_block_after: int = 4  # blame: fail-closed — 省略即 4 次就拦，方向保守
+    same_tool_block_after: int = 6  # blame: fail-closed — 省略即 6 次就拦，方向保守
+    max_calls_per_turn: int = 0  # 0 = unlimited  # blame: fail-open — 省略即**无上限**（0 = unlimited）；单轮调用数不设闸，方向危险
 
     def __post_init__(self) -> None:
         if min(self.repeat_block_after, self.same_tool_block_after, self.max_calls_per_turn) < 0:

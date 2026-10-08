@@ -98,7 +98,7 @@ class DeliveryOutcome:
     answered: bool
     correct: bool
     cited: bool = False
-    faithful: bool = True
+    faithful: bool = True  # blame: fail-open — 省略即宣称用量忠实；它进读数不进判据，但报告会谎报
     declined: bool = False
 
 

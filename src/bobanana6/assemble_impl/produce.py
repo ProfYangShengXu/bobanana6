@@ -291,7 +291,7 @@ class ResponseFormatSupport:
     run, so a service that ignores ``response_format`` costs exactly one extra call.
     """
 
-    enabled: bool = True
+    enabled: bool = True  # blame: fail-open — 省略即假定端点支持 response_format；不支持时靠一次拒答学回来（有界，见变异 Z05）
     refused: bool = False
 
 

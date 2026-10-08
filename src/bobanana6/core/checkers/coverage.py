@@ -19,7 +19,7 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
     required = constraint.spec.get("required_sources")
     if not isinstance(required, (list, tuple)) or not required:
         return fail(constraint, "spec.required_sources must be a non-empty list")
-    declared_missing = constraint.spec.get("declared_missing", [])
+    declared_missing = constraint.spec.get("declared_missing", [])  # blame: fail-open — ★该改，但受"不动 core/"约束（§五①）：省略即最宽松口径（什么都没声明也算覆盖齐）
     if not isinstance(declared_missing, (list, tuple)):
         return fail(constraint, "spec.declared_missing must be a list")
 

@@ -12,7 +12,7 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
     artifact = artifact_for(constraint, candidate)
     if artifact is None:
         return fail(constraint, f"artifact for target {constraint.target!r} not found")
-    min_rows = constraint.spec.get("min_rows", 0)
+    min_rows = constraint.spec.get("min_rows", 0)  # blame: fail-open — ★该改成 1，但受"不动 core/"约束（§五①）：spec 没写 min_rows 时该约束**恒过**（>= 0 行永远成立）
     if not isinstance(min_rows, int) or min_rows < 0:
         return fail(constraint, "spec.min_rows must be a non-negative integer")
     if artifact.row_count < min_rows:

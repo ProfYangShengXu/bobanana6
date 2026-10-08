@@ -136,7 +136,7 @@ class WriteBudget:
     ``WriteBudget(limit=...)``，函数体里不写死数字。
     """
 
-    limit: int = _WORKSPACE_WRITE_BUDGET_BYTES
+    limit: int = _WORKSPACE_WRITE_BUDGET_BYTES  # blame: fail-closed — 省略即给一个有上限的写区预算（64 MiB），方向保守；数值由壳定而不是由契约声明，已在注释里说明
     #: 本块写过的路径（去重）：判定看的是它们**现在**在磁盘上的字节和。
     paths: set[str] = field(default_factory=set)
     #: 累计写入量 —— 只作证据，不参与判定。

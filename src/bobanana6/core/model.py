@@ -482,7 +482,7 @@ class DeliverableSpec:
     schema: Mapping[str, DeliverableField] = field(  # external:contract —— 产物字段契约
         default_factory=dict
     )
-    required: bool = True  # core:assemble —— cut_complete 只强制 required 的交付物必须产出
+    required: bool = True  # core:assemble —— cut_complete 只强制 required 的交付物必须产出  # blame: fail-closed — 省略即"这份产物必须有"，方向是保守的（多要不少要）
     #: ★ 层次切分：这份产物【依赖哪些别的产物】—— 由契约的提供方写明（`adapters/`
     #: 不猜、`decompose/` 不解析散文）。空元组 = 没有声明链，此时切分照旧。
     #: core:split —— 分层、同层检查与「接口数纪律」都读它。
@@ -814,7 +814,7 @@ class Provenance:
 class Column:
     name: str  # core:checkers —— schema/range/relation 按名取列
     dtype: str  # core:checkers —— schema 类型比对读它
-    nullable: bool = True  # core:checkers —— schema 可空性比对读它
+    nullable: bool = True  # blame: fail-open — ★该改成 False，但受"不动 core/"约束（§五①）：省略即假定列可空 ⇒ 缺格检查更松。已具名登记待裁决  # core:checkers —— schema 可空性比对读它
     #: ★ A10: the unit the *producer* established for this column, in words
     #: (``"CNY"`` / ``"千元"``). Empty means **not established** -- neither the
     #: values nor the answer declared one, so the column's unit would rest on the

@@ -216,14 +216,14 @@ def _deliverables(
     for index, raw in enumerate(raw_items):
         path = f"$.deliverables[{index}]"
         name = str(raw["name"])
-        schema = raw.get("schema", {})
+        schema = raw.get("schema", {})  # blame: fail-open — ★该改：缺字段声明 ⇒ 空 schema ⇒ schema checker 无从收紧；这里只是把"没声明"如实记成空
         if not isinstance(schema, Mapping):
             _fail(source, f"{path}.schema", "deliverable schema must be a mapping", "type")
         fields = _fields(schema, source, f"{path}.schema", declared_sources=declared_sources)
-        required = raw.get("required", True)
+        required = raw.get("required", True)  # blame: fail-closed — 缺声明即"必须有"，方向保守
         if not isinstance(required, bool):
             _fail(source, f"{path}.required", "required must be a boolean", "type")
-        depends_on = _depends_on(raw.get("depends_on", ()), source, path, name=name, names=names)
+        depends_on = _depends_on(raw.get("depends_on", ()), source, path, name=name, names=names)  # blame: fail-open — ★该改：缺声明 ⇒ 没有依赖链 ⇒ 分层/接口检查都无从谈起，切分器照样扇出
         try:
             deliverables.append(
                 DeliverableSpec(name=name, schema=fields, required=required, depends_on=depends_on)
@@ -260,7 +260,7 @@ def _depends_on(raw: Any, source: str, path: str, *, name: str, names: set[str])
 
 
 def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:
-    raw_items = data.get("sources", ())
+    raw_items = data.get("sources", ())  # blame: fail-open — ★该改：缺声明 ⇒ 没有来源可授权，读授权检查失去对象
     if raw_items is None:
         raw_items = ()
     if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
@@ -270,8 +270,8 @@ def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:
         path = f"$.sources[{index}]"
         if not isinstance(raw, Mapping) or not isinstance(raw.get("ref"), str) or not raw["ref"]:
             _fail(source, f"{path}.ref", "source ref must be a non-empty string", "required")
-        encoding = str(raw.get("encoding", "") or "")
-        eol = str(raw.get("eol", "") or "")
+        encoding = str(raw.get("encoding", "") or "")  # blame: fail-closed — 空串 = 未声明，且这个状态被显式写进投递载荷（不是静默按 utf-8 替换）
+        eol = str(raw.get("eol", "") or "")  # blame: fail-closed — 同上：空串 = 未声明，不静默改行尾
         # ★ `#32`: 载体的形式由任务声明；**声明错了当场报**（别留到运行时才炸）。
         if encoding:
             try:
@@ -284,10 +284,10 @@ def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:
             sources.append(
                 SourceRef(
                     ref=raw["ref"],
-                    locator=str(raw.get("locator", "")),
+                    locator=str(raw.get("locator", "")),  # blame: fail-closed — 无定位 ⇒ 取网层具名失败，不会拿别的定位顶上
                     encoding=encoding,
                     eol=eol,
-                    module=str(raw.get("module", "") or ""),
+                    module=str(raw.get("module", "") or ""),  # blame: fail-closed — 不属于任何模块 ⇒ 不参与写区，方向保守
                 )
             )
         except ValueError as exc:
@@ -316,7 +316,7 @@ def _constraints(raw_items: Any, *, source: str, group: str) -> tuple[Constraint
             _fail(source, f"{path}.rationale", "rationale must not be empty", "non_empty")
         if raw["kind"] not in KNOWN_KINDS:
             _fail(source, f"{path}.kind", f"unknown constraint kind {raw['kind']!r}", "enum")
-        spec = raw.get("spec", {})
+        spec = raw.get("spec", {})  # blame: fail-closed — 空 spec 会被各 checker 具名拒（它们要求 spec.x），方向保守
         if not isinstance(spec, Mapping):
             _fail(source, f"{path}.spec", "spec must be a mapping", "type")
         try:
@@ -329,7 +329,7 @@ def _constraints(raw_items: Any, *, source: str, group: str) -> tuple[Constraint
 
 
 def _unmapped(data: Mapping[str, Any], source: str) -> tuple[tuple[str, str], ...]:
-    raw_items = data.get("unmapped", ())
+    raw_items = data.get("unmapped", ())  # blame: fail-closed — 缺声明 ⇒ 没有"允许未映射"的例外，方向保守
     if raw_items is None:
         raw_items = ()
     if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
@@ -347,7 +347,7 @@ def _unmapped(data: Mapping[str, Any], source: str) -> tuple[tuple[str, str], ..
 
 
 def _blind(data: Mapping[str, Any], source: str) -> tuple[str, ...]:
-    raw_items = data.get("blind", ())
+    raw_items = data.get("blind", ())  # blame: fail-closed — 同上：没有预声明的盲区
     if raw_items is None:
         raw_items = ()
     if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
@@ -380,10 +380,10 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
         _fail(source, "$.task_id", "task_id must be a non-empty string", "required")
     if not isinstance(data.get("goal"), str) or not data["goal"]:
         _fail(source, "$.goal", "goal must be a non-empty string", "required")
-    version = data.get("version", 1)
+    version = data.get("version", 1)  # blame: fail-closed — 缺版本按 1，不去猜更新的版本
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         _fail(source, "$.version", "version must be an integer >= 1", "minimum")
-    constraints = data.get("constraints", {})
+    constraints = data.get("constraints", {})  # blame: fail-open — ★该改：缺约束声明 ⇒ 只剩 compile_bundle 补的 AUTO presence，字段级规则一条都没有
     if constraints is None:
         constraints = {}
     if not isinstance(constraints, Mapping):
@@ -391,10 +391,10 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
     unknown = sorted(set(constraints) - {"hard", "soft"})
     if unknown:
         _fail(source, "$.constraints", f"unknown groups {unknown!r}", "additionalProperties")
-    share_state = data.get("sources_share_state", False)
+    share_state = data.get("sources_share_state", False)  # blame: fail-open — ★★该改：#25 那条代判据的落点。缺声明即"不共享状态"⇒ 切分器照样按来源扇出；正确的告警是"这件事没被声明"
     if not isinstance(share_state, bool):
         _fail(source, "$.sources_share_state", "sources_share_state must be a boolean", "type")
-    notes = data.get("notes", "")
+    notes = data.get("notes", "")  # blame: fail-closed — 无备注
     if not isinstance(notes, str):
         _fail(source, "$.notes", "notes must be a string", "type")
 
@@ -403,7 +403,7 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
     sources = _sources(data, source)
     # ★ 题面来源：值必须是**已声明**的 source ref；不填就是不声明（退回今天的行为）。
     #   指向不存在的 ref ⇒ 具名拒（说清"你指的哪份来源不存在"），绝不静默忽略。
-    statement = data.get("statement", "") or ""
+    statement = data.get("statement", "") or ""  # blame: fail-closed — 未声明题面 ⇒ 不内联（退回旧行为），绝不伪造一份题面
     if not isinstance(statement, str):
         _fail(source, "$.statement", "statement must be a declared source ref", "type")
     if statement and statement not in {item.ref for item in sources}:

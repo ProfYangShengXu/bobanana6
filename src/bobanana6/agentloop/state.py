@@ -130,7 +130,7 @@ class Resume:
 
     start_turn: int
     completed_actions: tuple[str, ...]
-    run: bool = True
+    run: bool = True  # blame: fail-open — 省略即"续跑"；不该续的跑会被续（这条判据决定要不要重放旧输入）
 
 
 def resume(checkpoint: Checkpoint) -> Resume:

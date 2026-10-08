@@ -194,6 +194,18 @@ CI_TIERS: tuple[Tier, ...] = (
         why="全量 970+ 条；这是防回归的锚",
     ),
     Tier(
+        name="defaults",
+        when="改了一个默认值 / 加了新的 dataclass 字段或函数默认参数",
+        command=(PYTHON, "tools/default_audit.py", "--check"),
+        why="★ 默认值就是『省略时的行为』：强制范围内必须三选一，范围外按形态棘轮只许变少",
+    ),
+    Tier(
+        name="criterion",
+        when="改了一个 checker 的判据（阈值 / 比较符）",
+        command=(PYTHON, "tools/criterion_uniqueness.py"),
+        why="★ 变异判据 ⇒ 报告必须跟着变；不变 = 判定逻辑长出了第二个副本",
+    ),
+    Tier(
         name="mutation",
         when="改了任何 checker（含新增 kind）",
         command=(PYTHON, "tools/reverse_validation.py"),

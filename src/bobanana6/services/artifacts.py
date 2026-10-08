@@ -51,7 +51,8 @@ class FileRecord:
     #: True = 正文进了 git 的树；False = 只提交了指针（正文在 CAS 里）。
     inline: bool
     #: False = 连 CAS 都没放（归档预算用尽）—— 痕迹仍留指针。
-    stored: bool = True
+    # blame: fail-closed — 省略时必须说"没存"，不许默认宣称存了（改前是 True，是危险方向）
+    stored: bool = False
 
     def as_pointer(self) -> dict[str, Any]:
         return {
@@ -119,7 +120,10 @@ class ArtifactStore:
 
     # -- git plumbing ------------------------------------------------------- #
 
-    def _git_run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    # git plumbing: ``check=True`` 是保护性默认（命令失败必须报错）
+    def _git_run(
+        self, *args: str, check: bool = True  # blame: fail-closed — 省略 check 即"命令失败要报错"，方向保守
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             # ★ 痕迹仓库通常落在**本仓库的工作树里面**（`acceptance/**/_run/artifacts`）。
             #   本仓库挂在 Windows 挂载点上，git 对"可疑属主"会**拒答任何子命令**

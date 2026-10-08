@@ -98,7 +98,7 @@ class ShellSegment:
     following_operator: str | None
 
 
-def split_shell_segments(command: str, *, posix: bool = True) -> tuple[ShellSegment, ...] | None:
+def split_shell_segments(command: str, *, posix: bool = True) -> tuple[ShellSegment, ...] | None:  # blame: fail-open — 省略即按 POSIX 方言切分；cmd.exe 的 & / | 语义不同，会按错的方言切
     """Tokenize top-level shell commands, preserving their control operators.
 
     Returns ``None`` for anything unparseable (unbalanced quotes, empty segment,

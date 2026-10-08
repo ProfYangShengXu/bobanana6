@@ -29,7 +29,7 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
             continue
         if "dtype" in raw and str(raw["dtype"]) != column.dtype:
             facts.append(f"column {name!r} dtype {column.dtype!r} != {raw['dtype']!r}")
-        if raw.get("nullable", True) is False:
+        if raw.get("nullable", True) is False:  # blame: fail-open — ★该改但不动 core（§五①）：缺声明即假定可空 ⇒ 缺格检查更松（与 Column.nullable 同族）
             if column.nullable:
                 facts.append(f"column {name!r} is nullable but must not be")
             # ★ A04: "must not be null" is judged on the *cells*, not just on the

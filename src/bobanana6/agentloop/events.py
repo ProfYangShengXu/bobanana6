@@ -86,7 +86,7 @@ class EventLog:
         worker_id: str,
         at: float,
         duration_ms: int = 0,
-        ok: bool = True,
+        ok: bool = True,  # blame: fail-open — 省略即把这条事件记成成功；事件流是展示/归因的输入（判据不读它），但读数会谎报成功
         detail: Mapping[str, Any] | None = None,
     ) -> Event:
         event = Event(

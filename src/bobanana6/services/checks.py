@@ -284,7 +284,8 @@ class BlockJudge:
     #: Newest edit time of the block's produced files; injected, never read here
     #: (``gate.is_stale`` compares timestamps, and a judge that reads the clock
     #: cannot be replayed).
-    last_edit_at: float = 0.0
+    # blame: fail-closed — 省略即视为"产物刚刚被改过"⇒ 既有验证一律算过期（与 edit_clock 同一条）
+    last_edit_at: float = float("inf")
     evidence: RecordedEvidence = field(default_factory=RecordedEvidence)
     #: The verdict the loop blocked on, so the runner can report it without
     #: re-running the checks (a command check must not execute twice).
