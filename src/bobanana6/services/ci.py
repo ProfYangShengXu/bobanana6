@@ -1097,3 +1097,178 @@ def run_content_checks(
         external=tuple(external),
         generated_path=generated_path,
     )
+
+
+# --------------------------------------------------------------------------- #
+# 改动 A · 产物格式判据（治「手写那条路没有护栏」）
+# --------------------------------------------------------------------------- #
+#
+# ★ 为什么不是"改 prompt"：写"请用逗号分隔 / 请保留全精度"是【教模型遵守】，
+#   违反原则三（守卫落在确定性一侧），且本项目已验证「先改输入形态，不教模型遵守」。
+# ★ 所以：把"产物打开能不能正常用"变成**确定性判据** —— 不对就拒收，并说清错在哪。
+# ★ 三条判据**只拒产物**，不改 core/ 的判定语义；**不认文件名 / 不认题目 / 不认列名**。
+
+#: 数值截短的通知档位（★ 边界②：新判据从第 0 档「记录」起步，跑够一轮再谈升档）。
+NOTICE_TRUNCATED_PRECISION = "truncated_precision"
+
+#: 明显是定点截短的小数位数上界 —— 整列都不超过它，且同列在别处精度更高 ⇒ 记一条 notice。
+TRUNCATION_DECIMALS = 6
+
+DEFAULT_CSV_SEPARATOR = ","
+
+
+def delimiter_finding(name: str, text: str) -> dict[str, str] | None:
+    """★ 判据 ①：`.csv` 的**第一个非空行**必须是逗号分隔。
+
+    通用 —— 不认文件名、不认题目。反例就是 `crowded_securities_latest.csv`：
+    手工 `f.write` 拼出来的是 **TAB**（表头 tab=9 / 逗号=0），于是下游按逗号解析
+    ⇒ column mismatch ×4 + `KeyError('rank'/'holder_list'/...)`。
+    """
+    if not name.lower().endswith(".csv"):
+        return None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if "\t" in line and "," not in line:
+            return {
+                "judgement": "delimiter",
+                "who": name,
+                "violated": "分隔符是 TAB",
+                "expected": f"逗号 {DEFAULT_CSV_SEPARATOR!r}（名字以 .csv 结尾）",
+                "got": line[:80],
+            }
+        if "," not in line and _looks_tabular(line):
+            return {
+                "judgement": "delimiter",
+                "who": name,
+                "violated": "第一个非空行里既没有逗号也没有 TAB",
+                "expected": f"逗号 {DEFAULT_CSV_SEPARATOR!r}（名字以 .csv 结尾）",
+                "got": line[:80],
+            }
+        return None
+    return None
+
+
+def _looks_tabular(line: str) -> bool:
+    """一行至少有 2 个字段的样子（有分隔符或明显是表头），才值得判分隔符。"""
+    return line.count(";") >= 1 or len(line.split()) >= 2
+
+
+def _decimals(value: Any) -> int | None:
+    """字符串表示里的小数位数；不是定点小数就返回 None。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    text = repr(float(value))
+    if "e" in text or "E" in text:
+        return None
+    if "." not in text:
+        return 0
+    return len(text.split(".", 1)[1].rstrip("0"))
+
+
+def truncation_findings(artifacts: Mapping[str, Mapping[str, Any]]) -> tuple[dict[str, str], ...]:
+    """★ 判据 ②：同名列跨产物比对 —— 一边更精确、另一边整列都被截到 ≤6 位 ⇒ **记一条 notice**。
+
+    ★ 高精度低召回：拿不准不报。只对【明显是定点截短】的报，且**只记不拒**
+    （第 0 档起步）。`artifacts` 是"名字 -> 产物形状"的映射；形状本身只有一处定义
+    （答案契约），这里**不重述它**（有守卫扫这件事）。
+    """
+    precision: dict[tuple[str, str], int] = {}
+    for name, artifact in sorted(artifacts.items()):
+        for row in artifact.get("rows") or ():
+            if not isinstance(row, Mapping):
+                continue
+            for column, value in row.items():
+                digits = _decimals(value)
+                if digits is None:
+                    continue
+                key = (str(column), str(name))
+                precision[key] = max(precision.get(key, 0), digits)
+    notices: list[dict[str, str]] = []
+    columns = {column for column, _name in precision}
+    for column in sorted(columns):
+        by_artifact = {name: digits for (col, name), digits in precision.items() if col == column}
+        for name, digits in sorted(by_artifact.items()):
+            higher = {other: d for other, d in by_artifact.items() if d > digits}
+            if digits <= TRUNCATION_DECIMALS and higher:
+                best = max(higher.values())
+                notices.append(
+                    {
+                        "judgement": NOTICE_TRUNCATED_PRECISION,
+                        "who": f"{name}.{column}",
+                        "violated": f"整列最多 {digits} 位小数",
+                        "expected": f"与同名列的更高精度一致（另一份产物有 {best} 位）",
+                        "got": f"{digits} 位",
+                    }
+                )
+    return tuple(notices)
+
+
+def invariant_holds(left: Any, op: str, right: Any, tol: float) -> bool:
+    """列级不变量的四种比较 —— 与契约声明的 `op` 一一对应（**唯一实现**）。"""
+    try:
+        if op == "le":
+            return float(left) <= float(right) + tol
+        if op == "lt":
+            return float(left) < float(right) + tol
+        if op == "ge":
+            return float(left) >= float(right) - tol
+        if op == "gt":
+            return float(left) > float(right) - tol
+        if op == "eq":
+            return float(left) == float(right) or abs(float(left) - float(right)) <= tol
+        return left == right
+    except (TypeError, ValueError):
+        return str(left) == str(right)
+
+
+def invariant_findings(
+    invariants: Sequence[Mapping[str, Any]], artifacts: Mapping[str, Mapping[str, Any]]
+) -> tuple[dict[str, Any], ...]:
+    """★ 判据 ③：按**契约声明的**对账关系重算 —— 不一致就是一条 violation。
+
+    ★★ 判据**必须来自声明**：不许把"权重和=1"这类规则硬编码进来。
+    契约没声明 ⇒ 这里一条都不产生（"不许自己凭空判"）。
+    """
+    findings: list[dict[str, Any]] = []
+    for index, spec in enumerate(invariants):
+        left_column, right_column = str(spec.get("left")), str(spec.get("right"))
+        op = str(spec.get("op"))
+        tol = float(spec.get("tol", 0.0))
+        who = f"invariant[{index}] {left_column} {op} {right_column}"
+        checked = 0
+        violations: list[str] = []
+        for name, artifact in sorted(artifacts.items()):
+            columns = {str(column.get("name")) for column in artifact.get("columns") or ()}
+            if left_column not in columns or right_column not in columns:
+                continue
+            for row_index, row in enumerate(artifact.get("rows") or ()):
+                left, right = row.get(left_column), row.get(right_column)
+                if left is None or right is None:
+                    continue
+                checked += 1
+                if not invariant_holds(left, op, right, tol):
+                    violations.append(f"{name} row {row_index}: {left!r} {op} {right!r} is false")
+        if not checked:
+            findings.append(
+                {
+                    "judgement": "invariant",
+                    "who": who,
+                    "violated": f"no comparable column pair in {sorted(artifacts)}",
+                    "expected": f"columns {left_column!r} / {right_column!r} exist in some deliverable",
+                    "got": f"{sorted(artifacts)}",
+                    "ok": False,
+                }
+            )
+            continue
+        findings.append(
+            {
+                "judgement": "invariant",
+                "who": who,
+                "violated": "" if not violations else f"{len(violations)} 行不成立；{violations[0]}",
+                "expected": f"{left_column} {op} {right_column} for all {checked} comparable rows (tol={tol})",
+                "got": "all hold" if not violations else f"{len(violations)} violated",
+                "ok": not violations,
+            }
+        )
+    return tuple(findings)

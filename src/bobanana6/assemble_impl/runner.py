@@ -79,6 +79,7 @@ from ..services import (
     judge_environment_problems,
 )
 from ..services.artifacts import ArtifactStore, BlockRecord
+from ..services.ci import invariant_findings, truncation_findings
 from ..sources import SnapshotStore, SourceError
 from .produce import artifact_from_disk
 from .runtime import (
@@ -385,6 +386,30 @@ class Runner:
                 # ★★ 它自己的产物决定了成败，但"这一条是从缺输入那一步开始降级的"必须留下痕迹 ——
                 #   否则报告看起来一切正常（`exit` 里没有门了，`input_gaps` 就是那条痕迹）。
                 verdict = replace(verdict, evidence={**verdict.evidence, "input_gaps": gap_note})
+            # ★★ 改动 A ③：**契约声明的**对账关系（`content_checks.invariants`）重算一遍。
+            #   判据来自声明，不硬编码（"权重和=1"这种规则必须由契约写出来）。
+            #   ★ 分档：不一致 ⇒ **块级拒收**（verdict 记 failed + 具名理由），
+            #   **绝不升格**成整跑失败；产物照旧进 pieces（既有"失败≠不存在"的规矩）。
+            #   （`artifact` 要到下面才赋值 ⇒ 这里直接取，避免顺序耦合）
+            content_failures, content_notices = self._content_judgements(
+                subtask, candidate.artifact(subtask.output), pieces
+            )
+            if content_failures:
+                verdict = replace(
+                    verdict,
+                    ok=False,
+                    failed=(*verdict.failed, *(one["who"] for one in content_failures)),
+                    evidence={
+                        **verdict.evidence,
+                        **{str(one["who"]): f"{one['violated']} (expected: {one['expected']}; got: {one['got']})" for one in content_failures},
+                    },
+                )
+            if content_notices:
+                # ★ 第 0 档：**只记录不拒**（截短判据跑够一轮再谈升档）。
+                verdict = replace(
+                    verdict,
+                    evidence={**verdict.evidence, "content_notices": [dict(one) for one in content_notices]},
+                )
             verdicts[subtask.id] = verdict
             # ★ judged against this block's slice, not the whole plan's bundle
             decisions.append(converge(block_bundle(bundle, subtask, ontology), (candidate,), context))
@@ -788,6 +813,44 @@ class Runner:
         return self._commit_block(
             subtask, verdict=verdict, paths=[subtask.output], summary=summary, commits=commits
         )
+
+    def _content_judgements(
+        self, subtask: Subtask, artifact: Artifact | None, pieces: Mapping[str, Any]
+    ) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+        """★ 改动 A：把"产物打开能不能正常用"变成**确定性判据**。
+
+        ① 分隔符：在 `produce.py`（两个通道都过）—— 那里才有原始正文
+        ② 数值截短：**只记 notice**（第 0 档起步）
+        ③ 契约声明的对账关系：在这里重算 —— 只有 runner 手上有 `ContractDocument`
+        （`content_checks` 挂在契约文档上，不在 `TaskContract` 上）
+
+        返回 `(violations, notices)`；两者都**只影响这一个块**，不影响整跑。
+        """
+        checks = getattr(self.document, "content_checks", None)
+        invariants = tuple(getattr(checks, "invariants", ()) or ())
+        payload = {
+            str(name): {
+                "columns": [{"name": column.name, "dtype": column.dtype} for column in piece.columns],
+                "rows": [dict(row) for row in piece.rows],
+            }
+            for name, piece in pieces.items()
+            if isinstance(piece, Artifact)
+        }
+        if artifact is not None:
+            payload.setdefault(
+                artifact.name,
+                {
+                    "columns": [{"name": c.name, "dtype": c.dtype} for c in artifact.columns],
+                    "rows": [dict(row) for row in artifact.rows],
+                },
+            )
+        violations: tuple[dict[str, Any], ...] = ()
+        if invariants:
+            violations = tuple(
+                entry for entry in invariant_findings(invariants, payload) if not entry.get("ok")
+            )
+        notices = truncation_findings(payload)
+        return violations, notices
 
     def _cleanliness(self) -> dict[str, Any]:
         """★ 规格 ②：本块结束时算出的 cleanliness（干净 / 污染）。

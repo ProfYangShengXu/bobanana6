@@ -103,6 +103,53 @@ def _aggregate(rows: tuple[Mapping[str, Any], ...], op: str, column: str) -> flo
     return sum(present) / len(present)
 
 
+#: 缺省对账 = 逐值相同（第一道工序的搬运语义）。
+DEFAULT_RECONCILE_OP = "eq"
+
+
+def normalized_reconcile(
+    reconcile: Sequence[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    """★ 声明式对账的**唯一读取口**（`spec.reconcile` → `{列名: 规则}`）。
+
+    生产侧（继承引用）与判定侧（`value_mismatches`）都走这里 ——
+    两份读取口就是"判定逻辑的第二个副本"，会漂。
+    """
+    declared: dict[str, Mapping[str, Any]] = {}
+    for entry in reconcile:
+        if not isinstance(entry, Mapping):
+            continue
+        column = entry.get("column")
+        if not isinstance(column, str) or not column:
+            continue
+        declared[column] = entry
+    return declared
+
+
+def key_columns(
+    reconcile: Sequence[Mapping[str, Any]], shared: Sequence[str] = ()
+) -> tuple[str, ...]:
+    """★ 「哪些列必须逐字相同」——**从声明算出来**，不是硬编码。
+
+    · 显式声明 `op: eq` 的列
+    · 没被声明为算出来的 / 聚合的列（`shared` 是两边都有的列）
+    """
+    declared = normalized_reconcile(reconcile)
+    if declared:
+        explicit = tuple(sorted(c for c, rule in declared.items() if rule.get("op") in (None, "eq")))
+        if explicit:
+            return explicit
+        # 只声明了聚合/派生列 ⇒ 其余共有列按逐字比（保守方向）
+        derived = {c for c, rule in declared.items() if rule.get("op") in ("none", *_AGGREGATES)}
+        return tuple(sorted(c for c in shared if c not in derived))
+    return tuple(sorted(shared))
+
+
+def aggregate_over(rows: Sequence[Mapping[str, Any]], op: str, column: str) -> float | int | None:
+    """把一组行聚成一个值（`count` 数行，其余按列）—— 判定侧与生产侧**共用**这一个。"""
+    return _aggregate(tuple(rows), op, column)
+
+
 def reconcile_holes(reconcile: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     """★ 被声明为**算出来的**列（`op: none`）—— 这里**没有**内容检查它们。
 

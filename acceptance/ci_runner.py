@@ -374,52 +374,26 @@ class ContentExecutorImpl:
     # -- ② invariants：自造对账（只能验【内部一致性】）------------------- #
 
     def invariants(self, specs: Sequence[Mapping[str, Any]]) -> list[Any]:
-        from bobanana6.services.ci import STRENGTH_INTERNAL, ContentFinding
+        # ★ 判据**只有一份实现**：`services/ci.py::invariant_findings`（纯函数，零 I/O）。
+        #   产品路径（改动 A ③）与内容层走同一个函数 —— 两份实现会漂。
+        from bobanana6.services.ci import (
+            STRENGTH_INTERNAL,
+            ContentFinding,
+            invariant_findings,
+        )
 
         artifacts = self._artifacts()
-        findings: list[Any] = []
-        for index, spec in enumerate(specs):
-            who = f"invariant[{index}] {spec.get('left')} {spec.get('op')} {spec.get('right')}"
-            left_column, right_column = str(spec["left"]), str(spec["right"])
-            op = str(spec["op"])
-            tol = float(spec.get("tol", 0.0))
-            checked = 0
-            violations: list[str] = []
-            for name, artifact in artifacts.items():
-                columns = {column["name"] for column in artifact["columns"]}
-                if left_column not in columns or right_column not in columns:
-                    continue
-                for row_index, row in enumerate(artifact["rows"]):
-                    left, right = row.get(left_column), row.get(right_column)
-                    if left is None or right is None:
-                        continue
-                    checked += 1
-                    if not _holds(left, op, right, tol):
-                        violations.append(f"{name} row {row_index}: {left!r} {op} {right!r} is false")
-            if not checked:
-                # ★ 一条都没比到 = **没有覆盖**，不是"通过"（没验过 ≠ 验过了）。
-                findings.append(
-                    ContentFinding(
-                        check="invariants",
-                        strength=STRENGTH_INTERNAL,
-                        who=who,
-                        expected=f"columns {left_column!r} / {right_column!r} exist in some deliverable",
-                        observed=f"no comparable column pair in {sorted(artifacts)}",
-                        ok=False,
-                    )
-                )
-                continue
-            findings.append(
-                ContentFinding(
-                    check="invariants",
-                    strength=STRENGTH_INTERNAL,
-                    who=who,
-                    expected=f"{left_column} {op} {right_column} for all {checked} comparable rows (tol={tol})",
-                    observed="all hold" if not violations else f"{len(violations)} violated; {violations[0]}",
-                    ok=not violations,
-                )
+        return [
+            ContentFinding(
+                check="invariants",
+                strength=STRENGTH_INTERNAL,
+                who=str(entry["who"]),
+                expected=str(entry["expected"]),
+                observed=str(entry["violated"] or entry["got"]),
+                ok=bool(entry["ok"]),
             )
-        return findings
+            for entry in invariant_findings(specs, artifacts)
+        ]
 
     # -- ③ generated：派 worker 写出可执行的断言 -------------------------- #
 
@@ -541,24 +515,6 @@ class ContentExecutorImpl:
         if path.is_file():
             return path.read_text(encoding="utf-8", errors="replace")
         return "(no instruction was supplied)"
-
-
-def _holds(left: Any, op: str, right: Any, tol: float) -> bool:
-    """列级不变量的四种比较 —— 与契约声明的 `op` 一一对应。"""
-    try:
-        if op == "le":
-            return float(left) <= float(right) + tol
-        if op == "lt":
-            return float(left) < float(right) + tol
-        if op == "ge":
-            return float(left) >= float(right) - tol
-        if op == "gt":
-            return float(left) > float(right) - tol
-        if op == "eq":
-            return float(left) == float(right) or abs(float(left) - float(right)) <= tol
-        return left == right
-    except (TypeError, ValueError):
-        return str(left) == str(right)
 
 
 def _summarise(payload: Mapping[str, Any], *, max_rows: int = 20) -> str:

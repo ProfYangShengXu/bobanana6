@@ -757,6 +757,8 @@ def _inherited_provenance(
     observe: Callable[[Mapping[str, Any]], None] | None = None,
     subtask_id: str = "",
     epoch: Callable[[], float] = time.monotonic,
+    #: ★ 规格 C②：**契约声明的对账关系**。空 = 逐值相同（第一道工序，行为逐字不变）。
+    reconcile: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[Provenance, ...]:
     """Cite a merge block's rows back to the rows it was handed (A11).
 
@@ -785,9 +787,56 @@ def _inherited_provenance(
                 # ★ `#43`: 池子元组带上**输入名**（观测要按名字报，判定不用它）
                 pool.append((name, index, row, point))
 
+    from ..core.checkers.provenance import (
+        aggregate_over,
+        key_columns,
+        normalized_reconcile,
+    )
+
+    declared = normalized_reconcile(reconcile)
+    shared: set[str] = set()
+    for _name, _index, input_row, _point in pool:
+        shared |= set(canonical_row(input_row))
+    for row in artifact.rows:
+        shared |= set(canonical_row(row))
+    keys = key_columns(reconcile, tuple(sorted(shared))) if declared else None
+
     provenance: list[Provenance] = []
     for index, row in enumerate(artifact.rows):
-        matched = [entry for entry in pool if _same_row(row, entry[2])]
+        if keys is None:
+            # ★ 没声明对账关系 = 逐字匹配（第一道工序的搬运语义，**行为逐字不变**）。
+            #   ★ 这一行是变异锚点 `B09-any-input-row-matches` 的 `old` 串，
+            #   改动它 = 偷偷放宽一条既有反证，所以声明式那条走**另一个分支**。
+            matched = [entry for entry in pool if _same_row(row, entry[2])]
+        else:
+            # ★ 声明了变换：按**声明的主键列**认定"这是不是同一行"（派生列不参与）。
+            matched = [entry for entry in pool if _same_row(row, entry[2], keys)]
+        # ★ 红线：声明了变换也**不许**让"谁都没给过的那一行"混进来 ——
+        #   对不上任何输入行 ⇒ 照旧拒收（换判据 ≠ 拆判据）。
+        if matched and declared:
+            # 派生列按声明的 op 核（聚合的是**匹配到的那些输入行**）
+            for column, rule in sorted(declared.items()):
+                op = str(rule.get("op") or "eq")
+                if op not in ("sum", "count", "min", "max", "mean"):
+                    continue
+                group_by = tuple(str(name) for name in rule.get("group_by", ()) or ())
+                selected = [entry[2] for entry in matched if _same_row(row, entry[2], group_by)]
+                expected = aggregate_over(selected, op, str(rule.get("over") or column))
+                observed = row.get(column)
+                tol = float(rule.get("tol", 1e-9))
+                try:
+                    agrees = expected is not None and observed is not None and abs(
+                        float(observed) - float(expected)
+                    ) <= tol
+                except (TypeError, ValueError):
+                    agrees = observed == expected
+                if not agrees:
+                    reject(
+                        "unreconciled_value",
+                        f"row {index} of {artifact.name!r}: column {column!r} is declared as "
+                        f"'{op}' over the rows it was handed, but {observed!r} != {expected!r} "
+                        f"(grouped by {list(group_by)!r}, tol={tol})",
+                    )
         if not matched:
             # ★ `#43`: 先落观测（池子 + 交上来的行 + 逐键差异），**再照原样拒收**。
             #   观测挂了不许影响判定 —— 调用点包了 try/except。
@@ -830,13 +879,58 @@ def _inherited_provenance(
     return tuple(provenance)
 
 
-def _same_row(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+def reject_on_delimiter(name: str, text: str, reject: Reject) -> None:
+    """★ 改动 A ①：`.csv` 的分隔符必须与名字一致 —— 不对**拒收产物**，并说清错在哪。
+
+    `violated / expected / got` 三参数**一个都不许空**（守卫第四纪律）。
+    只拒产物：它是块级拒收 ⇒ 循环会重问这一块，**绝不升格**成整跑失败。
+    """
+    from ..services.ci import delimiter_finding
+
+    finding = delimiter_finding(name, text)
+    if finding is None:
+        return
+    reject(
+        "artifact_delimiter",
+        f"{finding['who']}: {finding['violated']}",
+        expected=str(finding["expected"]),
+        got=str(finding["got"]),
+    )
+
+
+def declared_reconcile(
+    bundle: ConstraintBundle | None, subtask: Subtask, artifact_name: str
+) -> tuple[Mapping[str, Any], ...]:
+    """★ 本块**声明的**对账关系（来自 `provenance` 约束的 `spec.reconcile`）。
+
+    判据不硬编码：哪些列是算出来的、按哪个 op 核，全部由契约声明；
+    没声明 ⇒ 空元组 ⇒ 逐值相同（第一道工序行为逐字不变）。
+    """
+    if bundle is None:
+        return ()
+    for constraint in bundle.hard:
+        if constraint.kind != "provenance":
+            continue
+        if constraint.target not in ("*", subtask.id, subtask.output, artifact_name):
+            continue
+        rules = constraint.spec.get("reconcile", [])
+        if isinstance(rules, (list, tuple)):
+            return tuple(entry for entry in rules if isinstance(entry, Mapping))
+    return ()
+
+
+def _same_row(
+    left: Mapping[str, Any], right: Mapping[str, Any], keys: Sequence[str] | None = None
+) -> bool:
     from ..core.provenance import same_value
 
     # ★ ②: compare the *canonical* rows. "No value" has one spelling (the key is
     #   absent), so a row that spelled it ``null`` and a row that omitted the key
     #   are the same row -- which is what the guard always meant.
     one, other = canonical_row(left), canonical_row(right)
+    # ★ 规格 C①：`keys` 给定时只比**声明的主键列**（算出来的列不参与"同不同一行"）。
+    if keys is not None:
+        return all(same_value(one.get(key), other.get(key)) for key in keys)
     return all(same_value(one.get(key), other.get(key)) for key in set(one) | set(other))
 
 
@@ -908,6 +1002,8 @@ def parse_candidate(
     parts: Mapping[str, Mapping[str, Any]] | None = None,
     hit_output_cap: bool = False,
     read_own_sources: bool = False,
+    #: ★ 规格 C①：本块**声明的**对账关系（空 = 逐值相同，第一道工序语义逐字不变）。
+    reconcile_declaration: Sequence[Mapping[str, Any]] = (),
     observe: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> Candidate:
     """Read one answer into a ``Candidate``, or fail loudly.
@@ -964,6 +1060,11 @@ def parse_candidate(
     # ★ `#33`: 代码类产物走 `files`（工作区相对路径 -> 文件原文）。校验在【这里】做完：
     #   路径必须是相对的、不许 `..` 逃逸、不许重复 —— 落盘的动作由外侧做（core 不读盘）。
     files = _file_payloads(document, reject)
+    # ★ 改动 A ①：每个 `.csv` 载荷的分隔符先过一遍（通道 1）。
+    for _name, _payload in files.items():
+        _text = _payload.get("text") if isinstance(_payload, Mapping) else None
+        if isinstance(_text, str) and _text:
+            reject_on_delimiter(str(_name), _text, reject)
 
     ref_name = contract_field("ref", ANSWER_CONTRACT).name
     # ★ ``ref`` is not optional: it is what makes the chain walkable. Filling it
@@ -983,6 +1084,14 @@ def parse_candidate(
         # No authorized source to cite (a block that only merges upstream parts):
         # there is nothing better to put here, and the gap is reported.
         snapshot_ref = source_id
+    elif snapshot_ref in tuple(getattr(subtask, "inputs", ()) or ()):
+        # ★★ 规格 C③：`ref` **允许指向上游产物** —— 下游块手上没有 snapshot，
+        #   但"这份东西是谁给我的"有确定答案：产出它的那个块（`producer_commit` 由交接件
+        #   随 brief 送到，见 `producer_commit`/`producer_verdict`）。旧的"只能指快照"
+        #   基准是错的（原则五：第二道工序手上只有上游产物）。
+        #   ★ 锚点：`snapshot_ref` 必须是**本块声明的输入**之一；指一个谁都没产出过的名字
+        #   仍然会被下面那条 `elif` 拒掉。
+        pass
     elif (authorized_sources or subtask.inputs) and snapshot_ref not in authorized_sources:
         # ★ A11: the guard used to be skipped whenever ``authorized_sources`` was
         #   empty -- which is exactly the merge block, so it could cite anything.
@@ -995,6 +1104,9 @@ def parse_candidate(
         )
     locator = str(document.get("body_path") or "")
     artifact_text = document.get("text")
+    if isinstance(artifact_text, str) and artifact_text:
+        # ★ 改动 A ①：正文形态的产物（名字是 .csv 时）同样判分隔符。
+        reject_on_delimiter(subtask.output, artifact_text, reject)
     artifact = Artifact(
         name=subtask.output,
         columns=_columns(document.get("columns"), clean_rows, reject),
@@ -1018,12 +1130,27 @@ def parse_candidate(
             for index, line in enumerate(artifact_text.splitlines())
             if line
         )
-    if parts and not read_own_sources:
+    # ★★ 规格 C①：分流判据换变量 —— 从"**读过来源没**"改成"**有没有做变换**"。
+    #   旧判据抓错了变量（原则五）：下游聚合块**被授权了 8 个来源**却是 0 次读取
+    #   （算聚合表不需要重读 261KB 原始 TSV）⇒ 被判成"没读来源" ⇒ 走逐字匹配 ⇒ 必挂。
+    #   ★ "有没有做变换"来自**契约声明**（`spec.reconcile`），不是猜的，也不是硬编码。
+    rules = tuple(reconcile_declaration)
+    transformed = bool(rules)
+    if parts and (not read_own_sources or transformed):
         # ★ A11: the block read no snapshot of its own, so its citations cannot be
         #   positional. They are inherited from the rows it was handed; a row that
         #   matches no input is refused (never given a citation it cannot support).
+        #   ★ 声明了变换的块：按**声明的对账关系**比（主键列逐字 + 派生列按声明的 op），
+        #   而不是逐值相同 —— 逐值相同只对"从来源搬运"成立。
         provenance = list(
-            _inherited_provenance(artifact, parts, reject, observe=observe, subtask_id=subtask.id)
+            _inherited_provenance(
+                artifact,
+                parts,
+                reject,
+                observe=observe,
+                subtask_id=subtask.id,
+                reconcile=rules,
+            )
         )
     # ★★ 读过来源的块【不是】纯拼接块，不逼它逐字匹配上游的行。
     #   `_inherited_provenance` 的 docstring 自己写着这个缺口：一行对不上时，
@@ -1667,6 +1794,8 @@ class LoopIOImpl(LoopIO):
             # ★★ 它自己取过料没有 —— 决定它算不算"纯拼接块"（见 `parse_candidate`
             #   里 `if parts and not read_own_sources` 的注记）。
             read_own_sources=self.read_sources,
+            # ★ 声明从这一层读（它手上才有 `judge.bundle`）
+            reconcile_declaration=declared_reconcile(self.judge.bundle, self.subtask, self.subtask.output),
             observe=self._guard_observer(),
         )
 
@@ -1746,6 +1875,19 @@ class LoopIOImpl(LoopIO):
             )
 
         root = Path(self.workspace)
+        # ★ 改动 A ①（通道 2）：**直接写/执行**出来的文件在块结束时过一遍分隔符判据。
+        #   实测反例正是走的这条通道：手工 `f.write` 拼出的
+        #   `crowded_securities_latest.csv` 是 TAB，下游按逗号读 ⇒ column mismatch ×4。
+        def _raise(code: str, problem: str, *, expected: str = "", got: str = "") -> None:
+            raise CandidateFormatError(problem, code=code, got=got, expected=expected)
+
+        for name in changed:
+            target = root / name
+            if not target.is_file() or not name.lower().endswith(".csv"):
+                continue
+            reject_on_delimiter(
+                name, target.read_text(encoding="utf-8", errors="replace"), _raise
+            )
         # ★ 总字节闸（**净占用**）：命令副作用（`shell.run` / `code.run`）落下的文件在这里
         #   记进本块账上，然后按"这些路径现在在磁盘上的字节和"判定 —— 写过的又删了 = 0，
         #   反复覆写同一个大文件不会被累计误伤（见 `services/workspace.py::WriteBudget`）。

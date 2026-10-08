@@ -3,9 +3,9 @@
  "unannotated_by_shape": {
   "bool_false": 30,
   "bool_true": 0,
-  "empty_container": 174,
-  "get_default": 103,
-  "none": 141,
+  "empty_container": 179,
+  "get_default": 108,
+  "none": 142,
   "numeric": 49,
   "other": 115
  }
