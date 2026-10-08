@@ -263,6 +263,9 @@ class BlockRuntime:
         ontology: Ontology,
         tools: ToolSet,
         budget: Budget,
+        #: ★★ 规格 ①：全 DAG 的 subtask 清单 —— 「哪些键进 system」要按**全 DAG**算，
+        #: 不是按「跑到哪算到哪」。拿不到就一个字都不动（fail-closed）。
+        dag_subtasks: tuple[Subtask, ...] = (),
     ) -> Candidate:
         judge = BlockJudge(
             bundle=block_bundle(bundle, subtask, ontology),
@@ -315,6 +318,7 @@ class BlockRuntime:
             ledger=ledger,
             epoch=self.epoch,
             response_format=self.response_format,
+            dag_subtasks=dag_subtasks,
         )
         loop = WorkerLoop(
             io,
@@ -342,6 +346,9 @@ class BlockRuntime:
             #   block started are owned by this block and die with it.
             workspace.close()
         self.last_judge = judge
+        # ★ 规格 ②：块**结束时**判（不是在整跑结束后）—— 只有这时候判出来，
+        #   才能进【下一个块的 brief】。扫的是这一块自己的 transcript。
+        self.last_cleanliness = io.cleanliness(tuple(result.messages))
         if result.candidate is not None:
             self.last_candidate = result.candidate
             return result.candidate
@@ -354,6 +361,10 @@ class BlockRuntime:
                 errors=result.errors,
             )
         )
+
+    #: ★ 规格 ②：这一块结束时算出来的 cleanliness（干净 / 污染）。
+    #: 它是【产物的属性】，不是块的成功/失败 —— 所以放在这里，不放进判定。
+    last_cleanliness: dict[str, Any] = field(default_factory=dict)
 
     def _last_edit_at(self, subtask: Subtask) -> float:
         """When this block's outputs were last touched, for ``gate.is_stale``.

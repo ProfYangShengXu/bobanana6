@@ -24,10 +24,27 @@ from typing import Any
 from .judge import AcceptanceReport, coverage_from_exits
 from .truth import TruthVerdict, compare_rows, load_truth
 
-__all__ = ["CommitMismatch", "TaskRun", "UnknownCommit", "pin_commit", "run_task"]
+__all__ = [
+    "CommitMismatch",
+    "TaskRun",
+    "UnknownCommit",
+    "pin_commit",
+    "run_task",
+    "workspace_seeded",
+]
 
 #: 这个验收集所在的仓库根 —— `pin_commit` 在这里解析 hash。
 REPO = Path(__file__).resolve().parents[1]
+
+
+#: ★ 规格 ③ 的读数口：这一跑的工作区**实际**播了哪些相对路径。
+#: 只读不判 —— 谁都可以用它断言"checks/ 不在里面"。
+_WORKSPACE_SEEDED: dict[Path, tuple[str, ...]] = {}
+
+
+def workspace_seeded(workspace_dir: str | Path) -> tuple[str, ...]:
+    """This run's workspace copy list (empty = nothing was copied)."""
+    return _WORKSPACE_SEEDED.get(Path(workspace_dir), ())
 
 
 class UnknownCommit(RuntimeError):
@@ -186,6 +203,26 @@ def _contract_sources(task_dir: Path, task_file: str = "task.yaml") -> tuple[str
     return tuple(str(row.get("ref", "")) for row in (document.get("sources", ()) or ()) if isinstance(row, dict))
 
 
+def _contract_locators(task_dir: Path, task_file: str = "task.yaml") -> tuple[str, ...]:
+    """The declared source **addresses** — the only things the workspace copies.
+
+    ★ 规格 ③：工作区原来整目录拷 `input/`，连 `input/checks/test_outputs.py`（官方判分器）
+    一起拷进去 ⇒ 块一个 `ls -R input/` 就看见判分器了（实测：8 轮里有块直接 cat 它，
+    而那与块级通过数改善同步发生 ⇒ 变量混在一起，那段读数无法归因）。
+
+    改成按 **locator 逐个拷**（保持同样的相对路径），`checks/` 不在 sources 里 ⇒ 自然不拷。
+    ★ 如果某道题的 `input/` 里某个文件是需要的，那它**该被声明为 source** ——
+    这是契约的责任，不是拷目录的理由。
+    """
+    import yaml
+
+    document = yaml.safe_load((task_dir / task_file).read_text(encoding="utf-8"))
+    rows = document.get("sources", ()) or ()
+    return tuple(
+        str(row.get("locator", "")) for row in rows if isinstance(row, dict) and row.get("locator")
+    )
+
+
 def _contract_deliverables(task_dir: Path, task_file: str = "task.yaml") -> tuple[str, ...]:
     """The declared deliverable paths — read to **prepare the workspace**, nothing else.
 
@@ -259,7 +296,27 @@ def run_task(
         # ★ 保持与 locator 同一套相对路径：locator 写的是 `input/...`，工作区里也就是
         #   `<ws>/input/...` —— 冻结比对与写区检查都按这一条比较（不猜布局）。
         workspace_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(base / "input", workspace_dir / "input")
+        # ★ 规格 ③：**只**拷契约声明的那些 locator 对应的文件，不整目录拷。
+        #   题目原目录的 `input/` **一个字节都不动**（官方 checker 仍从那里读）。
+        locators = _contract_locators(base, task_file)
+        if locators:
+            copied: list[str] = []
+            for locator in locators:
+                candidate = Path(locator)
+                if candidate.is_absolute() or ".." in candidate.parts:
+                    continue
+                source = base / candidate
+                if not source.is_file():
+                    continue
+                target = workspace_dir / candidate
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                copied.append(candidate.as_posix())
+            workspace_seeded = tuple(copied)
+        else:
+            # 没有声明任何 locator ⇒ 不拷（也不整目录拷）。这一格是**声明驱动**的。
+            workspace_seeded = ()
+        _WORKSPACE_SEEDED[workspace_dir] = workspace_seeded
         # ★★ 工作区必须**能完成这道题**：契约声明的产物目录要先存在。
         #   实测（13f）：deliverables 是 `output/*.csv`，而块要生成一份 1681 行的
         #   CSV 只能靠 `code.run`（手写不了），于是 Python 里

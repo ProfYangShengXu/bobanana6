@@ -527,6 +527,20 @@ def _hit_output_cap(usage: Mapping[str, Any] | None, cap: int) -> bool:
     return int((usage or {}).get("completion_tokens") or 0) >= cap
 
 
+def _path_tokens(blob: str, suffixes: Sequence[str]) -> tuple[str, ...]:
+    """从一段命令/代码里挑出**像路径**的 token（宁缺勿滥）。"""
+    found: list[str] = []
+    for raw in blob.replace("'", " ").replace('"', " ").split():
+        token = raw.strip("(),;|&><=")
+        if not token or token.startswith("-"):
+            continue
+        looks_like_path = "/" in token or token.lower().endswith(tuple(suffixes))
+        if not looks_like_path or len(token) < 4 or token.startswith(("http://", "https://")):
+            continue
+        found.append(token)
+    return tuple(found)
+
+
 def task_nature(contract: TaskContract, bundle: ConstraintBundle, subtask: Subtask) -> dict[str, Any]:
     """★ 块级 `goal`（`produce 'X'`）丢掉的那一层：**本任务的性质与验收要求**。
 
@@ -1211,6 +1225,12 @@ class LoopIOImpl(LoopIO):
     #: ★ `#47` 通道 2：本块直接写/执行动过的工作区，块结束时在这里对账。
     #: `None` / 没被用过 ⇒ 一个字节都不多读（既有读数一字不变）。
     ledger: WorkspaceLedger | None = None
+    #: ★★ 静态知识归位（规格 ①）：**全 DAG**的 subtask 清单（含本块）。
+    #: 「哪些键进 system」必须是**装配期可算的客观事实**，判据是
+    #: 「这个键在【全 DAG 每个块】上的值逐字节相同吗」。
+    #: ★ 空元组 = 拿不到全 DAG ⇒ **一个字都不动**（不能证明恒定就不动，fail-closed）——
+    #: 这正是规格警告的"跑到哪算到哪"：只有当前块看，前三个块相同、第四个不同就会被误判。
+    dag_subtasks: tuple[Subtask, ...] = ()
 
     def prompt(self, state: LoopState) -> list[dict[str, Any]]:
         """Stable instructions first, this block next, the transcript last.
@@ -1221,13 +1241,16 @@ class LoopIOImpl(LoopIO):
         """
         block = self.toolset.task.mysubtask()
         authorized = list(self.authorized_sources())
+        # ★★ 静态知识归位（规格 ①）：先把"哪些键在全 DAG 上恒定"算出来（不是白名单），
+        #   恒定的那些进 system 的**恒定前缀**，brief 里**不再出现**（不许两边都放）。
+        constant_entries = self._constant_brief_entries()
         brief: dict[str, Any] = {"subtask": dict(block), "authorized_sources": authorized}
         # ★★★ 名字**和地址**一起给（见 `_source_paths` 的注记）：只给名字的后果是
         #   块分不清"来源清单"和"来源内容"，而取数入口只有一次机会。
         #   `authorized_sources` 保住溯源（判定器按 ref 查表），`source_files`
         #   补上可解性（载体就在它工作区里）。
         source_paths = self._source_paths()
-        if source_paths:
+        if source_paths and "source_files" not in constant_entries:
             brief["source_files"] = source_paths
         # ★★ `#66` 上游的一切直接摆上桌（见 `_upstream_brief`）：产物形状 + 上游写过哪些
         #   文件 + 上游写给接手人的说明。下游不再需要花一轮去问"我手上有什么"。
@@ -1242,7 +1265,7 @@ class LoopIOImpl(LoopIO):
         # ★★ 题面全文（契约声明的那份来源）—— **每个块**都拿到同一份原文，
         #   而不是各自去取、各自理解（13f：八种读法，一个块偏了随产物级联）。
         statement = self._statement_entry()
-        if statement:
+        if statement and "statement" not in constant_entries:
             brief["statement"] = statement
         contract = self.toolset.task.contract()
         # ★★★ 用户 2026-10-06 定的标准：**普通大学生读完 brief 要能说出"我要做什么"**。
@@ -1255,10 +1278,10 @@ class LoopIOImpl(LoopIO):
         #   ★ 这次搬的是**一句话**，不是六份源全文 —— 代价几十个字符，
         #   换的是"这一块在整个任务里是干嘛的"这唯一一处上下文。
         #   缺了它，块只知道要产出一个文件名，不知道那个文件里该有什么。
-        if contract.goal.strip():
+        if contract.goal.strip() and "what_this_task_is" not in constant_entries:
             brief["what_this_task_is"] = contract.goal
         nature = task_nature(contract, self.judge.bundle, self.subtask)
-        if nature:
+        if nature and "task" not in constant_entries:
             # ★ 块级 goal 只说了"产出哪个文件"；本任务的性质与验收要求由契约派生（`#44`）。
             brief["task"] = nature
         head = [
@@ -1285,12 +1308,15 @@ class LoopIOImpl(LoopIO):
                 #   **子代理**没有这句。而且它是**减气**的：暗示"你能拿到的东西就这么多"
                 #   （`架构设计.md §5.3.5` 的判据：harness 说的和做的不一致，
                 #   都会在模型身上表现为"模型不行"）。
+                # ★★ 规格 ①：[恒定前缀] + [块后缀]。恒定前缀**全 DAG、每次调用逐字节相同**
+                #   ⇒ 前缀缓存从第 0 个 token 起命中。块后缀只放"这一个块"的静态内容。
+                #   ⚠️ 代价如实记：`YOUR TASK` 现在排在恒定前缀之后（原来在最前）——
+                #   这是"任务在前"那条实测教训与"前缀要能缓存"之间的取舍，本轮选了后者，
+                #   并把块后缀紧贴在恒定前缀之后，让它仍然是模型读到的第一件**本块**的事。
                 "content": (
-                    "You are a focused subagent working on a specific delegated task.\n\n"
-                    "YOUR TASK:\n"
+                    self._system_prefix(constant_entries)
+                    + "\n\nYOUR TASK:\n"
                     + (self.subtask.goal or self.subtask.output)
-                    + ("\n\nCONTEXT:\n" + contract.goal if contract.goal.strip() else "")
-                    + self._workspace_line()
                     + "\n\nComplete this task using the tools available to you. "
                     "When finished, provide a clear, concise summary of:\n"
                     "- What you did\n"
@@ -1329,6 +1355,180 @@ class LoopIOImpl(LoopIO):
                 }
             )
         return [*head, *(dict(message) for message in state.messages)]
+
+    #: 「这个键对**另一个**块不可得」——比"值不同"更强的判断：不可得就不算恒定。
+    _UNAVAILABLE = object()
+
+    def _brief_candidates(self) -> dict[str, Any]:
+        """候选键 -> 产出它在**任意一个块**上的取值的函数。
+
+        ★ 这不是白名单：这里只列**可能恒定**的候选，真正决定进不进 system 的
+        是 `_constant_brief_entries` 里那次**全 DAG 逐块比较**的结果。
+        依赖本块 toolset / pieces / handoffs 的键对兄弟块**不可得** ⇒ 直接判非恒定。
+        """
+        contract = self.toolset.task.contract()
+        unavailable = self._UNAVAILABLE
+        return {
+            "statement": lambda _subtask: self._statement_entry(),
+            "source_files": lambda _subtask: self._source_paths(),
+            "what_this_task_is": lambda _subtask: contract.goal.strip(),
+            "task": lambda subtask: task_nature(contract, self.judge.bundle, subtask),
+            # ↓ 三个都绑在本块的 toolset / 上游件上：对兄弟块拿不到 ⇒ 永不恒定
+            "authorized_sources": lambda _subtask: unavailable,
+            "upstream": lambda _subtask: unavailable,
+            "input_gaps": lambda _subtask: unavailable,
+        }
+
+    def _constant_brief_entries(self) -> dict[str, Any]:
+        """★ 规格 ①：在**全 DAG 每个块**上取值逐字节相同的键 ⇒ 进 system 的恒定前缀。
+
+        算出来的，不是写死的；而且：
+          · 空值不算恒定（不能拿"都没有"冒充"都相同"）
+          · 对任一兄弟块**不可得** ⇒ 不算恒定（宁可不挪，也不让前缀随块变）
+          · 拿不到全 DAG（`dag_subtasks` 为空 / 不含本块）⇒ **一个字都不动**
+        """
+        if not self.dag_subtasks or all(sub.id != self.subtask.id for sub in self.dag_subtasks):
+            return {}
+        constant: dict[str, Any] = {}
+        for key, produce in self._brief_candidates().items():
+            rendered: list[str] = []
+            for subtask in self.dag_subtasks:
+                value = produce(subtask)
+                if value is self._UNAVAILABLE or not value:
+                    rendered = []
+                    break
+                rendered.append(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+            if rendered and len(set(rendered)) == 1:
+                constant[key] = produce(self.subtask)
+        return constant
+
+    def _system_prefix(self, constant: dict[str, Any]) -> str:
+        """`[恒定前缀]`：**全 DAG 每个块、每次调用都逐字节相同**。
+
+        ★ 为什么必须逐字节相同：前缀缓存从第 0 个 token 开始命中的前提是前面没变过。
+        原来这些键在 **brief** 里，而每个块的 brief 都不同 ⇒ 前缀正好从 brief 处断开，
+        恒定那 6KB 每次重新付（实测：13f 的 `statement` 5584B / `source_files` 313B /
+        `what_this_task_is` 72B 对所有块相同，`subtask` 只 210B）。
+        """
+        contract = self.toolset.task.contract()
+        static = {key: value for key, value in sorted(constant.items()) if key != "what_this_task_is"}
+        parts = [
+            "You are a focused subagent working on a specific delegated task.",
+            "",
+            "CONTEXT:",
+            contract.goal if contract.goal.strip() else "(no task-level goal was declared)",
+        ]
+        if static:
+            parts += [
+                "",
+                "STATIC REFERENCE (identical for every block in this task; it is deliberately NOT",
+                "repeated in the per-block brief below):",
+                json.dumps(static, ensure_ascii=False, sort_keys=True, default=str),
+            ]
+        parts.append(self._workspace_line())
+        return "\n".join(parts)
+
+    # -- ② 交接件：cleanliness（干净 / 污染） ------------------------------ #
+
+    #: ★ 判据**不看工具名**：transcript 里是**线格式**的名字（`shell_run`），而内部名是
+    #: `shell.run` —— 按名字匹配会在适配器边界上悄悄失配（实测踩到过：`cleanliness` 全成了
+    #: `clean`）。改成认**参数形状**：参数里带 `command` / `code` 的调用就是**执行类**调用，
+    #: 而执行类调用里的路径就是可读路径。这条与工具叫什么名字无关。
+    _EXECUTION_ARGUMENTS = ("command", "code")
+    #: 路径样子的 token：带 `/` 或带常见后缀，且长度合理（不许把 "a" 当成路径）。
+    _PATH_SUFFIXES = (
+        ".py", ".tsv", ".csv", ".json", ".txt", ".md", ".yaml", ".yml", ".jsonl", ".log", ".sql",
+    )
+
+    def cleanliness(self, messages: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """★ 规格 ②：块读了它【没被授权】的东西吗 —— **通用判据，不特化任何题**。
+
+        本项目的本质判据不是"路径里有 test_outputs"（那是特化，换一道题就废），
+        而是：**块读了 authorized_sources 的 locator 覆盖范围之外的路径**。
+        契约已经声明了来源地址 ⇒ 读授权本来就该同时管【工具】与【文件在不在】。
+
+        纪律（高精度低召回 / 不扩散）：
+          · 只认**读**类调用（`shell.run` / `code.run` 的参数），写类交给既有写区守卫
+          · 拿不准就不标：token 必须是**工作区里真实存在**的文件才算数
+          · ★ 读自己在写区里的产物【不算】污染（那是它自己的东西）
+          · ★ 它**只影响读数的可信度标记**，不参与判定、不让块失败
+        """
+        workspace = Path(self.workspace).resolve() if self.workspace is not None else None
+        authorized = self._authorized_parts()
+        evidence: list[str] = []
+        scanned = 0
+        for message in messages:
+            if message.get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls") or ():
+                function = call.get("function") or {}
+                raw_arguments = function.get("arguments")
+                if isinstance(raw_arguments, Mapping):
+                    arguments = dict(raw_arguments)
+                else:
+                    try:
+                        arguments = json.loads(str(raw_arguments or "{}"))
+                    except json.JSONDecodeError:
+                        continue
+                if not isinstance(arguments, Mapping):
+                    continue
+                blob = " ".join(
+                    str(arguments.get(key) or "") for key in self._EXECUTION_ARGUMENTS
+                ).strip()
+                if not blob:
+                    continue  # 不是执行类调用（写/取快照等）：写类交给既有写区守卫
+                for token in _path_tokens(blob, self._PATH_SUFFIXES):
+                    scanned += 1
+                    if workspace is None:
+                        continue
+                    absolute = Path(token)
+                    if not absolute.is_absolute():
+                        absolute = workspace / token
+                    if not absolute.is_file():
+                        continue  # ★ 拿不准就不标（高精度低召回）
+                    try:
+                        relative = absolute.resolve().relative_to(workspace).as_posix()
+                    except ValueError:
+                        # ★ 工作区**外**的真实文件：那不在任何声明的 locator 覆盖范围之内。
+                        #   （③ 之后工作区里只剩声明的来源 ⇒ 越界读的现实形态就是绝对路径。）
+                        evidence.append(str(absolute))
+                        continue
+                    if self._in_write_region(relative) or relative in set(authorized):
+                        continue
+                    if self._covered_by_an_authorized_locator(relative, authorized):
+                        continue
+                    evidence.append(relative)
+        unique = sorted(set(evidence))
+        return {
+            "cleanliness": "tainted" if unique else "clean",
+            "cleanliness_evidence": unique,
+            # ★ 缺省不是"没扫"：`scanned` 说得出"扫过、看了几个路径 token"
+            "cleanliness_scanned": scanned,
+        }
+
+    def _authorized_parts(self) -> tuple[str, ...]:
+        contract = self.toolset.task.contract()
+        return tuple(str(source.locator).replace("\\", "/") for source in contract.sources if source.locator)
+
+    def _in_write_region(self, relative: str) -> bool:
+        """这个路径是不是本块自己写区里的东西（自己刚写的产物不算污染）。"""
+        region = getattr(self, "write_region", None) or ()
+        return relative in set(region) or relative == str(self.subtask.output)
+
+    @staticmethod
+    def _covered_by_an_authorized_locator(relative: str, authorized: Sequence[str]) -> bool:
+        """★ 覆盖范围 = 声明的那个 locator **所在目录**（保守方向：宁可少标污染）。
+
+        13f 的来源声明在 `input/data/...`，而官方判分器在 `input/checks/` ——
+        后者不在任何 locator 的目录里 ⇒ 越界读。
+        """
+        for locator in authorized:
+            if relative == locator:
+                return True
+            directory = locator.rsplit("/", 1)[0] if "/" in locator else ""
+            if directory and relative.startswith(directory + "/"):
+                return True
+        return False
 
     def _delivered_inputs(self) -> dict[str, Any]:
         """★ ① 运行时前置预取：把本块声明的输入【取好、放进 context】。
@@ -1823,6 +2023,11 @@ class LoopIOImpl(LoopIO):
                 #   "这份东西是哪块、什么时候、用什么输入产出的"有确定答案。
                 if handoff.get("producer_commit"):
                     entry["producer_commit"] = str(handoff.get("producer_commit"))
+                # ★ 规格 ②：交接件带 cleanliness —— 下游要能看出"这份东西是不是
+                #   照着判分器做出来的"。★ 拒了要说清：不只给布尔，给出**越界读的路径**。
+                if handoff.get("cleanliness"):
+                    entry["cleanliness"] = str(handoff["cleanliness"])
+                    entry["cleanliness_evidence"] = list(handoff.get("cleanliness_evidence") or ())
 
             # ③ 交接说明首句（有就给 —— 下游靠它复现口径）
             if note and quota - _brief_size(entry) > 80:

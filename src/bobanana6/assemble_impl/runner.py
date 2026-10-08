@@ -296,7 +296,16 @@ class Runner:
                 handoffs,
             )
             try:
-                candidate = self.runtime.run(subtask, bundle, ontology, toolset, self.budget)
+                candidate = self.runtime.run(
+                    subtask,
+                    bundle,
+                    ontology,
+                    toolset,
+                    self.budget,
+                    # ★★ 规格 ①：静态知识归位要按【全 DAG】算恒定键，
+                    #   所以把整份计划交下去（不是「跑到哪算到哪」）。
+                    dag_subtasks=tuple(plan.subtasks),
+                )
             except BlockDeclined as declined:
                 declined_detail: dict[str, Any] = {"exit": declined.exit_reason, "declined": True}
                 declined_evidence: dict[str, str] = {"exit": declined.exit_reason}
@@ -408,6 +417,8 @@ class Runner:
                     "note": candidate.summary,
                     "producer_verdict": "ok" if verdict.ok else "failed",
                     "producer_commit": record.commit if record is not None else "",
+                    # ★ 规格 ②：下游要知道拿到的东西是不是【照着判分器做的】。
+                    **self._cleanliness(),
                 }
             # ★ §7⑫: this verdict comes from the judge, so its ``failed`` names the
             #   constraints that rejected the block -- the judge is the party that
@@ -749,6 +760,8 @@ class Runner:
             "from_disk": True,
             "producer_verdict": verdict,
             "producer_commit": record.commit if record is not None else "",
+            # ★ 块失败也照记 cleanliness（产物的属性 ≠ 块的成功/失败）
+            **self._cleanliness(),
         }
         return artifact
 
@@ -775,6 +788,23 @@ class Runner:
         return self._commit_block(
             subtask, verdict=verdict, paths=[subtask.output], summary=summary, commits=commits
         )
+
+    def _cleanliness(self) -> dict[str, Any]:
+        """★ 规格 ②：本块结束时算出的 cleanliness（干净 / 污染）。
+
+        它是**产物的属性**，不是块的成功/失败 —— 所以 `_publish_disk_artifact` 那条
+        "判定失败但产物在盘上"的路径也照记（两件事不许混）。
+        它**不参与判定**：不拒收产物、不让块失败、不停跑，只标读数的可信度。
+        """
+        recorded = getattr(self.runtime, "last_cleanliness", None)
+        if not isinstance(recorded, dict) or not recorded:
+            # ★ 缺省不是"没扫"，是"这次跑没有可扫的读类调用"—— 仍然给出可判的形状。
+            return {"cleanliness": "clean", "cleanliness_evidence": [], "cleanliness_scanned": 0}
+        return {
+            "cleanliness": str(recorded.get("cleanliness", "clean")),
+            "cleanliness_evidence": list(recorded.get("cleanliness_evidence") or ()),
+            "cleanliness_scanned": int(recorded.get("cleanliness_scanned", 0)),
+        }
 
     def _artifact_store(self) -> ArtifactStore | None:
         """The run's git-backed trace store, derived from the workspace.

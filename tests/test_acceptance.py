@@ -1187,18 +1187,26 @@ def test_a_failed_block_whose_artifact_is_on_disk_still_feeds_downstream(tmp_pat
 
 
 def test_the_statement_full_text_reaches_every_block_brief(tmp_path: Path) -> None:
-    """★★ 契约声明的题面，**全文**出现在**每个块**的 brief 里。
+    """★★ 契约声明的题面，**全文**出现在**每个块**的上下文里。
 
     原来题面只是一条普通来源，块要自己调 `sources.snapshot` 去取 —— 八个块各自读、
-    各自理解。现在壳在派活前把同一份原文内联进每个 brief。
+    各自理解。后来壳在派活前把同一份原文内联进每个 brief。
+
+    ★★ 规格 ①（静态知识归位）之后它**换了位置**：题面对全 DAG 恒定 ⇒ 进 system 的恒定前缀
+    （前缀缓存才命中），brief 里**不再出现**。断言强度不变 —— 仍然是"每个块都拿得到同一份
+    **全文**"，只是要说清它在哪一层；并且反向断言 brief 里**没有**它（不许两边都放）。
     """
     task = _chain_task(tmp_path, name="statement-chain", statement="seed")
     briefs: dict[str, dict] = {}
+    systems: dict[str, str] = {}
 
     class _Client:
         def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
             block = _block_of(messages)
             briefs.setdefault(block, _briefing(messages))
+            systems.setdefault(
+                block, "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
+            )
             if not any(message.get("role") == "tool" for message in messages):
                 return ModelResponse(tool_calls=(_tool_call("r1", "sources.snapshot", {"ref": "seed"}),))
             return ModelResponse(
@@ -1215,10 +1223,21 @@ def test_the_statement_full_text_reaches_every_block_brief(tmp_path: Path) -> No
     run_task(task, client=_Client(), env={}, workspace=True)
 
     assert {"T-01", "T-02"} <= set(briefs), sorted(briefs)
+    def static_reference(system: str) -> dict:
+        """从恒定前缀里把那份 STATIC REFERENCE 解析回来（它是 JSON，不是散文）。"""
+        marker = "repeated in the per-block brief below):\n"
+        assert marker in system, system[:200]
+        return json.loads(system.split(marker, 1)[1].splitlines()[0])
+
     for block, brief in briefs.items():
-        statement = brief.get("statement") or {}
-        assert statement.get("ref") == "seed", (block, statement)
-        assert statement.get("text") == "draft\n", (block, statement)
+        # ★ 已在 system 的恒定前缀里（换个位置，不是删）：**全文**都在
+        static = static_reference(systems[block])
+        assert static["statement"]["ref"] == "seed", (block, static.get("statement"))
+        assert static["statement"]["text"] == "draft\n", (block, static.get("statement"))
+        # ★ 反向：brief 里**不再出现**已移进 system 的键（不许两边都放）
+        assert "statement" not in brief, (block, sorted(brief))
+    # ★ 恒定前缀在**不同块之间**逐字节相同（缓存口径）
+    assert len({systems[block].split("YOUR TASK:")[0] for block in systems}) == 1, sorted(systems)
 
 
 def test_the_batch_tool_returns_every_declared_input_at_once() -> None:
