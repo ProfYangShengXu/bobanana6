@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,7 +24,54 @@ from typing import Any
 from .judge import AcceptanceReport, coverage_from_exits
 from .truth import TruthVerdict, compare_rows, load_truth
 
-__all__ = ["TaskRun", "run_task"]
+__all__ = ["CommitMismatch", "TaskRun", "UnknownCommit", "pin_commit", "run_task"]
+
+#: 这个验收集所在的仓库根 —— `pin_commit` 在这里解析 hash。
+REPO = Path(__file__).resolve().parents[1]
+
+
+class UnknownCommit(RuntimeError):
+    """The requested commit hash is not in this repository."""
+
+
+class CommitMismatch(RuntimeError):
+    """The working tree is not at the commit the caller asked to verify."""
+
+
+def pin_commit(at_commit: str, *, repo: Path | None = None) -> str:
+    """★ 验收跑在**要交付的那一版**上，不是"当前工作区"（规格 §0.5③：跑错版本 = 白验）。
+
+    fail-closed 的形态：不认识的 hash ⇒ 具名拒；HEAD 不是它 ⇒ **也**具名拒。
+    刻意**不**自动 checkout：本 harness 在进程内 import 被测模块（`from bobanana6 import cli`），
+    自动切换工作树会造成"看的是 A 版、跑的是 B 版"——那比不验还坏。要么你在那一版上跑，
+    要么它具名拒。
+    """
+    root = Path(repo) if repo is not None else REPO
+    # ★ 这个仓库挂在 Windows 挂载点上，git 默认会以"可疑属主"拒答 —— 与仓库里其它
+    #   git 调用同一条豁免（`-c safe.directory=*`），不是放宽什么权限。
+    safe = ["git", "-c", "safe.directory=*", "-C", str(root)]
+    resolved = subprocess.run(
+        [*safe, "rev-parse", "--verify", "--quiet", f"{at_commit}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    sha = resolved.stdout.strip()
+    if resolved.returncode != 0 or not sha:
+        raise UnknownCommit(f"unknown commit {at_commit!r}: not found in {root}")
+    head = subprocess.run(
+        [*safe, "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    if head != sha:
+        raise CommitMismatch(
+            f"asked to verify {sha[:12]}, but the working tree is at {head[:12] or '(no HEAD)'}; "
+            "check out that commit first — this harness runs in-process, so it can only verify "
+            "the tree it is actually running"
+        )
+    return sha
 
 #: 从运行结果里认得出的出口 → 结果里长什么样。
 #: ★ 认不出的一律不写进 coverage（宁可不声明，也不发明一个没被走到的出口）。
@@ -76,6 +124,8 @@ class TaskRun:
     workspace: Path | None = None
     #: ★ `#43`: where the inheritance guard dropped its observations (``None`` unless asked for).
     observations_dir: Path | None = None
+    #: ★ 这次验收被钉在哪个 commit 上（`at_commit` 给的；空 = 没钉）。
+    pinned_commit: str = ""
 
 
 def _materialise(task_dir: Path) -> None:
@@ -167,6 +217,7 @@ def run_task(
     workspace_seed: Callable[[Path], None] | None = None,
     observe: bool = False,
     max_calls: int | None = None,
+    at_commit: str | None = None,
 ) -> TaskRun:
     """Run one acceptance task through the real assembly point.
 
@@ -181,10 +232,14 @@ def run_task(
     while its ``task.yaml`` is the single-source counterpart. Without this knob the
     refusal could only be run *outside* the harness, so its exit never reached the
     coverage map（`#30`）.
+
+    ``at_commit`` pins the verification to an exact revision: an unknown hash is
+    refused by name, and so is a working tree that is not at that commit（见 `pin_commit`）。
     """
     from bobanana6 import cli
     from bobanana6.assemble_impl import RunRefused, RunResult
 
+    pinned = pin_commit(at_commit) if at_commit is not None else ""
     base = Path(task_dir).resolve()
     _materialise(base)
     out = base / "_run" / "reports"
@@ -289,6 +344,7 @@ def run_task(
             inputs_given=given,
             workspace=workspace_dir if workspace else None,
             observations_dir=observations_dir if observe else None,
+            pinned_commit=pinned,
         )
 
     exits = _exits_from_run(result)
@@ -353,4 +409,5 @@ def run_task(
         truth=verdict_truth,
         workspace=workspace_dir if workspace else None,
         observations_dir=observations_dir if observe else None,
+        pinned_commit=pinned,
     )

@@ -23,7 +23,8 @@ Nothing in this module decides whether a block is good -- it calls
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping
+import subprocess
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,7 @@ from ..services import (
     build_toolset,
     judge_environment_problems,
 )
+from ..services.artifacts import ArtifactStore, BlockRecord
 from ..sources import SnapshotStore, SourceError
 from .produce import artifact_from_disk
 from .runtime import (
@@ -171,6 +173,10 @@ class Runner:
     report_dir: Path | None = None
     exit_reason: str = "unknown"
     fetch_failures: dict[str, str] = field(default_factory=dict)
+    #: ★★ 痕迹层（规格 §2 第1层）：每个块跑完 = 一个 commit。``None`` = 这个部署没有
+    #: 工作区（或显式关掉）—— 那就没有可提交的文件，追溯也随之关闭（如实，不假装）。
+    #: 默认由 `workspace` 派生（`<workspace>.parent/artifacts`），见 `_artifact_store`。
+    artifacts: ArtifactStore | None = None
 
     # -- the pipeline ------------------------------------------------------ #
 
@@ -259,6 +265,8 @@ class Runner:
         decisions: list[Convergence] = []
         #: 交付物路径 -> 负责产出它的块 id：输入缺失时要能追到"降级起点"。
         producer_of = {block.output: block.id for block in plan.subtasks}
+        #: 交付物路径 -> 产出它的 commit（痕迹层）。下游的溯源基准就是它。
+        commits: dict[str, str] = {}
         for subtask in plan.subtasks:
             #: ★★ 输入缺失**不再短路**（旧前置门：一件没到就 0 次调用、记 inputs_unavailable）。
             #:   实测代价（13f，8 块）：T-01 的答案信封不合法 ⇒ T-02..T-08 **全部**停工，
@@ -296,9 +304,20 @@ class Runner:
                     declined_detail["input_gaps"] = self._gap_event(gaps)
                     declined_evidence["input_gaps"] = gap_note
                 # ★★ 判定失败 ≠ 产物不存在：它可能只是信封没封好，活早就干完了。
-                if self._publish_disk_artifact(subtask, pieces, handoffs) is not None:
+                published = self._publish_disk_artifact(
+                    subtask, pieces, handoffs, commits=commits, verdict="declined"
+                )
+                if published is not None:
                     declined_evidence["artifact_on_disk"] = subtask.output
                     declined_detail["artifact_on_disk"] = subtask.output
+                else:
+                    # ★ 盘上没有产物，但这个块**跑过** —— 照样留一个 commit（规格 §2 第1层）。
+                    self._trace_finished_block(
+                        subtask,
+                        verdict="declined",
+                        summary=f"declined: {declined.exit_reason}",
+                        commits=commits,
+                    )
                 self._note_gate(subtask, False, declined_detail)
                 verdicts[subtask.id] = Verdict(
                     ok=False, failed=("declined",), evidence=declined_evidence
@@ -320,9 +339,22 @@ class Runner:
                     failure_evidence["input_gaps"] = gap_note
                 # ★★ 判定失败 ≠ 产物不存在（见 `_publish_disk_artifact`）：产物照样给下游，
                 #   但 `verdicts` 仍是 ok=False —— 两件事独立，绝不因为它在盘上就改成通过。
-                if self._publish_disk_artifact(subtask, pieces, handoffs) is not None:
+                published = self._publish_disk_artifact(
+                    subtask, pieces, handoffs, commits=commits, verdict="failed"
+                )
+                if published is not None:
                     failure_evidence["artifact_on_disk"] = subtask.output
                     failure_detail["artifact_on_disk"] = subtask.output
+                else:
+                    # ★ 盘上没有产物，但这个块**跑过** —— 照样留一个 commit（规格 §2 第1层）。
+                    rejected = failure_evidence.get("rejected_by")
+                    self._trace_finished_block(
+                        subtask,
+                        verdict="failed",
+                        summary=f"failed: {failed.exit_reason}"
+                        + (f"; rejected_by={'/'.join(str(one) for one in rejected)}" if rejected else ""),
+                        commits=commits,
+                    )
                 self._note_gate(subtask, False, failure_detail)
                 # ★ 同一个 `"runtime"` 标签的第二半：这里**多半是"候选被判定器拒收"**
                 #   （`exit` 是 `degrade_single_agent` / `fix_constraint` 之类），
@@ -350,14 +382,32 @@ class Runner:
             artifact = candidate.artifact(subtask.output)
             if artifact is not None:
                 pieces[subtask.output] = artifact
+            # ★★ 痕迹层：这个块跑完 = 一个 commit（作者 = 块 id，信息 = summary + verdict +
+            #   它用的输入）。判定失败也提交 —— 「产物在不在」与「谁通过了」是两件事。
+            trace_paths = sorted(
+                {str(name) for name in candidate.files} | ({subtask.output} if artifact is not None else set())
+            )
+            record = self._commit_block(
+                subtask,
+                verdict="ok" if verdict.ok else "failed",
+                paths=trace_paths,
+                summary=candidate.summary,
+                commits=commits,
+            )
+            if artifact is not None and record is not None:
+                # ★ 输出路径 -> 产出它的 commit：下游按它溯源（即使这份产物是行数据、
+                #   磁盘上没有对应文件——"哪个块、什么时候产出的"仍然有确定答案）。
+                commits[subtask.output] = record.commit
+            if artifact is not None:
                 # ★★ 交接件（`#66`）：产物之外，把上游**写过哪些文件**（客观，来自
                 #   `candidate.files`）与**它写给接手人的说明**（自述，标注未判定）一起带上。
-                #   为什么：下游原来只能从数据反推上游的口径（13f 实测 T-02 重读
-                #   instruction.md / test_outputs.py 重推一遍），而这两样壳在收块时就知道了。
+                #   ★ 再加产出它的 commit —— 下游溯源到"哪块、什么时候、用什么输入产出的"。
                 handoffs[subtask.output] = {
                     "from": subtask.id,
                     "files": sorted(str(name) for name in candidate.files),
                     "note": candidate.summary,
+                    "producer_verdict": "ok" if verdict.ok else "failed",
+                    "producer_commit": record.commit if record is not None else "",
                 }
             # ★ §7⑫: this verdict comes from the judge, so its ``failed`` names the
             #   constraints that rejected the block -- the judge is the party that
@@ -663,6 +713,10 @@ class Runner:
         subtask: Subtask,
         pieces: dict[str, Any],
         handoffs: dict[str, dict[str, Any]],
+        *,
+        commits: dict[str, str],
+        verdict: str = "failed",
+        summary: str = "",
     ) -> Artifact | None:
         """Hand a failed block's on-disk deliverable to downstream anyway.
 
@@ -674,8 +728,8 @@ class Runner:
         边界（这条最要紧）：`pieces` 管「下游拿得到什么」，`verdicts` 管「谁通过了」。
         这里**只动** `pieces` / `handoffs`，调用方的 `verdicts[...]` 始终是 ok=False。
 
-        ★ 不许静默降级：交接件里写明 `from_disk: true` + `producer_verdict: "failed"`，
-        下游 brief 与最终报告都看得见这份产物来自一个没通过判定的块。
+        ★ 不许静默降级：交接件里写明 `from_disk: true` + `producer_verdict`，并把产出
+        它的那个 **commit** 一起带上（规格 §2 第1层）—— 下游 brief 与最终报告都看得见。
         """
         if self.workspace is None:
             return None
@@ -684,14 +738,93 @@ class Runner:
             return None
         artifact = artifact_from_disk(subtask.output, path)
         pieces[subtask.output] = artifact
+        # ★ 产物落进 git：即使这个块判定失败，它写过的文件也留一个 commit（痕迹）。
+        record = self._commit_block(subtask, verdict=verdict, paths=[subtask.output], summary=summary)
+        if record is not None:
+            commits[subtask.output] = record.commit
         handoffs[subtask.output] = {
             "from": subtask.id,
             "files": [],
             "note": "",
             "from_disk": True,
-            "producer_verdict": "failed",
+            "producer_verdict": verdict,
+            "producer_commit": record.commit if record is not None else "",
         }
         return artifact
+
+    # -- the trace layer (one block = one commit) --------------------------- #
+
+    def _trace_finished_block(
+        self,
+        subtask: Subtask,
+        *,
+        verdict: str,
+        summary: str,
+        commits: Mapping[str, str] | None = None,
+    ) -> BlockRecord | None:
+        """★ 规格 §2 第1层：**每个块跑完 = 一个 commit** —— 包括没在盘上留文件的失败块。
+
+        `_publish_disk_artifact` 只在磁盘上**真有**产物时才提交。纯行数据的块
+        （主验题的读块、13f 的 T-03..T-06）失败时，磁盘上没有对应文件，
+        于是**一个 commit 都没有** —— "哪块、什么时候、用什么输入、什么结果"在 git 里查不到。
+        实测（`panel-three-sources` 离线跑）：四个块全失败 ⇒ `_run/artifacts/tree` **根本不存在**。
+
+        这里兜底：产物不在盘上也提交。`commit.json` 带 `block / verdict / inputs / summary`，
+        所以"这个块跑过、结果是失败"这件事本身留痕；`files` 为空是事实（它真没写出文件）。
+        """
+        return self._commit_block(
+            subtask, verdict=verdict, paths=[subtask.output], summary=summary, commits=commits
+        )
+
+    def _artifact_store(self) -> ArtifactStore | None:
+        """The run's git-backed trace store, derived from the workspace.
+
+        ``<workspace>.parent/artifacts`` —— 放在工作区**外面**：工作区里的东西会被块自己的
+        ledger 当成"改动"，痕迹仓库不能混进去。
+        """
+        if self.artifacts is not None:
+            return self.artifacts
+        if self.workspace is None:
+            return None
+        root = Path(self.workspace).parent / "artifacts"
+        self.artifacts = ArtifactStore(root, source_root=Path(self.workspace))
+        return self.artifacts
+
+    def _commit_block(
+        self,
+        subtask: Subtask,
+        *,
+        verdict: str,
+        paths: Sequence[str],
+        summary: str = "",
+        commits: Mapping[str, str] | None = None,
+    ) -> BlockRecord | None:
+        """Commit what this block produced; inputs are named **with their producing commit**."""
+        store = self._artifact_store()
+        if store is None:
+            return None
+        inputs = tuple(
+            (name, (commits or {}).get(name, "")) for name in getattr(subtask, "inputs", ()) or ()
+        )
+        try:
+            record = store.commit_block(
+                block_id=subtask.id,
+                verdict=verdict,
+                paths=paths,
+                summary=summary,
+                inputs=inputs,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:  # 痕迹不能把业务跑挂
+            self.event_log.record(
+                kind="gate_check",
+                task_id=self.document.contract.task_id,
+                worker_id=subtask.id,
+                at=self.epoch(),
+                ok=False,
+                detail={"trace_unavailable": f"{type(exc).__name__}: {exc}"},
+            )
+            return None
+        return record
 
     @staticmethod
     def _input_gaps(

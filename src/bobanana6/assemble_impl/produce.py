@@ -1819,6 +1819,10 @@ class LoopIOImpl(LoopIO):
                     entry["producer_verdict"] = str(handoff.get("producer_verdict"))
                 if handoff.get("from_disk"):
                     entry["from_disk"] = True
+                # ★★ 产出它的那个 commit：下游的溯源基准（规格 §2 第1层）——
+                #   "这份东西是哪块、什么时候、用什么输入产出的"有确定答案。
+                if handoff.get("producer_commit"):
+                    entry["producer_commit"] = str(handoff.get("producer_commit"))
 
             # ③ 交接说明首句（有就给 —— 下游靠它复现口径）
             if note and quota - _brief_size(entry) > 80:
