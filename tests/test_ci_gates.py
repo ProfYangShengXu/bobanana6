@@ -440,7 +440,7 @@ def test_an_unlayered_kind_is_refused_by_name() -> None:
 def test_the_ci_tiers_exist_and_the_mutation_tier_is_wired_to_the_real_tool() -> None:
     """★ 规格 §三④：检查器自己也会安静地坏掉 ⇒ CI 里**必须挂**变异测试。"""
     names = [tier.name for tier in CI_TIERS]
-    assert names == ["smoke", "block", "full", "defaults", "criterion", "mutation"]
+    assert names == ["smoke", "block", "full", "defaults", "guards", "criterion", "mutation"]
 
     mutation = next(tier for tier in CI_TIERS if tier.name == "mutation")
     assert "tools/reverse_validation.py" in mutation.command

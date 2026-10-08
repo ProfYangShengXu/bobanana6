@@ -827,6 +827,25 @@ class Runner:
         返回 `(violations, notices)`；两者都**只影响这一个块**，不影响整跑。
         """
         checks = getattr(self.document, "content_checks", None)
+        # ★★ 规格 三①②（fail-closed，上一轮没落实）：**没声明 content_checks ⇒ 具名拒**，
+        #   不许静默跳过 —— 第 ④ 格的内容层设计里就写着这一条。
+        #   ★ 注意处置：这是**规格缺口**，不是这个块的错 ⇒ 记一条**具名拒绝**进证据，
+        #   **不让块失败**（守卫纪律：拒了要说清，但别把没做成的判死）。
+        if checks is None or not getattr(checks, "declared", False):
+            self.event_log.record(
+                kind="gate_check",
+                task_id=self.document.contract.task_id,
+                worker_id=subtask.id,
+                at=self.epoch(),
+                ok=True,
+                detail={
+                    "content_checks_not_declared": (
+                        "the contract declares no content_checks, so the result-level judgements "
+                        "(delimiter is always on; invariants need a declaration) never ran. "
+                        "Silence is not 'none' -- declare `content_checks` (see the spec extractor)"
+                    )
+                },
+            )
         invariants = tuple(getattr(checks, "invariants", ()) or ())
         payload = {
             str(name): {

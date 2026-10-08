@@ -200,6 +200,12 @@ CI_TIERS: tuple[Tier, ...] = (
         why="★ 默认值就是『省略时的行为』：强制范围内必须三选一，范围外按形态棘轮只许变少",
     ),
     Tier(
+        name="guards",
+        when="加/改了一个判定点（`reject(...)` 或新的守卫）",
+        command=(PYTHON, "acceptance/reject_audit.py", "--check"),
+        why="★ 防新增的编码守卫：每个判定点必须显式标 parse / safety / result（result 还要说清怎么算）",
+    ),
+    Tier(
         name="criterion",
         when="改了一个 checker 的判据（阈值 / 比较符）",
         command=(PYTHON, "tools/criterion_uniqueness.py"),
@@ -1272,3 +1278,139 @@ def invariant_findings(
             }
         )
     return tuple(findings)
+
+
+# --------------------------------------------------------------------------- #
+# §五 · 防新增的编码守卫：每个判定点必须显式标注类别
+# --------------------------------------------------------------------------- #
+#
+# **为什么需要它**：`core/` 是零 I/O 的判定内核，它**结构上读不到数据、只能查形状** ——
+# 所以"编码守卫"会一直长出来。把类别显式化，等于让每次误伤都能被归因到**具体那一条**。
+#
+# ```
+# parse  —— 解析 / 参数校验（"根本读不出来"）
+# safety —— 安全 / 资源边界（越界、超限）
+# result —— ★ 结果类：**必须附"怎么算出来对错的"**（说不出 = 报警）
+# ```
+#
+# ★ 没有标注 ⇒ 报警（第 0 档起步：**不拒收**，只报）。
+
+#: ★ 我加了第 4 类 `shape`（规格只列了前三类）：**判形状**的守卫必须能被**点名**，
+#: 否则"还剩几条编码守卫"这件事在读数里看不见 —— 而本轮的整个目的就是让它可见并可清零。
+#: `shape` 必须附"为什么还在 / 什么时候取缔"。
+GUARD_CATEGORIES = ("parse", "safety", "result", "shape")
+#: `result` 与 `shape` 都必须说清理由（前者"怎么算"，后者"为什么还在"）。
+GUARD_REASON_REQUIRED = ("result", "shape")
+GUARD_MARKER = "# guard:"
+#: `result` 类必须说清"怎么算出来对错的" —— 只说一个词不算。
+GUARD_REASON_SEPARATORS = ("—", "——", "--", ":")
+
+
+@dataclass(frozen=True)
+class GuardSite:
+    """一个判定点：它在哪、它是什么类别、它怎么说清"怎么算"。"""
+
+    path: str
+    line: int
+    code: str
+    #: 空 = 没标（用 None 不用 ""：`""` 会被"声明必须有读者/在词表里"那条守卫读成声明）。
+    category: str | None = None
+    reason: str | None = None
+
+    def as_document(self) -> dict[str, Any]:
+        document = {
+            "location": f"{self.path}:{self.line}",
+            "code": self.code,
+            "category": self.category or "",
+        }
+        if self.reason:
+            document["reason"] = self.reason
+        if not self.category:
+            document["how_to_annotate"] = (
+                f"{self.path}:{self.line} 的 `reject({self.code!r})` 要标一个类别："
+                f"`{GUARD_MARKER} parse` / `{GUARD_MARKER} safety` / "
+                f"`{GUARD_MARKER} result — <怎么算出来对错的>`（标在判定点那行或上一行）"
+            )
+        elif self.category in GUARD_REASON_REQUIRED and not self.reason:
+            document["how_to_annotate"] = (
+                f"{self.path}:{self.line} 标了 `result` 但**说不出怎么算** —— "
+                f"补一句：`{GUARD_MARKER} result — <怎么算出来对错的>`"
+            )
+        return document
+
+
+def _guard_marker(lines: list[str], line_number: int) -> tuple[str | None, str | None]:
+    """判定点那行或上一行的 `# guard:` 标记。"""
+    for candidate in (line_number, line_number - 1):
+        if not 1 <= candidate <= len(lines):
+            continue
+        text = lines[candidate - 1]
+        position = text.find(GUARD_MARKER)
+        if position < 0:
+            continue
+        payload = text[position + len(GUARD_MARKER) :].strip()
+        category = ""
+        for known in GUARD_CATEGORIES:
+            if payload.startswith(known):
+                category = known
+                break
+        reason = ""
+        remainder = payload[len(category) :].strip() if category else payload
+        for separator in GUARD_REASON_SEPARATORS:
+            if remainder.startswith(separator):
+                reason = remainder[len(separator) :].strip()
+                break
+        else:
+            reason = remainder if not category else ""
+        return category or None, reason or None
+    return None, None
+
+
+def guard_sites(source: str, *, path: str = "") -> tuple[GuardSite, ...]:
+    """扫一个模块里的 `reject("<code>", ...)` 判定点，读出它的类别标注。纯 `ast`，不 import。"""
+    import ast
+
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    found: list[GuardSite] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        name = function.id if isinstance(function, ast.Name) else getattr(function, "attr", "")
+        if name != "reject" or not node.args:
+            continue
+        # ★ 只认**字面量** code（`reject(code_var, ...)` 是转发，不是判定点）
+        code = node.args[0].value if isinstance(node.args[0], ast.Constant) else ""
+        if not isinstance(code, str) or not code:
+            continue
+        category, reason = _guard_marker(lines, node.lineno)
+        found.append(GuardSite(path=path, line=node.lineno, code=code, category=category, reason=reason))
+    return tuple(sorted(found, key=lambda site: site.line))
+
+
+def guard_audit(sources: Mapping[str, str]) -> dict[str, Any]:
+    """`{相对路径: 源码}` → 机读清单（未标注 / 标了 result 但说不出怎么算）。"""
+    sites: list[GuardSite] = []
+    for path, source in sorted(sources.items()):
+        sites.extend(guard_sites(source, path=path))
+    unannotated = [site for site in sites if not site.category]
+    unsupported = [site for site in sites if site.category in GUARD_REASON_REQUIRED and not site.reason]
+    by_category: dict[str, int] = {category: 0 for category in GUARD_CATEGORIES}
+    for site in sites:
+        if site.category in by_category:
+            by_category[site.category] += 1
+    return {
+        "schema": "bobanana6.guard-audit/1",
+        "counts": {
+            "total": len(sites),
+            "unannotated": len(unannotated),
+            "reason_missing": len(unsupported),
+            "by_category": by_category,
+        },
+        "problems": [
+            *[site.as_document() for site in unannotated],
+            *[site.as_document() for site in unsupported],
+        ],
+        "sites": [site.as_document() for site in sites],
+    }

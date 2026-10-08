@@ -1304,16 +1304,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_acceptance.py::test_a_real_run_attributes_an_unknown_tool_to_the_model",
         "the caller's nonexistent tool name is blamed on a tool that was never there",
     ),
-    Mutation(
-        "B19-untraceable-rows-silently-skipped",
-        "assemble_impl/produce.py",
-        # ★ `#43`：`if not matched:` 与 `reject(` 之间插了观测块 —— 锚点改成 reject 那一句，
-        #   改法（让这一行被静默丢掉）与语义不变。
-        '            reject(\n                "untraceable_row",\n',
-        '            continue  # mutation: a row with no source is dropped\n            reject(\n                "untraceable_row",\n',
-        "tests/test_acceptance.py::test_a_merge_that_transforms_is_still_refused",
-        "a merge that changes what it was handed is no longer refused",
-    ),
+    # ★ 已退役（规格「全面取缔编码守卫」§二①③ 明令删除被它们变异的代码）：
+    #   · `B19-untraceable-rows-silently-skipped` —— 它把"未匹配上的行静默丢掉"当作变异，
+    #     而规格 ① 要求**取缔逐字匹配本身**：现在未匹配的行**不再拒收**，改为落一条
+    #     产物级锚点 + 把"未对上行"计数进报告，由 CI 从原始数据重算兜底。
+    #     ⇒ 变异的前后两态都不存在了，留着只会让 `preflight()` 拒绝量整棵树。
+    #   · `V04-missing-ref-papered-over-with-the-block-id` —— 它把"没给 ref 时用块 id 顶上"
+    #     当作变异，而规格 ③ 要求**按处境判**：没读到东西的块**不逼它编 ref**
+    #     （那个"纸糊的 ref"正是规格要消灭的形态）。⇒ 同上。
+    #   ★ 退役不等于放宽：这两条替身由**新加的**反证接管 —— 见
+    #     `tests/test_principles_three.py`（编造的产物必须被 CI 重算抓住 / 悬空 ref 仍须拒）。
     Mutation(
         "B20-missing-payload-anonymous",
         "assemble_impl/runner.py",
@@ -1524,14 +1524,6 @@ MUTATIONS: tuple[Mutation, ...] = (
         "    if False:  # mutation: a cut-off answer looks like a shape error",
         "tests/test_runner.py::test_a_truncated_answer_is_reported_as_truncation_not_as_the_first_character",
         "our own output cap is blamed on the model's shape",
-    ),
-    Mutation(
-        "V04-missing-ref-papered-over-with-the-block-id",
-        "assemble_impl/produce.py",
-        '        if authorized_sources:\n            keys = sorted(str(key) for key in document)',
-        '        if False:\n            keys = sorted(str(key) for key in document)',
-        "tests/test_runner.py::test_an_answer_that_cites_no_snapshot_fails_at_the_shape_gate",
-        "a missing ref becomes a plausible-looking block id that fails downstream",
     ),
     Mutation(
         "V05-ref-shape-gate-without-the-valid-list",

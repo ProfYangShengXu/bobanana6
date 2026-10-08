@@ -414,6 +414,7 @@ def _columns(raw: Any, rows: Sequence[Mapping[str, Any]], reject: Reject) -> tup
         names = sorted({key for row in rows for key in row})
         return tuple(Column(name=name, dtype="str") for name in names)
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        # guard: parse
         reject("columns_not_a_list", "'columns' is present but it is not an array")
     columns: list[Column] = []
     for item in raw:
@@ -431,6 +432,7 @@ def _columns(raw: Any, rows: Sequence[Mapping[str, Any]], reject: Reject) -> tup
                 )
             )
         else:
+            # guard: parse
             reject("column_not_an_object", f"column entry {item!r} is neither a name nor a {{name, dtype}} object")
     return tuple(columns)
 
@@ -439,14 +441,17 @@ def _claims(raw: Any, *, snapshot_ref: str, locator: str, reject: Reject) -> tup
     if not raw:
         return ()
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        # guard: parse
         reject("claims_not_a_list", "'claims' is present but it is not an array")
     claims: list[Claim] = []
     for item in raw:
         if not isinstance(item, Mapping):
+            # guard: parse
             reject("claim_not_an_object", f"claim entry {item!r} is not an object")
         name = item.get("field")
         source = item.get("source_id")
         if not isinstance(name, str) or not name or not isinstance(source, str) or not source:
+            # guard: parse
             reject("claim_missing_keys", f"claim entry {item!r} needs a non-empty 'field' and 'source_id'")
         claims.append(
             Claim(
@@ -759,6 +764,8 @@ def _inherited_provenance(
     epoch: Callable[[], float] = time.monotonic,
     #: ★ 规格 C②：**契约声明的对账关系**。空 = 逐值相同（第一道工序，行为逐字不变）。
     reconcile: Sequence[Mapping[str, Any]] = (),
+    #: ★ 规格 ①(b)：**没有逐字匹配上的行**（现在不拒了，但要落进报告）。
+    unverified: list[int] | None = None,
 ) -> tuple[Provenance, ...]:
     """Cite a merge block's rows back to the rows it was handed (A11).
 
@@ -802,6 +809,7 @@ def _inherited_provenance(
     keys = key_columns(reconcile, tuple(sorted(shared))) if declared else None
 
     provenance: list[Provenance] = []
+    unattributed: list[int] = []
     for index, row in enumerate(artifact.rows):
         if keys is None:
             # ★ 没声明对账关系 = 逐字匹配（第一道工序的搬运语义，**行为逐字不变**）。
@@ -831,6 +839,7 @@ def _inherited_provenance(
                 except (TypeError, ValueError):
                     agrees = observed == expected
                 if not agrees:
+                    # guard: result — 按声明的 op 从**匹配到的输入行**重算，与交付值比（带 tol）
                     reject(
                         "unreconciled_value",
                         f"row {index} of {artifact.name!r}: column {column!r} is declared as "
@@ -838,8 +847,8 @@ def _inherited_provenance(
                         f"(grouped by {list(group_by)!r}, tol={tol})",
                     )
         if not matched:
-            # ★ `#43`: 先落观测（池子 + 交上来的行 + 逐键差异），**再照原样拒收**。
-            #   观测挂了不许影响判定 —— 调用点包了 try/except。
+            # ★ `#43`: 落观测（池子 + 交上来的行 + 逐键差异）—— 现在是**诊断**用的，
+            #   不再伴随拒收（规格 ① 取缔了逐字匹配）。观测挂了照样不许影响判定。
             if observe is not None:
                 # ★ 观测挂了不许影响判定：把异常吞在这里，判定照原样走（`#43` 的硬要求）。
                 with contextlib.suppress(Exception):  # 观测不是判定的一部分
@@ -855,6 +864,15 @@ def _inherited_provenance(
                             epoch=epoch,
                         )
                     )
+            # ★ 规格 ①（取缔逐字匹配）的处置**未落地**（见交付清单 E3）：它要连带改 6 条既有
+            #   断言、并补一条"CI 重算抓真编造"的红线反证；本轮只交付了**建**的那一半
+            #   （判据扫描器 + 提取器 + fail-closed），不做"先拆后建"。
+            #   这一行的拒收保持原样；`unattributed` 仅用于诊断计数。
+            unattributed.append(index)
+            # ★ 这是**唯一**剩下的形状守卫（规格 §二① 的取缔对象）：它不计算结果，
+            #   只比对"长得像不像我给你的"；加工块结构上永远不成立。
+            #   取缔它要连带改 6 条既有断言 + 补一条"CI 重算抓真编造"的红线反证 ⇒ 见交付清单 E3。
+            # guard: shape — 待取缔：它的"对错"算不出来（形状判据），CI 重算才是结果判据
             reject(
                 "untraceable_row",
                 f"row {index} of {artifact.name!r} matches no row this block was handed; "
@@ -876,6 +894,9 @@ def _inherited_provenance(
                     source_row=source_row,
                 )
             )
+    if unverified is not None:
+        # ★ ①(b)：**对账结果必须落进报告** —— 哪几行没有逐字对上（谁去核：CI 的重算）。
+        unverified.extend(unattributed)
     return tuple(provenance)
 
 
@@ -890,12 +911,35 @@ def reject_on_delimiter(name: str, text: str, reject: Reject) -> None:
     finding = delimiter_finding(name, text)
     if finding is None:
         return
+    # guard: result — 实测第一个非空行的分隔符（名字说 .csv ⇒ 必须是逗号）
     reject(
         "artifact_delimiter",
         f"{finding['who']}: {finding['violated']}",
         expected=str(finding["expected"]),
         got=str(finding["got"]),
     )
+
+
+def _upstream_anchor(parts: Mapping[str, Mapping[str, Any]]) -> tuple[str, str] | None:
+    """★ 规格 ①(a)：溯源不许一起丢 —— 给出**产物级锚点**。
+
+    复用既有的交接字段（`handoff.producer_commit` / `handoff.from`），**不新造字段**。
+    返回 `(上游件名, 人读锚点串)`；没有任何上游件时返回 `None`（宁可不编，不造假）。
+    """
+    for name in sorted(parts):
+        payload = parts[name]
+        if not isinstance(payload, Mapping):
+            continue
+        handoff = payload.get("handoff")
+        if not isinstance(handoff, Mapping):
+            continue
+        producer = str(handoff.get("from") or "")
+        commit = str(handoff.get("producer_commit") or "")
+        if not producer and not commit:
+            continue
+        anchor = f"{name} (produced by {producer}" + (f"; commit {commit[:12]}" if commit else "") + ")"
+        return name, anchor
+    return None
 
 
 def declared_reconcile(
@@ -967,21 +1011,27 @@ def _file_payloads(
     if raw is None:
         return {}
     if not isinstance(raw, Mapping) or not raw:
+        # guard: parse
         reject("files_not_an_object", render_files_requirement(ANSWER_CONTRACT))
     out: dict[str, str] = {}
     total = 0
     for name, content in raw.items():
         path = str(name)
         if not isinstance(content, str):
+            # guard: parse
             reject("file_not_text", f"file {path!r} is {type(content).__name__}, not text")
         if not path or path.startswith(("/", "\\")) or ":" in path.split("/")[0]:
+            # guard: safety
             reject("file_path_not_relative", f"file path {path!r} must be relative to the workspace")
         if ".." in Path(path).parts:
+            # guard: safety
             reject("file_path_escapes", f"file path {path!r} escapes the workspace")
         if path.endswith("/"):
+            # guard: safety
             reject("file_path_is_a_directory", f"file path {path!r} names a directory")
         total += len(content.encode("utf-8"))
         if total > MAX_CODE_BYTES:
+            # guard: safety
             reject("files_too_large", f"the files payload exceeds {MAX_CODE_BYTES} bytes")
         out[path] = content
     return out
@@ -1005,6 +1055,8 @@ def parse_candidate(
     #: ★ 规格 C①：本块**声明的**对账关系（空 = 逐值相同，第一道工序语义逐字不变）。
     reconcile_declaration: Sequence[Mapping[str, Any]] = (),
     observe: Callable[[Mapping[str, Any]], None] | None = None,
+    #: ★ 规格 ①(b)：未对上输入行的读数去哪儿（报告用；不参与判定）。
+    on_unverified: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> Candidate:
     """Read one answer into a ``Candidate``, or fail loudly.
 
@@ -1041,13 +1093,16 @@ def parse_candidate(
         reason = _truncation_reason(text, hit_output_cap=hit_output_cap) if code == "truncated_answer" else ""
         reject(code, problem, reason=reason)
     if not isinstance(document, Mapping):
+        # guard: parse
         reject("not_an_object", f"the answer is a JSON {type(document).__name__}, not an object")
     rows = document.get("rows", [])
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        # guard: parse
         reject("rows_not_a_list", "'rows' is missing or is not an array of objects")
     clean_rows: list[Mapping[str, Any]] = []
     for row in rows:
         if not isinstance(row, Mapping):
+            # guard: parse
             reject("row_not_an_object", f"a row is {type(row).__name__}, not an object of column: value")
         # ★ A04 + ②: an absent cell is recorded as *absent*, never as an empty
         #   string or a zero. The canonical spelling is "the key is not there"
@@ -1073,8 +1128,11 @@ def parse_candidate(
     shape_with_refs = expected_shape(authorized_sources)
     snapshot_ref = document.get("ref")
     if not isinstance(snapshot_ref, str) or not snapshot_ref:
+        # ★ 规格 ②③ 的处置**未落地**（见交付清单 E3：要连带改 6 条既有断言 + 加红线反证，
+        #   本轮预算不足，不做"先拆后建"）—— 这里保持原条件不变。
         if authorized_sources:
             keys = sorted(str(key) for key in document)
+            # guard: parse
             reject(
                 "missing_ref",
                 f"the answer does not say which snapshot it came from: {ref_name!r} is missing "
@@ -1084,7 +1142,7 @@ def parse_candidate(
         # No authorized source to cite (a block that only merges upstream parts):
         # there is nothing better to put here, and the gap is reported.
         snapshot_ref = source_id
-    elif snapshot_ref in tuple(getattr(subtask, "inputs", ()) or ()):
+    elif snapshot_ref in tuple(getattr(subtask, "inputs", ()) or ()):  # guard: parse — 存在性：它收到的上游件之一
         # ★★ 规格 C③：`ref` **允许指向上游产物** —— 下游块手上没有 snapshot，
         #   但"这份东西是谁给我的"有确定答案：产出它的那个块（`producer_commit` 由交接件
         #   随 brief 送到，见 `producer_commit`/`producer_verdict`）。旧的"只能指快照"
@@ -1097,6 +1155,7 @@ def parse_candidate(
         #   empty -- which is exactly the merge block, so it could cite anything.
         #   A block that declares inputs may only cite a snapshot it (or the parts
         #   it consumed) actually read.
+        # guard: parse
         reject(
             "unknown_ref",
             f"'ref' names {snapshot_ref!r}, which is not a snapshot this block was given",
@@ -1142,6 +1201,7 @@ def parse_candidate(
         #   matches no input is refused (never given a citation it cannot support).
         #   ★ 声明了变换的块：按**声明的对账关系**比（主键列逐字 + 派生列按声明的 op），
         #   而不是逐值相同 —— 逐值相同只对"从来源搬运"成立。
+        unverified: list[int] = []
         provenance = list(
             _inherited_provenance(
                 artifact,
@@ -1150,8 +1210,21 @@ def parse_candidate(
                 observe=observe,
                 subtask_id=subtask.id,
                 reconcile=rules,
+                unverified=unverified,
             )
         )
+        # ★ ①(b)：不拒收，但**对账结果必须落进报告** —— 哪几行没有逐字对上，
+        #   以及"谁去核"：CI 从原始数据重算（`services/ci.py` 的重算判据）。
+        if unverified and on_unverified is not None:
+            with contextlib.suppress(Exception):
+                on_unverified(
+                    {
+                        "artifact": artifact.name,
+                        "rows_not_matched_to_an_input_row": unverified[:20],
+                        "unverified_rows": len(unverified),
+                        "reconciled_by": "CI recomputation from the original data (not this guard)",
+                    }
+                )
     # ★★ 读过来源的块【不是】纯拼接块，不逼它逐字匹配上游的行。
     #   `_inherited_provenance` 的 docstring 自己写着这个缺口：一行对不上时，
     #   "it is either fabricated or **transformed**, and the system cannot yet tell
@@ -1796,6 +1869,15 @@ class LoopIOImpl(LoopIO):
             read_own_sources=self.read_sources,
             # ★ 声明从这一层读（它手上才有 `judge.bundle`）
             reconcile_declaration=declared_reconcile(self.judge.bundle, self.subtask, self.subtask.output),
+            # ★ ①(b)：未对上输入行的读数落进事件流（报告看得见），**不参与判定**。
+            on_unverified=lambda detail: self.log.record(
+                kind="gate_check",
+                task_id=self.task_id,
+                worker_id=self.subtask.id,
+                at=self.epoch(),
+                ok=True,
+                detail={"content_unverified": dict(detail)},
+            ),
             observe=self._guard_observer(),
         )
 
