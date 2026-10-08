@@ -49,6 +49,21 @@ sources:
   - {ref: target-managers, locator: input/data/target_managers.csv}
   - {ref: target-periods, locator: input/data/target_periods.csv}
 
+# ★ content_checks 由 `acceptance/spec_extractor.py` **机械提取**自官方判分器
+#   （不是人手写 —— 手写就是猜）。复现命令：
+#     .venv/bin/python acceptance/spec_extractor.py \
+#       --checks acceptance/ab/13f-crowding/input/checks --yaml
+#   提到的那一条正是丢掉的那一份规格：权重按 (manager, period) 分组求和 == 1，atol=1e-10
+content_checks:
+  invariants:
+    - left: "weight"
+      op: "eq"
+      aggregate: "sum"
+      right: 1.0
+      group_by:
+        - "manager_order"
+        - "period_order"
+      tol: 1e-10
 constraints:
   # ★ 只放一条【弱】自检：产物在不在、能不能解析。
   #   真正的判据（官方 test_outputs.py + reference_data）在【外面】跑 —— 不许放进本任务，

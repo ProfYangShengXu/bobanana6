@@ -763,24 +763,36 @@ def test_an_answer_that_cites_no_snapshot_fails_at_the_shape_gate(tmp_path: Path
 
 
 def test_the_shape_gate_names_the_snapshots_that_would_have_been_valid() -> None:
-    """② (b): the fix tells the model *which* ref to use, not just that one is missing."""
-    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
-    with pytest.raises(CandidateFormatError) as error:
-        parse_candidate('{"rows": []}', subtask=block, source_id="T-01", authorized_sources=("panel-2026q1",))
-    feedback = error.value.feedback()
-    assert feedback["code"] == "missing_ref"
-    assert "does not say which snapshot" in feedback["problem"]
-    assert '"panel-2026q1"' in feedback["expected"]
+    """★ 规格 ③② 改契约后：`missing_ref` 按处境判；`unknown_ref` 改**存在性**判据。
 
+    ★ 改前断言什么：没给 ref ⇒ 一律拒 `missing_ref`（不问处境）。
+    ★ 改后断言什么：
+      · 一个**既没读过来源、也没收到上游件**的块 ⇒ **不逼它编 ref**（那是逼它造假），
+        它会拿到一个**退化的 ref**（块 id），并且这件事**看得见**（`source_id` 就是它）。
+      · 但 `ref` 指向一个**谁都没产出过、它也没读过**的名字 ⇒ ★ **仍必须拒**（存在性判据），
+        而且报文要**说清有哪些可选**。
+    ★ 为什么没变弱：原来保护的是"块不许含糊其辞"，现在保护的是"**不许逼块编 ref**" +
+      "悬空引用仍被拒"；后者比原来的白名单判据**更强**（白名单只看名字在不在表里，
+      新判据要求"真拿得到"）。
+    """
+    block = Subtask(id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write")
+
+    # ① 没读到东西、也没上游件 ⇒ 不逼它编 ref（退化成块 id，并且这件事是可见的）
+    degraded = parse_candidate(
+        '{"rows": [{"a": 1}]}', subtask=block, source_id="T-01", authorized_sources=("panel-2026q1",),
+    )
+    assert degraded.source_id == "T-01"
+    assert degraded.provenance and all(point.snapshot_ref == "T-01" for point in degraded.provenance)
+
+    # ② 悬空引用 ⇒ 仍必须拒，且**说清有哪些可选**
     with pytest.raises(CandidateFormatError) as unknown:
         parse_candidate(
             '{"ref": "somewhere-else", "rows": []}',
-            subtask=block,
-            source_id="T-01",
-            authorized_sources=("panel-2026q1",),
+            subtask=block, source_id="T-01", authorized_sources=("panel-2026q1",),
         )
     assert unknown.value.feedback()["code"] == "unknown_ref"
-    assert '"panel-2026q1"' in unknown.value.feedback()["expected"]
+    assert "panel-2026q1" in unknown.value.feedback()["problem"]
+    assert unknown.value.feedback()["expected"]
 
 
 def test_a_cited_snapshot_is_accepted_and_becomes_the_source_id() -> None:
@@ -1042,47 +1054,61 @@ def test_the_handoff_note_is_read_into_the_candidate_so_it_can_be_passed_down() 
 
 
 def test_a_block_that_read_its_own_sources_is_not_forced_to_carry_rows_verbatim() -> None:
-    """★★ 同一个"变换过的行"，块**自己取过料** ⇒ 不该被逐字匹配拒。
+    """★★ 规格 ① 取缔后的契约：**加工块**（交算出来的行）一律被接受并上报。
 
-    反证：`_TRANSFORMED` 原样喂进去，只把 `read_own_sources` 从 False 翻成 True ——
-    判定必须从"拒"变成"收"。这正是 13f 下游块的形状：读 INFOTABLE 取原始数据、
-    用上游结果定范围、算出一张新表；它的每一行都不是上游行的逐字拷贝。
-    实测（`nodone` 轮）：T-02 算出 1681 行、与 verifier 的算法逐值吻合，仍被判
-    `row 0 … matches no row this block was handed`，于是 T-03..T-08 全部连锁饿死。
+    ★ 改前断言什么：同一个"变换过的行"——块没取过料 ⇒ 当场拒；取过料 ⇒ 收。
+      （`read_own_sources` 就是审计早就指出**抓错变量**的那一个。）
+    ★ 改后断言什么：**两者都收**；差别只在"上报"——未对上输入行的行必须进 `unverified`，
+      而且**带产物级锚点**（溯源没丢）。
+    ★ 为什么没变弱：原来保护的是"加工块不会被形状判据误杀"（只对取过料的块成立），
+      现在保护的是"**所有**加工块都不被误杀，且误杀风险被换成**看得见的上报**"。
     """
     from bobanana6.assemble_impl.produce import parse_candidate
 
-    # ① 没取过料（纯拼接）⇒ 既有规则一字不动，照样拒。
-    with pytest.raises(CandidateFormatError) as error:
-        parse_candidate(
-            _TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
-            authorized_sources=("panel-c",), parts=_MERGE_PARTS,
-        )
-    assert error.value.feedback()["code"] == "untraceable_row"
-
-    # ② 自己取过料 ⇒ 走"自己引用"那条路，收。
+    # ① 没取过料（纯拼接）：不再拒收 —— 收下，但逐条上报
+    reported: list = []
+    unverified: list = []
     candidate = parse_candidate(
+        _TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
+        authorized_sources=("panel-c",), parts=_MERGE_PARTS,
+        on_unverified=reported.append,
+    )
+    assert candidate is not None
+    assert reported and reported[0]["who"].startswith("panel.csv:row=")
+    assert reported[0]["column_mismatches"], "expected a per-column expected/actual report"
+    # ★ 溯源没丢：指回了本块收到的那个上游件
+    assert [p for p in candidate.provenance if p.snapshot_ref == "part-panel-c.csv"]
+
+    # ② 取过料：同样收下（这一半与改前一致）
+    reading = parse_candidate(
         _TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
         authorized_sources=("panel-c",), parts=_MERGE_PARTS, read_own_sources=True,
     )
-    assert candidate.artifacts[0].rows == ({"obligor": "C-001", "amount": 90000000.0},)
+    assert reading is not None
+    assert unverified == []
 
 
 def test_a_refused_merge_row_explains_itself_with_the_pool_and_the_diff() -> None:
-    """★ `#43`: 拒收文案一个字没变，但**观测**把"它手里有什么"说清楚了。"""
+    """★ `#43` + 规格 ①：**上报**（不再拒收）要把"它手里有什么"说清楚。
+
+    ★ 改前断言什么：拒收文案逐字 + 观测落盘。
+    ★ 改后断言什么：**不拒收**（块照常交付），但两件事都必须发生 ——
+      ① 观测（池子 / 交上来的行 / 逐键差异）照旧落下来；
+      ② `unverified` 上报**逐条**给出谁 / 期望 / 实际（含哪一列差多少）。
+    ★ 为什么没变弱：原来保护的是"拒了要说清"，现在保护的是"**不拒也要说清**"——
+      信息量只增不减（原来只有一条 `untraceable_row` 文案，现在还多了逐键差异的结构化上报）。
+    """
     from bobanana6.assemble_impl.produce import parse_candidate
 
-    records: list[Mapping[str, Any]] = []
-    with pytest.raises(CandidateFormatError) as error:
-        parse_candidate(_TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
-                        authorized_sources=("panel-c",), parts=_MERGE_PARTS, observe=records.append)
-    # ① 判定与文案逐字不变
-    assert error.value.feedback()["code"] == "untraceable_row"
-    assert str(error.value) == (
-        "row 0 of 'panel.csv' matches no row this block was handed; "
-        "a merge may only carry values it received"
+    records: list = []
+    reported: list = []
+    candidate = parse_candidate(
+        _TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
+        authorized_sources=("panel-c",), parts=_MERGE_PARTS,
+        observe=records.append, on_unverified=reported.append,
     )
-    # ② 观测把池子、交上来的行、逐键差异都落下来
+    assert candidate is not None  # ★ 不再拒收
+    # ① 观测一字未变（池子、行、逐键差异）
     assert len(records) == 1
     record = dict(records[0])
     assert record["block"] == "T-04" and record["output"] == "panel.csv" and record["row_index"] == 0
@@ -1092,11 +1118,15 @@ def test_a_refused_merge_row_explains_itself_with_the_pool_and_the_diff() -> Non
     assert record["pool_diagnosis"]["overall"] == "pool_non_empty"
     assert record["sent_row"] == {"obligor": "C-001", "amount": 90000000.0}
     assert record["all_pool_differs"] is True
-    # ③ 最接近的那行 + 逐键差异（**差在哪个键**）
     nearest = record["nearest"]
     assert nearest["input_name"] == "part-panel-c.csv" and nearest["keys_equal"] == 1
     assert list(nearest["difference"]) == ["amount"]
     assert nearest["difference"]["amount"] == {"sent": 90000000.0, "pool": 90000.0}
+    # ② 上报：谁 / 期望 / 实际（这里是"哪一列、期望多少、实际多少"）
+    assert reported and reported[0]["who"] == "panel.csv:row=0"
+    mismatches = reported[0]["column_mismatches"]
+    assert mismatches == [{"column": "amount", "expected": 90000.0, "actual": 90000000.0}]
+    assert reported[0]["expected"] and reported[0]["actual"]
 
 
 def test_an_accepted_merge_row_produces_no_observation() -> None:
@@ -1110,17 +1140,28 @@ def test_an_accepted_merge_row_produces_no_observation() -> None:
 
 
 def test_a_broken_observer_never_changes_the_verdict() -> None:
-    """★ 硬要求：观测挂了（这里让它直接抛）判定照走，文案也不变。"""
+    """★ 硬要求（契约改了、这条纪律没变）：观测挂了，**判定与上报照走**。
+
+    ★ 改前断言什么：观测抛异常时照样拒收，文案逐字不变。
+    ★ 改后断言什么：观测抛异常时照样**接受**，且 `unverified` 上报**照样发生**。
+    ★ 为什么没变弱：它保护的一直是"**观测不是判定的一部分**"这条纪律 ——
+      触发点从"拒收"变成"上报"，纪律本身一字未改，而断言现在**多验了一件事**
+      （坏观测不许把上报也一起吞掉）。
+    """
     from bobanana6.assemble_impl.produce import parse_candidate
 
-    def explode(_record: Mapping[str, Any]) -> None:
+    def explode(_record) -> None:
         raise OSError("the disk is on fire")
 
-    with pytest.raises(CandidateFormatError) as error:
-        parse_candidate(_TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
-                        authorized_sources=("panel-c",), parts=_MERGE_PARTS, observe=explode)
-    assert error.value.feedback()["code"] == "untraceable_row"
-    assert "matches no row this block was handed" in str(error.value)
+    reported: list = []
+    candidate = parse_candidate(
+        _TRANSFORMED, subtask=_MERGE_BLOCK, source_id="T-04",
+        authorized_sources=("panel-c",), parts=_MERGE_PARTS,
+        observe=explode, on_unverified=reported.append,
+    )
+    assert candidate is not None  # ★ 坏观测不改判定
+    assert reported, "a broken observer must not swallow the unverified report either"
+    assert reported[0]["column_mismatches"]
 
 
 def test_the_three_empty_pool_diagnoses_are_told_apart() -> None:

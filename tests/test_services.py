@@ -1217,22 +1217,32 @@ def test_pandas_and_numpy_are_importable_in_the_block_execution_environment(tmp_
 
 
 def test_the_inheritance_guard_writes_its_observation_only_when_it_refuses(tmp_path: Path) -> None:
-    """★ `#43` 的端到端：真走 `LoopIOImpl.produce` —— 拒收落盘、通过不落盘。"""
-    from bobanana6.assemble_impl.produce import CandidateFormatError
+    """★ `#43` 端到端 + 规格 ① 改契约：真走 `LoopIOImpl.produce`。
+
+    ★ 改前断言什么：拒收时落盘一份观测；通过时不落盘。
+    ★ 改后断言什么：**加工块不再被拒收**，但观测**照样落盘**（触发点从"拒收"变成"上报"），
+      而且 `unverified` 上报**也**发生了（事件流里看得见）。
+    ★ 为什么没变弱：原来保护的是"误伤要留下可诊断的证据"；现在保护的是同一个东西，
+      只是它不再以"块失败"为代价 —— 证据只多不少（观测文件内容逐字保留 + 多一条上报）。
+    """
 
     refused_dir = tmp_path / "refused"
     io = _merge_io(tmp_path, '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000000.0}]}',
                    refused_dir)
-    with pytest.raises(CandidateFormatError):
-        io.produce(_state())
+    proposal = io.produce(_state())
+    assert proposal.candidate is not None  # ★ 不再拒收（规格 ①：形状判据取缔）
     written = sorted(path.name for path in refused_dir.glob("*.json"))
     assert written == ["guard-pool-T-04-1.json"], written
     record = json.loads((refused_dir / written[0]).read_text(encoding="utf-8"))
     assert record["pool_size"] == 1 and record["output"] == "panel.csv"
     assert record["nearest"]["difference"] == {"amount": {"sent": 90000000.0, "pool": 90000.0}}
     assert record["pool_diagnosis"]["overall"] == "pool_non_empty"
+    # ★ 新增：溯源没丢 —— 拿不到逐行引用，但拿得到**产物级锚点**（指回收到的上游件）
+    anchors = [point for point in proposal.candidate.provenance if point.snapshot_ref == "part-panel-c.csv"]
+    assert anchors, proposal.candidate.provenance
+    assert anchors[0].source_row is None  # ★ 它拿不到"第几行"这个更强的声明
 
-    # ★ 反向：逐字搬运（该过）——同一个观测目录里一个文件都不许多
+    # ★ 反向：逐字搬运（该过）——同一个观测目录里一个文件都不许多，也不许有上报
     accepted_dir = tmp_path / "accepted"
     ok_io = _merge_io(tmp_path, '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000.0}]}',
                       accepted_dir)

@@ -166,6 +166,137 @@ def extract_reconciliations(source: str, *, path: str) -> list[Extracted]:
     return found
 
 
+def extract_grouped_invariants(source: str, *, path: str) -> list[Extracted]:
+    """★ 机械提取"分组聚合必须等于某常量"的**对账关系**（CI 的 invariant 形状）。
+
+    判据：`np.allclose(<expr>.groupby(K)[C].sum(), np.ones(...), atol=T, rtol=0)`
+    ⇒ `{left: C, aggregate: sum, right: 1.0, group_by: K, tol: T}`
+
+    这正是 13f 的 `test_weights_sum_to_one_by_book`（`test_outputs.py:510`）——
+    丢的就是「权重按 (manager, period) 分组求和 == 1，atol=1e-10」这一条。
+    """
+    tree = ast.parse(source)
+    # ★ 一步别名解析：`sums = df.groupby([...])['weight'].sum()` 之后再
+    #   `np.allclose(sums.to_numpy(), np.ones(...), atol=1e-10, rtol=0)` ——
+    #   判分器把聚合结果先赋给一个名字（`test_outputs.py:510`），所以光看 allclose 那一行
+    #   是看不见 groupby 的。★ 这仍是**机械**提取（跟着赋值走），不是人读着写。
+    aliases: dict[str, tuple[str, str, list[str]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        target = node.targets[0] if isinstance(node, ast.Assign) and node.targets else node.target
+        if not isinstance(target, ast.Name) or node.value is None:
+            continue
+        parsed = _parse_groupby_chain(node.value)
+        if parsed is not None:
+            aliases[target.id] = parsed
+
+    found: list[Extracted] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not _call_name(node.func).endswith("allclose") or len(node.args) < 2:
+            continue
+        left_expr, right_expr = node.args[0], node.args[1]
+        # 右边必须是一个"常量表"（`np.ones(n)` / `np.zeros(n)` / 字面量）
+        target = _constant_table(right_expr)
+        if target is None:
+            continue
+        # 左边要么直接是 `<...>.groupby(K)[C].<agg>()`，要么是它的**别名**
+        parsed = _parse_groupby_chain(left_expr) or _parse_groupby_chain(_base(left_expr))
+        if parsed is None:
+            resolved = aliases.get(_base_name(left_expr))
+            parsed = resolved
+        if parsed is None:
+            continue
+        column, aggregate, keys = parsed
+        tol = 0.0
+        for keyword in node.keywords:
+            if keyword.arg in ("atol", "rtol"):
+                value = _literal(keyword.value)
+                if isinstance(value, (int, float)) and value:
+                    tol = max(tol, float(value))
+        found.append(
+            Extracted(
+                kind="invariant.grouped",
+                value={
+                    "left": column,
+                    # ★ `op` 是**比较**（与契约既有字段一致：`{left, right, op}` 是必填），
+                    #   `aggregate` 才是"先怎么把一组值聚起来"。
+                    "op": "eq",
+                    "aggregate": aggregate,
+                    "right": target,
+                    "group_by": keys,
+                    "tol": tol,
+                },
+                source=f"{path}:{node.lineno}",
+                detail=ast.unparse(node)[:90],
+            )
+        )
+    return found
+
+
+def _base_name(node: ast.AST) -> str:
+    """`sums.to_numpy()` / `sums` ⇒ `sums`。"""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _base_name(node.value)
+    if isinstance(node, ast.Call):
+        return _base_name(node.func)
+    return ""
+
+
+def _base(node: ast.AST) -> ast.AST:
+    """剥掉 `.to_numpy()` / `.values` 这类后缀，回到被调用的那个表达式。"""
+    if isinstance(node, ast.Call) and not isinstance(node.func, ast.Attribute):
+        return node
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        return _base(node.func.value)
+    if isinstance(node, ast.Attribute):
+        return _base(node.value)
+    return node
+
+
+def _parse_groupby_chain(node: ast.AST) -> tuple[str, str, list[str]] | None:
+    """`<...>.groupby(K)[C].<agg>()` ⇒ `(列, 聚合, 键)`。"""
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return None
+    aggregate = node.func.attr
+    if aggregate not in ("sum", "mean", "count", "min", "max"):
+        return None
+    subscript = node.func.value
+    if not isinstance(subscript, ast.Subscript):
+        return None
+    column = _literal(subscript.slice) or ast.unparse(subscript.slice)
+    inner = subscript.value
+    if not isinstance(inner, ast.Call) or not isinstance(inner.func, ast.Attribute):
+        return None
+    if inner.func.attr != "groupby" or not inner.args:
+        return None
+    keys: list[str] = []
+    for argument in inner.args:
+        value = _literal(argument)
+        if isinstance(value, (list, tuple)):
+            keys.extend(str(item) for item in value)
+        else:
+            keys.append(str(value) if value is not None else ast.unparse(argument))
+    return str(column), aggregate, keys
+
+
+def _constant_table(node: ast.AST) -> float | None:
+    """`np.ones(n)` / `np.zeros(n)` / `1.0` ⇒ 目标常量。"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if isinstance(node, ast.Call):
+        name = _call_name(node.func)
+        if name.endswith("ones"):
+            return 1.0
+        if name.endswith("zeros"):
+            return 0.0
+    return None
+
+
 def extract(checks_dir: Path) -> list[Extracted]:
     found: list[Extracted] = []
     for path in sorted(checks_dir.rglob("*.py")):
@@ -176,6 +307,7 @@ def extract(checks_dir: Path) -> list[Extracted]:
         found.extend(extract_tolerances(source, path=relative))
         found.extend(extract_encodings(source, path=relative))
         found.extend(extract_reconciliations(source, path=relative))
+        found.extend(extract_grouped_invariants(source, path=relative))
     return found
 
 
@@ -183,9 +315,13 @@ def as_content_checks(found: list[Extracted]) -> dict[str, Any]:
     """把提取结果落成 `task.yaml` 的 `content_checks` 声明形状（**机械生成**）。"""
     tolerances = [entry for entry in found if entry.kind.startswith("tolerance.")]
     reconciliations = [entry for entry in found if entry.kind == "reconcile"]
+    grouped = [entry for entry in found if entry.kind == "invariant.grouped"]
     separation = [entry for entry in found if entry.kind == "encoding.sep"]
     declaration: dict[str, Any] = {}
-    if reconciliations:
+    if grouped:
+        # ★ 分组聚合形状直接就是 CI 的 invariant 形状（`invariant_findings` 认它）
+        declaration["invariants"] = [dict(entry.value) for entry in grouped]
+    if reconciliations and "invariants" not in declaration:
         # 去重（同一关系可能在多处出现）
         seen: set[str] = set()
         invariants = []

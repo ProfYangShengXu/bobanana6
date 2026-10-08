@@ -766,6 +766,8 @@ def _inherited_provenance(
     reconcile: Sequence[Mapping[str, Any]] = (),
     #: ★ 规格 ①(b)：**没有逐字匹配上的行**（现在不拒了，但要落进报告）。
     unverified: list[int] | None = None,
+    #: ★ 规格 ①(b)：每一行的"谁 / 期望 / 实际"逐条上报（含逐键差异）。
+    on_unverified: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[Provenance, ...]:
     """Cite a merge block's rows back to the rows it was handed (A11).
 
@@ -869,15 +871,31 @@ def _inherited_provenance(
             #   （判据扫描器 + 提取器 + fail-closed），不做"先拆后建"。
             #   这一行的拒收保持原样；`unattributed` 仅用于诊断计数。
             unattributed.append(index)
-            # ★ 这是**唯一**剩下的形状守卫（规格 §二① 的取缔对象）：它不计算结果，
-            #   只比对"长得像不像我给你的"；加工块结构上永远不成立。
-            #   取缔它要连带改 6 条既有断言 + 补一条"CI 重算抓真编造"的红线反证 ⇒ 见交付清单 E3。
-            # guard: shape — 待取缔：它的"对错"算不出来（形状判据），CI 重算才是结果判据
-            reject(
-                "untraceable_row",
-                f"row {index} of {artifact.name!r} matches no row this block was handed; "
-                "a merge may only carry values it received",
-            )
+            # ★★ 规格 ①：**取缔**逐字匹配（它是**最后一个形状守卫** —— 靠"长得像不像我给的"
+            #   推定造假；加工块结构上永远不成立：实测 8 块挂 6，全撞这一句）。
+            #   ★ (a) 溯源不许一起丢：给**产物级锚点**（本块收到的哪个上游件 + 产出它的块/commit，
+            #     复用既有交接字段）。
+            #   ★ (b) 不许静默放行：这一行走 `unverified` 上报通道 —— **哪一列、期望多少、实际多少**
+            #     都落进报告（用最近那行的逐键差异）。
+            #   ★ (c) 防编造由 CI 从原始数据**重算**兜底（`services/ci.py` 的重算判据），
+            #     不靠这条守卫。
+            # guard: result — 上报而非拒收：对不上的行按"与最近输入行的逐键差异"落报告，
+            # 编造由 CI 从原始数据重算抓住（`services/ci.py::invariant_findings`）
+            anchor = _upstream_anchor(parts)
+            if anchor:
+                provenance.append(
+                    Provenance(
+                        value_ref=f"{artifact.name}:row={index}",
+                        snapshot_ref=anchor[0],
+                        locator=anchor[1],
+                        source_row=None,
+                    )
+                )
+            unattributed.append(index)
+            if on_unverified is not None:
+                with contextlib.suppress(Exception):
+                    on_unverified(_unverified_detail(artifact, index, row, pool, parts, anchor))
+            continue
         seen: set[tuple[str, int]] = set()
         for _name, input_index, _input_row, point in matched:
             snapshot_ref = str(point.get("snapshot_ref") or "")
@@ -920,6 +938,57 @@ def reject_on_delimiter(name: str, text: str, reject: Reject) -> None:
     )
 
 
+def _unverified_detail(
+    artifact: Artifact,
+    index: int,
+    row: Mapping[str, Any],
+    pool: Sequence[tuple[str, int, Mapping[str, Any], Mapping[str, Any]]],
+    parts: Mapping[str, Mapping[str, Any]],
+    anchor: tuple[str, str] | None,
+) -> dict[str, Any]:
+    """★ ①(b)：**拒了要说清**这条纪律，在"不拒了"之后变成**上报要说清**。
+
+    给出 `who`（哪一行）/ `expected`（离它最近的那条输入行）/ `actual`（它实际交的），
+    以及**逐键差异**（哪一列、期望多少、实际多少）。
+    """
+    detail: dict[str, Any] = {
+        "artifact": artifact.name,
+        "row": index,
+        "who": f"{artifact.name}:row={index}",
+        "expected": "a row the block was handed, or a value the CI recomputation can reproduce",
+        "actual": dict(row),
+        "trace_anchor": anchor[1] if anchor else "",
+        "upstream_parts": sorted(parts),
+        "reconciled_by": "CI recomputation from the original data (not this guard)",
+    }
+    nearest: dict[str, Any] | None = None
+    best = -1
+    for name, input_index, input_row, point in pool:
+        one, other = canonical_row(row), canonical_row(input_row)
+        equal = [key for key in set(one) | set(other) if one.get(key) == other.get(key)]
+        if len(equal) > best:
+            best = len(equal)
+            difference = {
+                key: {"sent": one.get(key), "pool": other.get(key)}
+                for key in sorted(set(one) | set(other))
+                if one.get(key) != other.get(key)
+            }
+            nearest = {
+                "input_name": name,
+                "input_row_index": input_index,
+                "input_row": dict(input_row),
+                "difference": difference,
+                "snapshot_ref": str(point.get("snapshot_ref") or ""),
+            }
+    if nearest is not None:
+        detail["nearest_input_row"] = nearest
+        detail["column_mismatches"] = [
+            {"column": column, "expected": values["pool"], "actual": values["sent"]}
+            for column, values in nearest["difference"].items()
+        ]
+    return detail
+
+
 def _upstream_anchor(parts: Mapping[str, Mapping[str, Any]]) -> tuple[str, str] | None:
     """★ 规格 ①(a)：溯源不许一起丢 —— 给出**产物级锚点**。
 
@@ -931,15 +1000,35 @@ def _upstream_anchor(parts: Mapping[str, Mapping[str, Any]]) -> tuple[str, str] 
         if not isinstance(payload, Mapping):
             continue
         handoff = payload.get("handoff")
-        if not isinstance(handoff, Mapping):
-            continue
-        producer = str(handoff.get("from") or "")
-        commit = str(handoff.get("producer_commit") or "")
-        if not producer and not commit:
-            continue
-        anchor = f"{name} (produced by {producer}" + (f"; commit {commit[:12]}" if commit else "") + ")"
-        return name, anchor
+        producer = ""
+        commit = ""
+        if isinstance(handoff, Mapping):
+            producer = str(handoff.get("from") or "")
+            commit = str(handoff.get("producer_commit") or "")
+        # ★ 锚点**至少是那个上游件的名字**（"这一行来自我收到的哪一件"）；有交接件时再补上
+        #   产出它的块与 commit。判据是"指得到真东西"，不是"指得到最详细的那个"。
+        suffix = ""
+        if producer or commit:
+            suffix = " (produced by " + producer + (f"; commit {commit[:12]}" if commit else "") + ")"
+        return name, f"{name}{suffix}"
     return None
+
+
+def _citeable_names(
+    subtask: Subtask,
+    authorized_sources: Sequence[str],
+    parts: Mapping[str, Mapping[str, Any]] | None,
+) -> tuple[str, ...]:
+    """★ 规格 ②：本块**指得到**的名字 —— 存在性判据的取值域（不是白名单）。
+
+    · 它自己读过的来源（`authorized_sources`，由 runner 从"真读过"算出）
+    · 它收到的**上游产物**（`subtask.inputs`）—— 这些在 `parts` 里有产出者锚点
+    """
+    names = {str(name) for name in authorized_sources}
+    names.update(str(name) for name in (getattr(subtask, "inputs", ()) or ()))
+    for name in (parts or ()):
+        names.add(str(name))
+    return tuple(sorted(name for name in names if name))
 
 
 def declared_reconcile(
@@ -1128,9 +1217,10 @@ def parse_candidate(
     shape_with_refs = expected_shape(authorized_sources)
     snapshot_ref = document.get("ref")
     if not isinstance(snapshot_ref, str) or not snapshot_ref:
-        # ★ 规格 ②③ 的处置**未落地**（见交付清单 E3：要连带改 6 条既有断言 + 加红线反证，
-        #   本轮预算不足，不做"先拆后建"）—— 这里保持原条件不变。
-        if authorized_sources:
+        # ★★ 规格 ③（按处境判，**不是删掉**）：ref 是溯源的关键 ⇒ 不删；
+        #   但只有**真的读到东西的块**才被要求给 ref —— 一个"没读来源、手上也没上游件"的块
+        #   没有可指的东西，逼它给 ref 就是**逼它编一个**（实测它填 `output/xxx.csv` 然后撞门）。
+        if authorized_sources and (read_own_sources or parts):
             keys = sorted(str(key) for key in document)
             # guard: parse
             reject(
@@ -1142,13 +1232,12 @@ def parse_candidate(
         # No authorized source to cite (a block that only merges upstream parts):
         # there is nothing better to put here, and the gap is reported.
         snapshot_ref = source_id
-    elif snapshot_ref in tuple(getattr(subtask, "inputs", ()) or ()):  # guard: parse — 存在性：它收到的上游件之一
-        # ★★ 规格 C③：`ref` **允许指向上游产物** —— 下游块手上没有 snapshot，
-        #   但"这份东西是谁给我的"有确定答案：产出它的那个块（`producer_commit` 由交接件
-        #   随 brief 送到，见 `producer_commit`/`producer_verdict`）。旧的"只能指快照"
-        #   基准是错的（原则五：第二道工序手上只有上游产物）。
-        #   ★ 锚点：`snapshot_ref` 必须是**本块声明的输入**之一；指一个谁都没产出过的名字
-        #   仍然会被下面那条 `elif` 拒掉。
+    elif snapshot_ref in _citeable_names(subtask, authorized_sources, parts):
+        # ★★ 规格 ②（改判据，不是取消判据）：从"必须在**被授权快照**白名单里"改成
+        #   **存在性判据** —— ref 指向的东西必须【真实存在且本块拿得到】：
+        #     · 它自己读过的来源（`authorized_sources`）
+        #     · 或它收到的**上游产物**（`subtask.inputs`，带产出者锚点 `_upstream_anchor`）
+        #   ★ 白名单取消，但"指得到真东西"不许取消：谁都产不出的名字仍会被下面那条拒。
         pass
     elif (authorized_sources or subtask.inputs) and snapshot_ref not in authorized_sources:
         # ★ A11: the guard used to be skipped whenever ``authorized_sources`` was
@@ -1156,9 +1245,11 @@ def parse_candidate(
         #   A block that declares inputs may only cite a snapshot it (or the parts
         #   it consumed) actually read.
         # guard: parse
+        # guard: parse — 存在性：ref 必须指得到真东西（自己读过的来源 / 收到的上游产物）
         reject(
             "unknown_ref",
-            f"'ref' names {snapshot_ref!r}, which is not a snapshot this block was given",
+            f"'ref' names {snapshot_ref!r}, which neither the block read nor received from upstream; "
+            f"available: {sorted(_citeable_names(subtask, authorized_sources, parts))}",
             expected=shape_with_refs,
         )
     locator = str(document.get("body_path") or "")
@@ -1211,20 +1302,20 @@ def parse_candidate(
                 subtask_id=subtask.id,
                 reconcile=rules,
                 unverified=unverified,
+                on_unverified=on_unverified,
             )
         )
-        # ★ ①(b)：不拒收，但**对账结果必须落进报告** —— 哪几行没有逐字对上，
-        #   以及"谁去核"：CI 从原始数据重算（`services/ci.py` 的重算判据）。
-        if unverified and on_unverified is not None:
-            with contextlib.suppress(Exception):
-                on_unverified(
-                    {
-                        "artifact": artifact.name,
-                        "rows_not_matched_to_an_input_row": unverified[:20],
-                        "unverified_rows": len(unverified),
-                        "reconciled_by": "CI recomputation from the original data (not this guard)",
-                    }
+        # ★ ①(b)：不拒收，但**对账结果必须落进报告** —— 逐行的"谁/期望/实际"由
+        #   `on_unverified` 上报（上面循环里逐条发），这里只留汇总计数。
+        if unverified:
+            provenance.append(
+                Provenance(
+                    value_ref=f"{artifact.name}:unverified={len(unverified)}",
+                    snapshot_ref=_upstream_anchor(parts)[0] if _upstream_anchor(parts) else subtask.id,
+                    locator=f"{len(unverified)} rows were not matched to an input row (reconciled by CI)",
+                    source_row=None,
                 )
+            )
     # ★★ 读过来源的块【不是】纯拼接块，不逼它逐字匹配上游的行。
     #   `_inherited_provenance` 的 docstring 自己写着这个缺口：一行对不上时，
     #   "it is either fabricated or **transformed**, and the system cannot yet tell

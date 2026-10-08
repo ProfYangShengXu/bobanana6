@@ -406,27 +406,28 @@ def test_a_merge_block_may_not_cite_a_source_it_never_read() -> None:
             authorized_sources=(),  # ★ 它一个源都没读过
         )
     assert error.value.feedback()["code"] == "unknown_ref", error.value.feedback()
-    assert "not a snapshot this block was given" in error.value.feedback()["problem"]
+    # ★ 规格 ②：判据从"必须在被授权快照白名单里"改成**存在性**（它既没读过、也没收到过）。
+    #   措辞跟着判据走；★ 而且更强了：现在**说清有哪些可选**（"拒了要说清"）。
+    assert "neither the block read nor received from upstream" in error.value.feedback()["problem"]
+    assert "part-panel-a.csv" in error.value.feedback()["problem"]
 
 
 def test_a_merge_row_inherits_the_citation_of_the_row_it_was_handed() -> None:
-    """★★ A11 修后的第三条：合并块的行必须能回指它拿到的输入行。
+    """★★ A11 第三条（★ 规格 ① 改契约后）：搬运行**继承**它拿到的那条引用。
 
-    合并块自己没读过快照，所以「第 n 行来自源 X」不是它能做的声明 —— 引用由
-    它消费的部件**继承**过来。编出来的一行（没有任何输入行与它相同）会被当场
-    拒绝，而不是发给它一个撑不住的引用。
+    ★ 改的是什么：编出来的行**不再**被块级拒收（那是形状判据）——
+    但它仍然必须【指得到真东西】+ 【进报告】：
+      · 逐字搬运的行 ⇒ 继承输入行的引用（这一半一字未动）
+      · 编出来的行   ⇒ 落一条**产物级锚点**（指回本块收到的上游件）+ 进 `unverified` 上报
+    ★ 没变弱：原来保护的是"编造的行不会拿到一个撑不住的引用"，
+      现在保护的是"编造的行拿不到逐行引用、只拿得到产物级锚点，**而且必须被点名上报**"。
     """
-    from bobanana6.assemble_impl.produce import CandidateFormatError, parse_candidate
+    from bobanana6.assemble_impl.produce import parse_candidate
     from bobanana6.core.model import Subtask
 
     merge = Subtask(
-        id="T-04",
-        goal="merge the parts",
-        inputs=("part-panel-a.csv",),
-        output="panel.csv",
-        contract_ref="panel",
-        axis="field",
-        mode="write",
+        id="T-04", goal="merge the parts", inputs=("part-panel-a.csv",), output="panel.csv",
+        contract_ref="panel", axis="field", mode="write",
     )
     parts = {
         "part-panel-a.csv": {
@@ -434,28 +435,33 @@ def test_a_merge_row_inherits_the_citation_of_the_row_it_was_handed() -> None:
             "provenance": [
                 {"value_ref": "part-panel-a.csv:row=0", "snapshot_ref": "panel-a", "source_row": 0, "locator": "L"}
             ],
+            "handoff": {"from": "T-01", "producer_commit": "abc1234567890"},
         }
     }
     answer = '{"ref": "panel-a", "rows": [{"obligor": "A-001", "amount": "1"}]}'
     candidate = parse_candidate(
-        answer,
-        subtask=merge,
-        source_id="T-04",
-        authorized_sources=("panel-a",),  # 继承来的（runner 从部件的溯源算出）
-        parts=parts,
+        answer, subtask=merge, source_id="T-04", authorized_sources=("panel-a",), parts=parts,
     )
     assert [(p.snapshot_ref, p.source_row) for p in candidate.provenance] == [("panel-a", 0)]
 
-    # 编出来的一行：与任何输入行都不同 → 拒不收
-    with pytest.raises(CandidateFormatError) as error:
-        parse_candidate(
-            '{"ref": "panel-a", "rows": [{"obligor": "X-999", "amount": "1"}]}',
-            subtask=merge,
-            source_id="T-04",
-            authorized_sources=("panel-a",),
-            parts=parts,
-        )
-    assert error.value.feedback()["code"] == "untraceable_row", error.value.feedback()
+    # ★ 编出来的一行：不拒收，但**只拿得到产物级锚点** + 必须进上报
+    reported = []
+    invented = parse_candidate(
+        '{"ref": "panel-a", "rows": [{"obligor": "X-999", "amount": "1"}]}',
+        subtask=merge, source_id="T-04", authorized_sources=("panel-a",), parts=parts,
+        on_unverified=reported.append,
+    )
+    # ① 溯源没丢：指回了本块收到的那个上游件（带产出它的块与 commit）
+    anchors = [p for p in invented.provenance if p.snapshot_ref == "part-panel-a.csv"]
+    assert anchors, invented.provenance
+    assert "T-01" in anchors[0].locator and "abc123456789" in anchors[0].locator
+    assert anchors[0].source_row is None  # ★ 它拿不到"第几行"这个更强的声明
+    # ② 不许静默放行：逐条上报（谁 / 期望 / 实际 + 逐键差异）
+    assert reported and reported[0]["who"] == "panel.csv:row=0"
+    assert reported[0]["column_mismatches"][0]["column"] == "obligor"
+    assert reported[0]["column_mismatches"][0]["expected"] == "A-001"
+    assert reported[0]["column_mismatches"][0]["actual"] == "X-999"
+    assert "CI recomputation" in reported[0]["reconciled_by"]
 
 
 def test_the_executor_can_be_pointed_at_the_pressure_task() -> None:

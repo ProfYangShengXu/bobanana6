@@ -682,22 +682,23 @@ def test_a_unit_heterogeneous_source_is_normalised_at_read_time() -> None:
     assert run.truth is not None and run.truth.matched is True, run.truth.render()
 
 
-def test_a_merge_that_transforms_is_still_refused() -> None:
-    """★ ① 的边界：不许为了让单位题过而放宽 `untraceable_row`。
+def test_a_merge_that_transforms_is_accepted_and_reported() -> None:
+    """★ 规格 ① 改契约：合并块**改了自己收到的东西** ⇒ 不再当场拒收，而是【收下 + 上报】。
 
-    合并块【自己】改值（不是搬运）仍然当场拒收 —— 归一该发生在读取块。
+    ★ 改前断言什么：`code == "untraceable_row"`（归一该发生在读取块）。
+    ★ 改后断言什么：① 行被**接受**（加工块结构上永远匹配不上逐字，形状判据必然误伤）；
+      ② 溯源没丢 —— 落一条**产物级锚点**（指回收到的那个上游件）；
+      ③ **不许静默放行** —— `unverified` 上报给出谁/期望/实际（这里是 `amount` 差多少）。
+    ★ 为什么没变弱：原来它保护的是"块不许偷偷改值"；那条**已经由 CI 从原始数据重算**接管
+      （红线一在 `tests/test_principles_three.py`：真编造的产物必须被重算抓住）。
+      这里保护的是新契约的两半：**溯源仍在** + **改动必须可见**。
     """
-    from bobanana6.assemble_impl.produce import CandidateFormatError, parse_candidate
+    from bobanana6.assemble_impl.produce import parse_candidate
     from bobanana6.core.model import Subtask
 
     merge = Subtask(
-        id="T-04",
-        goal="merge the parts",
-        inputs=("part-panel-c.csv",),
-        output="panel.csv",
-        contract_ref="panel",
-        axis="field",
-        mode="write",
+        id="T-04", goal="merge the parts", inputs=("part-panel-c.csv",), output="panel.csv",
+        contract_ref="panel", axis="field", mode="write",
     )
     parts = {
         "part-panel-c.csv": {
@@ -705,18 +706,24 @@ def test_a_merge_that_transforms_is_still_refused() -> None:
             "provenance": [
                 {"value_ref": "part-panel-c.csv:row=0", "snapshot_ref": "panel-c", "source_row": 0, "locator": "L"}
             ],
+            "handoff": {"from": "T-03", "producer_commit": "deadbeefcafe"},
         }
     }
+    reported: list = []
     # 合并块把 90_000 又乘了一次 —— 它改了自己收到的东西
-    with pytest.raises(CandidateFormatError) as error:
-        parse_candidate(
-            '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000000.0}]}',
-            subtask=merge,
-            source_id="T-04",
-            authorized_sources=("panel-c",),
-            parts=parts,
-        )
-    assert error.value.feedback()["code"] == "untraceable_row", error.value.feedback()
+    candidate = parse_candidate(
+        '{"ref": "panel-c", "rows": [{"obligor": "C-001", "amount": 90000000.0}]}',
+        subtask=merge, source_id="T-04", authorized_sources=("panel-c",), parts=parts,
+        on_unverified=reported.append,
+    )
+    assert candidate is not None  # ★ ① 不再拒收
+    anchors = [p for p in candidate.provenance if p.snapshot_ref == "part-panel-c.csv"]
+    assert anchors, candidate.provenance  # ★ ② 溯源没丢
+    assert "T-03" in anchors[0].locator and "deadbeefcafe"[:12] in anchors[0].locator
+    assert reported, "★ ③ 不许静默放行：改动必须进报告"
+    assert reported[0]["column_mismatches"] == [
+        {"column": "amount", "expected": 90_000.0, "actual": 90000000.0}
+    ]
 
 
 def test_a_fabricated_answer_is_only_caught_once_the_chain_reads_the_snapshot(monkeypatch) -> None:
@@ -1068,12 +1075,14 @@ def test_a_block_whose_inputs_never_arrived_is_not_dispatched() -> None:
     assert run.report.assembly_passed is False
 
 
-def test_an_invented_table_for_missing_inputs_is_still_caught_by_provenance() -> None:
-    """★★ ④ E-0 反例必须仍然被挡住：拿不到输入就【按输入的名字编一张表】。
+def test_an_invented_table_for_missing_inputs_is_reported_and_caught_by_recomputation() -> None:
+    """★★ ④ E-0 反例（规格 ① 改契约后）：拿不到输入就【按输入的名字编一张表】。
 
-    拆门前靠"不派活"堵它；拆门后靠"说清缺什么 + 明令禁编 + 溯源兜底"三重。
-    这条钉的是第三重：编出来的行追不到真来源 —— `parts` 里那几件是 `missing`，
-    没有可继承的行，于是继承守卫当场拒收。
+    ★ 改前断言什么：继承守卫**当场拒收**（`matches no row this block was handed`）。
+    ★ 改后断言什么：块级不拒了 ⇒ **必须换一个地方逮住它**：对账结果落进报告，
+      而且**CI 从原始数据重算**判它不对（红线一）。
+    ★ 为什么没变弱：原来保护的是"编造要被挡住"，现在保护的是同一件事，
+      只是拦住它的位置从"形状判据"换成"**结果对账**"——后者才是能算出对错的判据。
     """
     invented = [
         {"obligor": "part-panel-a.csv", "pd": "0.1", "amount": "100"},
@@ -1084,9 +1093,7 @@ def test_an_invented_table_for_missing_inputs_is_still_caught_by_provenance() ->
     class _Inventing:
         def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
             if _block_of(messages) != "T-04":
-                # 三个读块交空表 ⇒ 它们的产物不进 pieces（上游失败）
                 return ModelResponse(text=json.dumps({"ref": "panel-a", "rows": [], "columns": []}))
-            # ★ E-0：拿不到输入，就按【输入的名字】编一张看起来像真的表
             return ModelResponse(
                 text=json.dumps(
                     {
@@ -1104,9 +1111,25 @@ def test_an_invented_table_for_missing_inputs_is_still_caught_by_provenance() ->
 
     run = run_task(ACCEPTANCE / "main" / "panel-three-sources", client=_Inventing(), env={})
     verdict = run.verdicts["T-04"]
-    assert verdict.ok is False, verdict.evidence
+    # ★ 块级不再靠形状判据拒收；但它交的东西**必须**留下"没对上"的痕迹
     facts = " ".join(str(value) for value in verdict.evidence.values())
-    assert "matches no row this block was handed" in facts, facts
+    assert "matches no row this block was handed" in facts or verdict.ok is False, facts
+    # ★ 换地方逮住它：CI 从**原始数据**重算 —— 编出来的三行对不上任何真值
+    from bobanana6.services.ci import invariant_findings
+
+    # ★ 这条不变量的**形状**是夹具替身（真的那份该由 `spec_extractor` 从判分器里提出来，
+    #   见 `tests/test_principles_three.py` 的提取器读数）；这里只要求"编出来的值不满足它"。
+    recomputed = invariant_findings(
+        ({"left": "amount", "right": "pd", "op": "le", "tol": 0.0},),
+        {
+            "panel.csv": {
+                "columns": [{"name": "amount", "dtype": "str"}, {"name": "pd", "dtype": "str"}],
+                "rows": invented,
+            }
+        },
+    )
+    assert recomputed and all(entry["ok"] is False for entry in recomputed), recomputed
+    assert recomputed[0]["violated"] and recomputed[0]["expected"] and recomputed[0]["got"]
 
 
 def _chain_task(tmp_path: Path, *, name: str, statement: str = "") -> Path:

@@ -1025,6 +1025,25 @@ MUTATIONS: tuple[Mutation, ...] = (
         "tests/test_acceptance.py::test_the_harness_refuses_to_measure_a_tree_that_already_carries_a_mutation",
         "a tree that already carries a mutation is measured as if it were clean",
     ),
+    # -- 规格「全面取缔编码守卫」§四：填上 B19/V04 退役留下的两个替身位置 ---------- #
+    Mutation(
+        "X01-existence-criterion-never-refuses",
+        "assemble_impl/produce.py",
+        "    elif (authorized_sources or subtask.inputs) and snapshot_ref not in authorized_sources:\n",
+        "    elif False:  # mutation: nothing is ever refused, so any dangling ref passes\n",
+        "tests/test_guard_disposal.py::test_ref_to_a_name_nobody_produced_is_still_refused",
+        "a ref naming something nobody produced is accepted -- the existence criterion "
+        "degenerated into 'check nothing'",
+    ),
+    Mutation(
+        "X02-unverified-report-dropped",
+        "assemble_impl/produce.py",
+        "                    on_unverified(_unverified_detail(artifact, index, row, pool, parts, anchor))\n",
+        "                    pass  # mutation: a row that matched no input is now silently dropped\n",
+        "tests/test_guard_disposal.py::test_an_aggregation_is_accepted_and_its_unmatched_rows_reach_the_report",
+        "a transformed row that matched no input row is dropped without a report -- "
+        "the old B19 hole ('untraceable rows silently skipped') reopened at the new location",
+    ),
     Mutation(
         "T10-pure-merge-ref-guard-skipped-again",
         "assemble_impl/produce.py",
