@@ -209,8 +209,21 @@ def test_the_conduction_table_covers_the_audited_points() -> None:
 
 
 def test_the_conduction_table_is_machine_readable_and_never_invents_model_numbers() -> None:
-    """§五④ + §五⑤：结构化输出；模型那部分**没跑就写未跑**，一个数字都不编。"""
+    """§五④ + §五⑤：结构化输出；模型那部分**没跑就写未跑**，一个数字都不编。
+
+    ★ 前置：`acceptance/ab/13f-crowding/input/` 是**不入库**的真实夹具（`.gitignore` 的
+    `acceptance/**/input/*`）。所以这条测试在"干净的 worktree"里跑不了 —— 那**不是**回归，
+    而是缺夹具（两臂对比时踩到过）。缺了就**具名跳过**，不假装跑过。
+    """
+    import pytest
+
     from tools import conduction_ab
+
+    if not (REPO / "acceptance" / "ab" / "13f-crowding" / "input" / "instruction.md").is_file():
+        pytest.skip(
+            "the 13f-crowding input fixture is not materialised (it is gitignored); "
+            "run it from the main checkout, or place the fixture first"
+        )
 
     rows = [conduction_ab.measure(point) for point in conduction_ab.POINTS]
     for row in rows:

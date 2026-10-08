@@ -12,6 +12,9 @@ snapshot) passes the name check with coverage 1.0.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from typing import Any
+
 from ..model import Artifact, Candidate, Constraint, Ontology, SnapshotBody, is_missing
 from ..ontology import base_unit, convert_value, map_field, split_quantity
 from ..provenance import row_of, same_value, validate_points
@@ -66,13 +69,72 @@ def same_quantity(left: object, right: object, concept: str, ontology: Ontology 
     return left_base is not None and left_base == right_base
 
 
+#: 一列与它所指的来源行之间**声明的对账关系**（`约束 spec.reconcile`）。
+#:   eq     逐值相同（缺省，收紧）
+#:   none   ★ 这一列是**算出来的**（第二道工序）—— 明说"这里不做逐值比对"
+#:   sum / count / min / max / mean   与**同组来源行**的聚合值比
+RECONCILE_OPS = ("eq", "none", "sum", "count", "min", "max", "mean")
+
+#: 聚合类 op —— 要按 `group_by` 选出一组来源行再比。
+_AGGREGATES = ("sum", "count", "min", "max", "mean")
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _aggregate(rows: tuple[Mapping[str, Any], ...], op: str, column: str) -> float | int | None:
+    """把选中的来源行聚成一个值（`count` 数行，其余按列）。"""
+    if op == "count":
+        return len(rows)
+    numbers = [_number(row.get(column)) for row in rows]
+    present = [number for number in numbers if number is not None]
+    if not present:
+        return None
+    if op == "sum":
+        return sum(present)
+    if op == "min":
+        return min(present)
+    if op == "max":
+        return max(present)
+    return sum(present) / len(present)
+
+
+def reconcile_holes(reconcile: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """★ 被声明为**算出来的**列（`op: none`）—— 这里**没有**内容检查它们。
+
+    这些列必须由别处（内容层的 invariants / 外部 checker / 生成断言）去验；
+    报告要**说得出有几个洞**，不许让"内部一致"冒充"内容正确"。
+    """
+    return tuple(
+        sorted(str(entry.get("column")) for entry in reconcile if entry.get("op") == "none")
+    )
+
+
 def value_mismatches(
     artifact: Artifact,
     candidate: Candidate,
     bodies: dict[str, SnapshotBody] | None = None,
     ontology: Ontology | None = None,
+    reconcile: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[str, ...]:
-    """Values that do not match the row they claim to come from."""
+    """Values that do not match the row they claim to come from.
+
+    ★★ 规格 ⑤：**按声明的对账关系比对，而不是逐值相同**。
+
+    逐值相同是**第一道工序的搬运语义**（读块照抄来源）。第二道工序（聚合 / 再加工）
+    交的是**算出来的新行**，逐值相同必然挂 —— 所以"该对得上"从硬编码变成契约可声明：
+
+        spec.reconcile: [{column: notional, op: sum, group_by: [manager], tol: 1e-6},
+                         {column: manager,  op: eq},
+                         {column: hhi,      op: none}]      # 算出来的，这里不逐值比
+
+    没有声明 ⇒ 逐值相同（与改前逐字一致，第一道工序的读数不动）。
+    """
+    declared = {str(entry.get("column")): entry for entry in reconcile}
     facts: list[str] = []
     for provenance in sorted(candidate.provenance, key=lambda p: (p.value_ref, p.snapshot_ref)):
         body = (bodies or {}).get(provenance.snapshot_ref)
@@ -87,6 +149,33 @@ def value_mismatches(
         for column in sorted(set(row) & set(snapshot_row)):
             value = row[column]
             if is_missing(value):
+                continue
+            rule = declared.get(column)
+            op = str(rule.get("op", "eq")) if rule is not None else "eq"  # blame: fail-closed — 缺 op 即逐值相同（第一道工序的搬运语义），方向收紧
+            if op == "none":
+                continue  # ★ 声明为算出来的列：这里不判（洞由内容层补，见 reconcile_holes）
+            if op in _AGGREGATES:
+                keys = tuple(str(name) for name in (rule or {}).get("group_by", ()) or ())  # blame: fail-closed — 缺 group_by 即整份快照当一组；选得更宽只会更容易抓到不一致，方向保守
+                over = str((rule or {}).get("over") or column)
+                selected = tuple(
+                    body_row
+                    for body_row in body.rows
+                    if all(body_row.get(name) == row.get(name) for name in keys)
+                )
+                expected = _aggregate(selected, op, over)
+                tol = float((rule or {}).get("tol", 1e-9))  # blame: fail-closed — 缺 tol 即 1e-9（几乎不放宽），方向收紧
+                observed = _number(value)
+                agrees = (
+                    expected is not None
+                    and observed is not None
+                    and abs(observed - float(expected)) <= tol
+                )
+                if not agrees:
+                    facts.append(
+                        f"row={index} col={column} value {value!r} does not match the declared "
+                        f"'{op}' over {len(selected)} source rows of {provenance.snapshot_ref!r} "
+                        f"grouped by {keys!r}: {expected!r}"
+                    )
                 continue
             if not same_quantity(value, snapshot_row[column], map_field(column, ontology) if ontology else column, ontology):
                 facts.append(
@@ -113,7 +202,13 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
     coverage = report.coverage
 
     content = tuple(break_.detail for break_ in report.breaks if break_.detail)
-    mismatches = value_mismatches(artifact, candidate, bodies, context.ontology)
+    # ★ ⑤：对账关系从**契约**读（`spec.reconcile`），不再硬编码"逐值相同"。
+    rules = constraint.spec.get("reconcile", [])  # blame: fail-closed — 缺 reconcile 即不做任何逐值放宽（与改前逐字一致）
+    if not isinstance(rules, (list, tuple)):
+        return fail(constraint, "spec.reconcile must be a list of {column, op, ...}")
+    mismatches = value_mismatches(artifact, candidate, bodies, context.ontology, rules)
+    # ★ 声明为"算出来的"列 = 这里**没有**内容检查它。说得出有几个洞，不许让内部一致冒充内容正确。
+    holes = reconcile_holes(rules)
 
     if coverage < minimum or content or mismatches:
         detail = f"coverage {coverage:.4f} < required {minimum}"
@@ -134,5 +229,11 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
             detail += f"; {content[0]}"
         if mismatches:
             detail += f"; {mismatches[0]}"
+        if holes:
+            detail += f"; declared-derived columns were NOT content-checked here: {list(holes)!r}"
         return fail(constraint, detail)
-    return ok(constraint, f"coverage {coverage:.4f} >= required {minimum}")
+    checked = f"coverage {coverage:.4f} >= required {minimum}"
+    if holes:
+        # ★ 过了也不许含糊：这一格只证明"引用能重放"，没证明"算得对"。
+        checked += f"; declared-derived columns were NOT content-checked here: {list(holes)!r}"
+    return ok(constraint, checked)

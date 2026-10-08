@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import codecs
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +64,9 @@ _TOP_LEVEL_KEYS = frozenset(
         "statement",
         # ★ ③: 声明"这些来源共享同一份状态"（多份局部视图 / 同一份账本）
         "sources_share_state",
+        # ★ 内容检查的两个维度（来源 + 可见性）。声明的东西**必须有读者** ——
+        #   见 `tests/test_ci_content.py::test_every_declared_top_level_key_has_a_reader`。
+        "content_checks",
     }
 )
 _CONSTRAINT_KEYS = frozenset({"id", "kind", "target", "spec", "rationale"})
@@ -78,6 +81,48 @@ _FIELD_SOURCE_KEYS = frozenset(FieldSource.__dataclass_fields__)
 
 class ContractParseError(ValueError):
     """A contract failure that names the file, the JSON path and the rule."""
+
+
+CONTENT_SOURCES = ("external_runner", "invariants", "generate", "none")
+#: 结果可见性（**独立于来源的第二个维度**）。默认 `sealed`：这是"能不能作弊"的开关，
+#: 默认选错 ⇒ 整批读数作废（`设计原则.md` 原则四：默认必须 fail-closed）。
+CONTENT_VISIBILITIES = ("sealed", "open")
+DEFAULT_VISIBILITY = "sealed"
+
+
+@dataclass(frozen=True)
+class ContentChecks:
+    """这道题的**内容检查**怎么定、结果给不给块看（两个独立维度，都在契约里声明）。
+
+    ★ 为什么两个维度独立：来源回答"检查从哪来"，可见性回答"结果去哪"，
+    四种组合各有意义（测试×外部 / 测试×生成 / 工程×外部 / 工程×生成）。
+
+    ★ `declared=False` 不是"没有内容检查"，而是"**没有声明**" —— 调用时具名拒
+    （`content_checks_not_declared`）。"没有"必须由 `none: true` 显式说出。
+    """
+
+    declared: bool = False
+    external_runner: Mapping[str, Any] | None = None
+    invariants: tuple[Mapping[str, Any], ...] = ()
+    generate: bool = False
+    none: bool = False
+    visibility: str = DEFAULT_VISIBILITY
+    #: ★ 可见性是**显式声明的**还是**默认来的** —— 行为一样（都是 sealed），
+    #: 但这个字段让读者不会被默认值静默误导（"默认要能说出来"）。
+    visibility_defaulted: bool = True  # blame: fail-closed — 未声明可见性即按 sealed 记（作弊开关闭合）；`True` 是说"这个 sealed 是默认来的"，不假装是显式声明
+
+    @property
+    def sources(self) -> tuple[str, ...]:
+        found = []
+        if self.external_runner is not None:
+            found.append("external_runner")
+        if self.invariants:
+            found.append("invariants")
+        if self.generate:
+            found.append("generate")
+        if self.none:
+            found.append("none")
+        return tuple(found)
 
 
 @dataclass(frozen=True)
@@ -95,6 +140,8 @@ class ContractDocument:
     blind: tuple[str, ...] = ()
     unmapped: tuple[tuple[str, str], ...] = ()
     limits: Limits = DEFAULT_LIMITS
+    #: ★ 内容检查的两个维度：来源（从哪来）+ 可见性（可不可见）。见 `ContentChecks`。
+    content_checks: ContentChecks = field(default_factory=ContentChecks)
 
 
 def _fail(source: str, path: str, message: str, rule: str) -> None:
@@ -430,6 +477,113 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
         blind=_blind(data, source),
         unmapped=_unmapped(data, source),
         limits=_limits(data, source),
+        content_checks=_content_checks(data, source),
+    )
+
+
+def _content_checks(data: Mapping[str, Any], source: str) -> ContentChecks:
+    """★ 内容检查的两个维度都在契约里声明（规格 §二①）—— 不写在代码里。
+
+    fail-closed 的三条：
+      · **没声明** ≠ **没有**：`declared=False` 会让内容层具名拒（`content_checks_not_declared`）
+      · 声明了却一个来源都没给 ⇒ 具名拒（不许静默当成 `none`）
+      · `none: true` 与别的来源同时出现 ⇒ 具名拒（自相矛盾）
+    """
+    if "content_checks" not in data:
+        return ContentChecks()
+    raw = data["content_checks"]
+    if raw is None:
+        _fail(source, "$.content_checks", "content_checks must be a mapping, not null", "type")
+    if not isinstance(raw, Mapping):
+        _fail(source, "$.content_checks", "content_checks must be a mapping", "type")
+    unknown = sorted(set(raw) - {*CONTENT_SOURCES, "visibility"})
+    if unknown:
+        _fail(
+            source,
+            "$.content_checks",
+            f"unknown keys {unknown!r}; expected any of {[*CONTENT_SOURCES, 'visibility']!r}",
+            "additionalProperties",
+        )
+
+    external = raw.get("external_runner")
+    if external is not None and not isinstance(external, Mapping):
+        _fail(source, "$.content_checks.external_runner", "external_runner must be a mapping", "type")
+    if isinstance(external, Mapping):
+        command = external.get("command")
+        if not isinstance(command, (list, tuple)) or not command or not all(
+            isinstance(part, str) and part for part in command
+        ):
+            _fail(
+                source,
+                "$.content_checks.external_runner.command",
+                "external_runner.command must be a non-empty list of non-empty strings",
+                "type",
+            )
+
+    invariants_raw = raw.get("invariants", [])  # blame: fail-closed — 没有 reconcile 声明即逐值相同（收紧），不做任何放宽
+    if not isinstance(invariants_raw, (list, tuple)):
+        _fail(source, "$.content_checks.invariants", "invariants must be a list", "type")
+    invariants: list[Mapping[str, Any]] = []
+    for index, entry in enumerate(invariants_raw):
+        if not isinstance(entry, Mapping):
+            _fail(source, f"$.content_checks.invariants[{index}]", "each invariant must be a mapping", "type")
+        missing = sorted({"left", "right", "op"} - set(entry))
+        if missing:
+            _fail(
+                source,
+                f"$.content_checks.invariants[{index}]",
+                f"invariant is missing {missing!r}",
+                "required",
+            )
+        invariants.append(dict(entry))
+
+    generate = raw.get("generate", False)  # blame: fail-closed — 缺声明即"不生成"；不会因为忘了写就自动派 worker 出去
+    if not isinstance(generate, bool):
+        _fail(source, "$.content_checks.generate", "generate must be a boolean", "type")
+    declared_none = raw.get("none", False)  # blame: fail-closed — 缺声明即"不是 none"⇒ 内容层会要求一个来源或具名拒，不会静默跳过
+    if not isinstance(declared_none, bool):
+        _fail(source, "$.content_checks.none", "none must be a boolean", "type")
+
+    declared = ContentChecks(
+        declared=True,
+        external_runner=dict(external) if isinstance(external, Mapping) else None,
+        invariants=tuple(invariants),
+        generate=generate,
+        none=declared_none,
+    )
+    if declared.none and len(declared.sources) > 1:
+        _fail(
+            source,
+            "$.content_checks",
+            f"`none: true` contradicts {[s for s in declared.sources if s != 'none']!r}",
+            "oneOf",
+        )
+    if not declared.sources:
+        _fail(
+            source,
+            "$.content_checks",
+            f"declared but names no source; expected one of {list(CONTENT_SOURCES)!r} -- "
+            f'"no content check" must be said with `none: true`, never by silence',
+            "required",
+        )
+
+    visibility_defaulted = "visibility" not in raw
+    visibility = raw.get("visibility", DEFAULT_VISIBILITY)
+    if visibility not in CONTENT_VISIBILITIES:
+        _fail(
+            source,
+            "$.content_checks.visibility",
+            f"visibility must be one of {list(CONTENT_VISIBILITIES)!r}, got {visibility!r}",
+            "enum",
+        )
+    return ContentChecks(
+        declared=True,
+        external_runner=declared.external_runner,
+        invariants=declared.invariants,
+        generate=declared.generate,
+        none=declared.none,
+        visibility=str(visibility),
+        visibility_defaulted=visibility_defaulted,
     )
 
 

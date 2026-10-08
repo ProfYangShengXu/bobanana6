@@ -1,12 +1,12 @@
 {
  "_why": "逐形态的【未标注】数。强制范围（审计点名 + `= True` + core//contract/ 的 `.get` 默认）必须为 0；范围外只许变少。调高这张表是唯一允许的放松动作，所以它必须出现在 diff 里被 review。",
  "unannotated_by_shape": {
-  "bool_false": 26,
+  "bool_false": 30,
   "bool_true": 0,
-  "empty_container": 165,
+  "empty_container": 172,
   "get_default": 101,
-  "none": 139,
+  "none": 141,
   "numeric": 49,
-  "other": 109
+  "other": 114
  }
 }

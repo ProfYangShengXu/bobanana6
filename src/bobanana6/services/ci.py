@@ -895,3 +895,205 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# 第 ④ 格 · 内容层：两个维度（来源从哪来 × 结果可不可见）
+# --------------------------------------------------------------------------- #
+#
+# ★ 这一层只做**调度与口径**：跑命令 / 重算对账要 I/O，归 `acceptance/ci_runner.py`
+#   （数据侧）。判据仍全部来自 `core/`。分界与第 1–3 格一致，不许串。
+#
+# ★★ 报告**两类分开标**，不许合成一句"内容检查通过"：
+#     自造的对账（invariants / generated）⇒ 只能验【内部一致性】：A 和 B 对不对得上
+#     外部 checker（external_runner）    ⇒ 才能验【外部正确性】：我们算的和真值对不对得上
+#   实测反例（必须记住）：13f 的 HHI —— `manager_metrics` 的 hhi 与它自己内部完全一致
+#   （内部一致性全过），但跟真值差 7.45e-5（外部正确性挂）。把"内部一致"当成"内容正确"
+#   就是**新的假绿来源**。
+
+CONTENT_REPORT_SCHEMA = "bobanana6.ci.content-report/1"
+
+#: 两类证据的强度标签 —— 报告里必须分开呈现。
+STRENGTH_INTERNAL = "internal"
+STRENGTH_EXTERNAL = "external"
+
+#: 结果可见性：写死在这里的只有**名字**，开关从契约来（§六④）。
+VISIBILITY_SEALED = "sealed"
+VISIBILITY_OPEN = "open"
+
+
+@dataclass(frozen=True)
+class ContentFinding:
+    """一条内容检查的读数。`strength` 决定它进哪一块（内部 / 外部）。"""
+
+    check: str
+    strength: str
+    who: str
+    expected: str
+    observed: str
+    ok: bool
+
+    def as_document(self) -> dict[str, Any]:
+        return {
+            "check": self.check,
+            "strength": self.strength,
+            "who": self.who,
+            "expected": self.expected,
+            "observed": self.observed,
+            "ok": self.ok,
+        }
+
+
+@dataclass(frozen=True)
+class ContentReport:
+    """一次内容检查的读数：两个维度 + **两类分开**的证据 + 具名拒。"""
+
+    task_id: str
+    schema: str = CONTENT_REPORT_SCHEMA
+    sources: tuple[str, ...] = ()
+    visibility: str = VISIBILITY_SEALED
+    #: ★ `declared` = 契约显式写了 visibility；`defaulted` = 缺省（行为同样是 sealed，
+    #:    但**不静默**：报告里说得出这个 sealed 是默认来的）。
+    visibility_source: str = "defaulted"
+    internal: tuple[ContentFinding, ...] = ()
+    external: tuple[ContentFinding, ...] = ()
+    #: 显式声明 `none: true` —— 这是**合法的第三种答案**，不是失败。
+    none_declared: bool = False
+    #: 具名拒（未声明 / 跑不起来 / 生成失败）—— 绝不许静默降级成 `none`。
+    refusal: str = ""
+    #: 生成的断言模块落盘位置（要进 git 痕迹，可复现、可 review）。
+    generated_path: str = ""
+
+    @property
+    def ok(self) -> bool:
+        if self.refusal:
+            return False
+        return all(finding.ok for finding in (*self.internal, *self.external))
+
+    @property
+    def internal_ok(self) -> bool:
+        return all(finding.ok for finding in self.internal)
+
+    @property
+    def external_ok(self) -> bool:
+        """★ 没跑外部 checker 时**不是** True —— 没验过 ≠ 验过了。
+
+        `None` 才是"没验"，所以这里返回 `None` 而不是布尔。
+        """
+        if not self.external:
+            return None  # type: ignore[return-value]
+        return all(finding.ok for finding in self.external)
+
+    def as_document(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "task_id": self.task_id,
+            "sources": list(self.sources),
+            "visibility": self.visibility,
+            "visibility_source": self.visibility_source,
+            # ★★ 两块分开，各带一句"这能证明什么" —— 不许合成一句"内容检查通过"
+            "internal_consistency": {
+                "what_it_proves": (
+                    "内部一致性：我们自己的两处算法/声明彼此对得上。"
+                    "**不能**证明与真值一致（13f 的 HHI：内部全过、与真值差 7.45e-5）"
+                ),
+                "ok": self.internal_ok,
+                "findings": [finding.as_document() for finding in self.internal],
+            },
+            "external_correctness": {
+                "what_it_proves": (
+                    "外部正确性：外部 checker / 真值说了算。只有这一块能证明『算得对』"
+                    if self.external
+                    else "外部正确性：**没有跑外部 checker** ⇒ 这一格是空的（没验过 ≠ 验过了）"
+                ),
+                "ok": self.external_ok,
+                "findings": [finding.as_document() for finding in self.external],
+            },
+            "none_declared": self.none_declared,
+            "refusal": self.refusal,
+            "generated_path": self.generated_path,
+        }
+
+    def digest(self) -> str:
+        return _digest(self.as_document())
+
+    # -- ★ 第二个维度：结果去哪 ------------------------------------------- #
+
+    def for_context(self) -> tuple[dict[str, Any], ...]:
+        """要交给**块**看的注记。
+
+        ★★ 默认 `sealed` ⇒ **空**：结果只进报告与 git 痕迹，绝不进块收到的上下文。
+        这是"能不能作弊"的开关 —— 块看到自己的内容检查结果，就能针对检查而不是针对
+        任务作答，整批读数作废。`open`（工程姿态）才把两块摘要交出去，用于自查与修。
+        """
+        if self.visibility != VISIBILITY_OPEN or self.refusal or self.none_declared:
+            return ()
+        notes: list[dict[str, Any]] = []
+        for block in ("internal_consistency", "external_correctness"):
+            section = self.as_document()[block]
+            if section["findings"]:
+                notes.append({"check_block": block, "ok": section["ok"], "findings": section["findings"]})
+        return tuple(notes)
+
+
+class ContentExecutor(Protocol):
+    """跑内容检查的**数据侧**端口（只有实作碰环境：跑命令 / 重算 / 读盘）。"""
+
+    def external(self, spec: Mapping[str, Any]) -> Sequence[ContentFinding]: ...
+
+    def invariants(self, specs: Sequence[Mapping[str, Any]]) -> Sequence[ContentFinding]: ...
+
+    def generated(self) -> tuple[Sequence[ContentFinding], str]: ...
+
+
+def run_content_checks(
+    checks: Any,
+    *,
+    task_id: str,
+    executor: ContentExecutor | None = None,
+) -> ContentReport:
+    """按契约声明的两个维度跑一次内容检查。
+
+    fail-closed 的三条（规格 §二①②）：
+      · **没声明** ⇒ `refusal="content_checks_not_declared"`，一个检查都不跑
+      · `none: true` ⇒ 合法的第三种答案（`none_declared=True`，不是失败）
+      · 声明的来源跑不起来 ⇒ 具名拒，**绝不许静默降级成 none**
+    """
+    if not getattr(checks, "declared", False):
+        return ContentReport(
+            task_id=task_id,
+            refusal=(
+                "content_checks_not_declared: the contract says nothing about content checks. "
+                "Silence is not \"none\" -- declare `content_checks: {none: true}` to say so explicitly"
+            ),
+        )
+    visibility = str(getattr(checks, "visibility", VISIBILITY_SEALED))
+    visibility_source = "defaulted" if getattr(checks, "visibility_defaulted", True) else "declared"
+    base = {
+        "task_id": task_id,
+        "sources": tuple(checks.sources),
+        "visibility": visibility,
+        "visibility_source": visibility_source,
+    }
+    if checks.none:
+        return ContentReport(**base, none_declared=True)
+    if executor is None:
+        return ContentReport(**base, refusal="content_checks_need_an_executor: no data-layer implementation was given")
+
+    internal: list[ContentFinding] = []
+    external: list[ContentFinding] = []
+    generated_path = ""
+    if checks.external_runner is not None:
+        # ★ external_runner 只是**其中一个例子**，不是唯一形态（来源清单可扩展）。
+        external.extend(executor.external(checks.external_runner))
+    if checks.invariants:
+        internal.extend(executor.invariants(checks.invariants))
+    if checks.generate:
+        findings, generated_path = executor.generated()
+        internal.extend(findings)
+    return ContentReport(
+        **base,
+        internal=tuple(internal),
+        external=tuple(external),
+        generated_path=generated_path,
+    )
