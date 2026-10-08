@@ -157,17 +157,29 @@ def test_red_line_one_a_fabricated_weight_table_is_caught_by_recomputation() -> 
     assert rules, "the extractor must produce at least one reconciliation"
 
     fabricated = {
-        "effective_holdings.csv": {
+        "output/effective_holdings.csv": {
             "columns": [{"name": "manager_order", "dtype": "str"}, {"name": "weight", "dtype": "float"}],
             "rows": [{"manager_order": "m1", "weight": 0.7}, {"manager_order": "m1", "weight": 0.7}],
-        }
+        },
+        # ★ 也交一份 summary.json —— 这样"容差声明"那几条**不跳过**，能真的被评估出来
+        "output/summary.json": {"columns": [{"name": "max_overlap_value", "dtype": "float"}],
+                                "rows": [{"max_overlap_value": 0.08272921}]},
     }
     findings = invariant_findings(rules, fabricated)
     assert findings, "the extracted reconciliation must be evaluated"
-    assert all(entry["ok"] is False for entry in findings), findings
-    first = findings[0]
+    # ★ 关系类读数（`invariant`）：编造的权重表必须被判不对
+    # ★ 跳过的不算"通过"也不算"失败" —— 分开算（规格 ①(c)：跳过要可见）
+    relations = [entry for entry in findings if entry["judgement"] == "invariant" and not entry.get("skipped")]
+    assert relations and all(entry["ok"] is False for entry in relations), relations
+    first = relations[0]
     assert first["violated"] and first["expected"] and first["got"]
     assert "weight" in first["who"]
+    assert "sum" in first["expected"]  # 分组求和形状（不是逐值相同）
+    # ★ 规格 ②：判分器**声明的容差**也一起被提取出来（数值键 1e-12、非数值键严格相等）
+    tolerances = [entry for entry in findings if entry["judgement"] == "declared_tolerance"]
+    assert tolerances, "the summary tolerance declaration must be evaluated too"
+    assert any("1e-12" in entry["expected"] for entry in tolerances), tolerances
+    assert any("strict" in entry["expected"] for entry in tolerances), tolerances
 
 
 def test_red_line_one_end_to_end_the_block_is_refused_by_recomputation(tmp_path: Path) -> None:

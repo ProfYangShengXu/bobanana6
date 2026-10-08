@@ -54,9 +54,16 @@ sources:
 #     .venv/bin/python acceptance/spec_extractor.py \
 #       --checks acceptance/ab/13f-crowding/input/checks --yaml
 #   提到的那一条正是丢掉的那一份规格：权重按 (manager, period) 分组求和 == 1，atol=1e-10
+# ★ content_checks **全部**由 `acceptance/spec_extractor.py` 机械提取自官方判分器
+#   （不是人手写 —— 手写就是猜）。复现命令：
+#     .venv/bin/python acceptance/spec_extractor.py \
+#       --checks acceptance/ab/13f-crowding/input/checks --yaml
+#   两条关键读数：① 每条不变量都带 `applies_to`（它约束**哪份产物**，算出来的）；
+#               ② summary 数值键容差 abs_tol=1e-12 + 非数值键严格相等（判分器定的尺子）
 content_checks:
   invariants:
-    - left: "weight"
+    - applies_to: "output/effective_holdings.csv"
+      left: "weight"
       op: "eq"
       aggregate: "sum"
       right: 1.0
@@ -64,6 +71,91 @@ content_checks:
         - "manager_order"
         - "period_order"
       tol: 1e-10
+    - applies_to: "output/summary.json"
+      left: "num_managers"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "num_periods"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "num_applied_filings"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "num_clean_positions"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "num_unique_latest_cusips"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "num_append_new_holdings_filings"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "num_restatement_filings"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "num_filtered_nonsh_rows"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "num_filtered_putcall_rows"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "max_summarypage_abs_value_diff"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "max_turnover_value"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "max_overlap_value"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "top_crowded_holder_count"
+      right: "abs_tol"
+      op: "abs_tol"
+      tol: 1e-12
+    - applies_to: "output/summary.json"
+      left: "weights_sum_check_passed"
+      right: "strict"
+      op: "strict"
+      tol: 0.0
+    - applies_to: "output/summary.json"
+      left: "summarypage_checks_passed"
+      right: "strict"
+      op: "strict"
+      tol: 0.0
+    - applies_to: "output/summary.json"
+      left: "all_required_files_written"
+      right: "strict"
+      op: "strict"
+      tol: 0.0
+    - applies_to: "output/summary.json"
+      left: "all_checks_passed"
+      right: "strict"
+      op: "strict"
+      tol: 0.0
 constraints:
   # ★ 只放一条【弱】自检：产物在不在、能不能解析。
   #   真正的判据（官方 test_outputs.py + reference_data）在【外面】跑 —— 不许放进本任务，

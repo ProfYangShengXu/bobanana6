@@ -864,9 +864,34 @@ class Runner:
                 },
             )
         violations: tuple[dict[str, Any], ...] = ()
+        skipped: tuple[dict[str, Any], ...] = ()
         if invariants:
-            violations = tuple(
-                entry for entry in invariant_findings(invariants, payload) if not entry.get("ok")
+            evaluated = invariant_findings(invariants, payload)
+            violations = tuple(entry for entry in evaluated if not entry.get("ok"))
+            # ★ 规格 ①(c)：**跳过要可见** —— "本块不产出 X" 必须写得出来，不许静默。
+            skipped = tuple(entry for entry in evaluated if entry.get("skipped"))
+            for entry in evaluated:
+                if entry.get("judgement") == "declared_tolerance":
+                    self.event_log.record(
+                        kind="gate_check",
+                        task_id=self.document.contract.task_id,
+                        worker_id=subtask.id,
+                        at=self.epoch(),
+                        ok=True,
+                        detail={"content_declared_tolerance": dict(entry)},
+                    )
+        if skipped:
+            self.event_log.record(
+                kind="gate_check",
+                task_id=self.document.contract.task_id,
+                worker_id=subtask.id,
+                at=self.epoch(),
+                ok=True,
+                detail={
+                    "content_invariants_skipped": [
+                        {"who": entry["who"], "why": entry["got"]} for entry in skipped
+                    ]
+                },
             )
         notices = truncation_findings(payload)
         return violations, notices

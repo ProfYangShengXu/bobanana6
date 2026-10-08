@@ -166,6 +166,120 @@ def extract_reconciliations(source: str, *, path: str) -> list[Extracted]:
     return found
 
 
+def extract_artifact_bindings(source: str, *, path: str) -> dict[str, str]:
+    """★ 规格 ①(b)：`fixture 名 -> 它约束的那份产物`（**算出来的**，不许人填）。
+
+    机械判据：`@pytest.fixture def <name>(): return _load_output_csv('<file>')`
+    再配合 `OUTPUT_DIR = Path('.../output')` ⇒ `<OUTPUT_DIR 的名字>/<file>`。
+    13f 里 `effective_holdings_df` ⇒ `output/effective_holdings.csv` —— 于是那条
+    "权重按 (manager_order, period_order) 求和归 1" 就挂到了**它真正约束的那份产物**上，
+    而不是挂在任务级（上一轮就是那么错挂的，套到 T-01 头上把它判 fail）。
+    """
+    tree = ast.parse(source)
+    output_dir = ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id.endswith("OUTPUT_DIR"):
+                value = node.value
+                if isinstance(value, ast.Call) and value.args:
+                    literal = _literal(value.args[0])
+                    if isinstance(literal, str):
+                        output_dir = Path(literal).name
+    #: `_load_output_csv` 这一族：函数名 -> 它是不是"读产物"
+    loaders = {"_load_output_csv"}
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        # ★ 装饰器可能是 `@fixture` 也可能是 `@pytest.fixture(scope=...)`（Call）
+        if not any(
+            _call_name(d.func if isinstance(d, ast.Call) else d) in ("fixture", "pytest.fixture")
+            for d in node.decorator_list
+        ):
+            continue
+        for statement in ast.walk(node):
+            if not isinstance(statement, ast.Call):
+                continue
+            if _call_name(statement.func) not in loaders or not statement.args:
+                continue
+            literal = _literal(statement.args[0])
+            if isinstance(literal, str):
+                prefix = output_dir or "output"
+                bindings[node.name] = f"{prefix}/{literal}"
+    return bindings
+
+
+def extract_fixture_usage(source: str) -> dict[str, list[str]]:
+    """`测试函数用到哪个 fixture` —— 有了它才能把"关系"和"产物"对上。"""
+    tree = ast.parse(source)
+    usage: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        names = [argument.arg for argument in node.args.args]
+        if names:
+            usage[node.name] = names
+    return usage
+
+
+def extract_summary_tolerance(source: str, *, path: str) -> list[Extracted]:
+    """★ 规格 ②：`summary` 数值键的容差 + 非数值键的严格相等（**机械提取**）。
+
+    判据：`def _assert_json_matches(atol: float = 1e-12)` 的默认参数，
+    以及它读的 `SUMMARY_NUMERIC_KEYS` / `SUMMARY_BOOL_KEYS` 两张集合。
+    ★ 容差是**判分器的**，不是我们定的 —— 提取器只负责把它搬到声明里。
+    """
+    tree = ast.parse(source)
+    found: list[Extracted] = []
+    tables: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and isinstance(node.value, (ast.Set, ast.List, ast.Tuple)):
+                literals = [_literal(item) for item in node.value.elts]
+                tables[target.id] = [str(item) for item in literals if isinstance(item, str)]
+    numeric_keys = tables.get("SUMMARY_NUMERIC_KEYS", [])
+    bool_keys = tables.get("SUMMARY_BOOL_KEYS", [])
+    # `_assert_json_matches` 的 atol 默认值 + 它读哪些键（机械）
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if "json" not in node.name and "summary" not in node.name:
+            continue
+        positional = list(node.args.posonlyargs) + list(node.args.args)
+        positional = positional[len(positional) - len(node.args.defaults) :]
+        tol: float | None = None
+        for argument, default in zip(positional, node.args.defaults, strict=True):
+            if argument.arg in ("atol", "abs_tol"):
+                value = _literal(default)
+                if isinstance(value, (int, float)):
+                    tol = float(value)
+        if tol is None:
+            continue
+        for key in numeric_keys:
+            found.append(
+                Extracted(
+                    kind="summary.numeric_tolerance",
+                    value={"key": key, "op": "abs_tol", "tol": tol},
+                    source=f"{path}:{node.lineno}",
+                    detail=f"{node.name}: numeric keys compare with abs_tol={tol!r}",
+                )
+            )
+        for key in bool_keys:
+            found.append(
+                Extracted(
+                    kind="summary.strict_key",
+                    value={"key": key, "op": "strict", "tol": 0.0},
+                    source=f"{path}:{node.lineno}",
+                    detail=f"{node.name}: these keys must be identical (no tolerance)",
+                )
+            )
+    return found
+
+
 def extract_grouped_invariants(source: str, *, path: str) -> list[Extracted]:
     """★ 机械提取"分组聚合必须等于某常量"的**对账关系**（CI 的 invariant 形状）。
 
@@ -176,11 +290,13 @@ def extract_grouped_invariants(source: str, *, path: str) -> list[Extracted]:
     丢的就是「权重按 (manager, period) 分组求和 == 1，atol=1e-10」这一条。
     """
     tree = ast.parse(source)
+    bindings = {name: path_ for name, path_ in extract_artifact_bindings(source, path=path).items()}
     # ★ 一步别名解析：`sums = df.groupby([...])['weight'].sum()` 之后再
     #   `np.allclose(sums.to_numpy(), np.ones(...), atol=1e-10, rtol=0)` ——
     #   判分器把聚合结果先赋给一个名字（`test_outputs.py:510`），所以光看 allclose 那一行
     #   是看不见 groupby 的。★ 这仍是**机械**提取（跟着赋值走），不是人读着写。
     aliases: dict[str, tuple[str, str, list[str]]] = {}
+    alias_binding: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
@@ -190,6 +306,7 @@ def extract_grouped_invariants(source: str, *, path: str) -> list[Extracted]:
         parsed = _parse_groupby_chain(node.value)
         if parsed is not None:
             aliases[target.id] = parsed
+            alias_binding[target.id] = _base_name(node.value)
 
     found: list[Extracted] = []
     for node in ast.walk(tree):
@@ -204,12 +321,15 @@ def extract_grouped_invariants(source: str, *, path: str) -> list[Extracted]:
             continue
         # 左边要么直接是 `<...>.groupby(K)[C].<agg>()`，要么是它的**别名**
         parsed = _parse_groupby_chain(left_expr) or _parse_groupby_chain(_base(left_expr))
+        fixture = _base_name(left_expr) if _parse_groupby_chain(left_expr) else ""
         if parsed is None:
             resolved = aliases.get(_base_name(left_expr))
             parsed = resolved
+            fixture = alias_binding.get(_base_name(left_expr), "")
         if parsed is None:
             continue
         column, aggregate, keys = parsed
+        applies_to = bindings.get(fixture, "")
         tol = 0.0
         for keyword in node.keywords:
             if keyword.arg in ("atol", "rtol"):
@@ -220,6 +340,8 @@ def extract_grouped_invariants(source: str, *, path: str) -> list[Extracted]:
             Extracted(
                 kind="invariant.grouped",
                 value={
+                    # ★ 规格 ①(b)：`applies_to` **算出来的**（fixture 名 → 它读的那份产物）
+                    "applies_to": applies_to,
                     "left": column,
                     # ★ `op` 是**比较**（与契约既有字段一致：`{left, right, op}` 是必填），
                     #   `aggregate` 才是"先怎么把一组值聚起来"。
@@ -237,13 +359,18 @@ def extract_grouped_invariants(source: str, *, path: str) -> list[Extracted]:
 
 
 def _base_name(node: ast.AST) -> str:
-    """`sums.to_numpy()` / `sums` ⇒ `sums`。"""
+    """剥到底：`effective_holdings_df.groupby([...])['weight'].sum()` ⇒ `effective_holdings_df`。
+
+    ★ 这是"哪个 fixture 上做的聚合"的机械判据 —— `applies_to` 靠它算出来。
+    """
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
         return _base_name(node.value)
     if isinstance(node, ast.Call):
         return _base_name(node.func)
+    if isinstance(node, ast.Subscript):
+        return _base_name(node.value)
     return ""
 
 
@@ -308,6 +435,7 @@ def extract(checks_dir: Path) -> list[Extracted]:
         found.extend(extract_encodings(source, path=relative))
         found.extend(extract_reconciliations(source, path=relative))
         found.extend(extract_grouped_invariants(source, path=relative))
+        found.extend(extract_summary_tolerance(source, path=relative))
     return found
 
 
@@ -316,11 +444,19 @@ def as_content_checks(found: list[Extracted]) -> dict[str, Any]:
     tolerances = [entry for entry in found if entry.kind.startswith("tolerance.")]
     reconciliations = [entry for entry in found if entry.kind == "reconcile"]
     grouped = [entry for entry in found if entry.kind == "invariant.grouped"]
+    summary_numeric = [entry for entry in found if entry.kind == "summary.numeric_tolerance"]
+    summary_strict = [entry for entry in found if entry.kind == "summary.strict_key"]
     separation = [entry for entry in found if entry.kind == "encoding.sep"]
     declaration: dict[str, Any] = {}
-    if grouped:
+    # ★ 规格 ②：summary 的键容差 —— 落成 invariant 形状（`op: abs_tol` / `op: strict`），
+    #   于是内容层 CI **知道**判分器的那把尺子，而不是让块自己猜精度。
+    summary_rules: list[dict[str, Any]] = []
+    for entry in [*summary_numeric, *summary_strict]:
+        rule = {"applies_to": "output/summary.json", "left": entry.value["key"], "right": entry.value["op"], "op": entry.value["op"], "tol": entry.value["tol"]}
+        summary_rules.append(rule)
+    if grouped or summary_rules:
         # ★ 分组聚合形状直接就是 CI 的 invariant 形状（`invariant_findings` 认它）
-        declaration["invariants"] = [dict(entry.value) for entry in grouped]
+        declaration["invariants"] = [dict(entry.value) for entry in grouped] + summary_rules
     if reconciliations and "invariants" not in declaration:
         # 去重（同一关系可能在多处出现）
         seen: set[str] = set()

@@ -1210,6 +1210,19 @@ def truncation_findings(artifacts: Mapping[str, Mapping[str, Any]]) -> tuple[dic
     return tuple(notices)
 
 
+def _artifact_present(applies_to: str, artifacts: Mapping[str, Mapping[str, Any]]) -> bool:
+    """`applies_to` 指的那份产物在不在本块这次的产物里（按全名或基名，两种写法都认）。"""
+    if not artifacts:
+        return False
+    wanted = applies_to.strip("/")
+    basename = wanted.rsplit("/", 1)[-1]
+    for name in artifacts:
+        candidate = str(name).strip("/")
+        if candidate == wanted or candidate.rsplit("/", 1)[-1] == basename:
+            return True
+    return False
+
+
 def _grouped_invariant(
     index: int,
     spec: Mapping[str, Any],
@@ -1293,6 +1306,42 @@ def invariant_findings(
     findings: list[dict[str, Any]] = []
     for index, spec in enumerate(invariants):
         left_column, right_column = str(spec.get("left")), str(spec.get("right"))
+        # ★★ 规格 ①：不变量**绑产物**，不许绑任务。
+        #   产物不在本块手上 ⇒ **跳过**（拿不准就不判），而且跳过要**可见**。
+        #   上一轮就是漏了这个：`weight` 的权重和不变量是 `effective_holdings.csv` 的约束，
+        #   却被当任务级声明套到了 T-01（它交的是 `filing_resolution.csv`，根本没有 weight 列）⇒ 误判 fail。
+        applies_to = str(spec.get("applies_to") or "")
+        if applies_to and not _artifact_present(applies_to, artifacts):
+            findings.append(
+                {
+                    "judgement": "invariant",
+                    "who": f"invariant[{index}] {applies_to}",
+                    "violated": "",
+                    "expected": f"the declared relation on {applies_to}",
+                    "got": f"skipped: this block does not produce {applies_to}",
+                    "ok": True,
+                    "skipped": True,
+                }
+            )
+            continue
+        # ★ 规格 ②：判分器**声明的容差**（机械提取出来的那把尺子）——
+        #   它不是 pass/fail，是"内容层知道该用什么精度比"，所以单独成一种读数。
+        if str(spec.get("op") or "") in ("abs_tol", "strict"):
+            findings.append(
+                {
+                    "judgement": "declared_tolerance",
+                    "who": f"{applies_to or '<task>'}:{left_column}",
+                    "violated": "",
+                    "expected": (
+                        f"compared with {spec.get('op')} (tol={spec.get('tol')!r})"
+                        if spec.get("op") == "abs_tol"
+                        else "compared with strict equality (no tolerance)"
+                    ),
+                    "got": "declared by the grader, mechanically extracted by spec_extractor",
+                    "ok": True,
+                }
+            )
+            continue
         # ★★ 分组聚合形状：`{left: <列>, right: <常量>, op: sum|mean|count, group_by: [...], tol}`
         #   —— 这就是"权重按 (manager, period) 分组求和必须等于 1（判分器里那把容差尺子）"的形状，
         #   也正是从官方判分器里机械提取出来的那一条（`test_outputs.py:510`）。
