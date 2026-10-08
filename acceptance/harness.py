@@ -114,6 +114,13 @@ class TaskRun:
     #: ★ What each block actually produced -- kept so a test can read the artifact
     #: (e.g. prove a value was normalised) instead of inferring it from a verdict.
     candidates: Mapping[str, Any] = field(default_factory=dict)
+    #: ★ 三层 CI 门的输入（`services/ci.py`）：跑测**实际用的**计划 / 约束包 / 本体 / 快照。
+    #: `None` = 这次跑没有可判的东西（例如在装配点之前就被拒了）。
+    #: 由 harness 从 `RunResult` 顺手带出来，比让 CI 数据层**重新推导**一遍计划可信。
+    plan: Any = None
+    bundle: Any = None
+    ontology: Any = None
+    snapshots: Mapping[str, Any] = field(default_factory=dict)
     assembly_codes: tuple[str, ...] = ()
     snapshot_refs: tuple[str, ...] = ()
     #: ★ The paths handed to the system -- so a test can prove `truth/` was not among them.
@@ -403,6 +410,13 @@ def run_task(
         blocks=result.plan.subtask_ids,
         verdicts=dict(result.verdicts),
         candidates=dict(result.candidates),
+        # ★ 三层的 CI 门（`services/ci.py`）要吃的正是这三样：计划、约束包、本体。
+        #   它们已经在 `RunResult` 里了 —— 让 harness 顺手带出来，
+        #   比让 CI 的数据层**重新推导**一遍计划更可信（重推会引入"跑的是 A、验的是 B"）。
+        plan=result.plan,
+        bundle=result.bundle,
+        ontology=result.ontology,
+        snapshots=dict(result.snapshots),
         assembly_codes=result.assembly.codes(),
         snapshot_refs=tuple(sorted(result.snapshots)),
         inputs_given=given,

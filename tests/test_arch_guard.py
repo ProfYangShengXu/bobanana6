@@ -896,3 +896,88 @@ def test_the_declared_reason_guard_detects_a_typo() -> None:
     assert declared_reasons('class E(Exception):\n    reason = "fmt_error"') == {"E": "fmt_error"}
     assert declared_reasons('class E(Exception):\n    reason = LOCALLY_DEFINED') == {}
     assert declared_reasons("class E(Exception):\n    reason: str = 'format_error'") == {"E": "format_error"}
+
+
+# --------------------------------------------------------------------------- #
+# ★ 补充规格 §四：CI/快照层的架构纯洁性门
+# --------------------------------------------------------------------------- #
+
+#: ★★ 为什么 CI 的调度层能用一条架构规则守住：
+#: 本项目 CI 便宜的全部理由是 `core/` 是「纯 stdlib · 确定性 · 不碰 I/O」。
+#: 一个伸手去够 `agentloop/` / `adapters/` / `sources/` 的调度器，
+#: 会把**环境接触**和**易变侧**一起拖进那条本该稳定、可重放、可逐字复现的判定路径。
+#: 于是：这个模块**只许** import 标准库与 `bobanana6.core`。
+CI_LAYER_MODULE = "bobanana6.services.ci"
+CI_LAYER_ALLOWED = ("bobanana6.core",)
+
+
+def ci_layer_module() -> Path:
+    return REPO / "src" / "bobanana6" / "services" / "ci.py"
+
+
+def ci_layer_offenders(module_name: str, source: str, *, is_package: bool = False) -> list[str]:
+    """`bobanana6.*` imports of the CI layer that are **not** the kernel.
+
+    Stdlib imports are not reported: "pure stdlib" is the *allowed* side here.
+    """
+    return [
+        module
+        for module in resolved_imports(module_name, source, is_package=is_package)
+        if module.startswith("bobanana6.") and not module.startswith(CI_LAYER_ALLOWED)
+    ]
+
+
+def test_the_ci_layer_reaches_only_the_kernel() -> None:
+    """★ 补充规格 §四①：新增的 CI/快照层仍然满足「箭头只朝 core」。"""
+    path = ci_layer_module()
+    assert path.is_file(), f"the CI layer is missing: {path}"
+    source = path.read_text(encoding="utf-8")
+    offenders = ci_layer_offenders(CI_LAYER_MODULE, source)
+    assert offenders == [], (
+        f"the CI layer left the kernel side: {offenders} -- it may import only stdlib and "
+        f"{CI_LAYER_ALLOWED[0]}"
+    )
+    # 这条守卫不能是空转的：它必须真的看得见这批 import
+    assert [m for m in resolved_imports(CI_LAYER_MODULE, source) if m.startswith("bobanana6.")], (
+        "the scanner found no bobanana6 imports at all -- the guard would pass vacuously"
+    )
+
+
+def test_the_ci_layer_guard_detects_a_violation() -> None:
+    """反向：一个伸手去够易变侧的调度器必须被抓住（能永远通过的守卫比没有守卫更坏）。"""
+    assert ci_layer_offenders(
+        CI_LAYER_MODULE, "from ..adapters import glm\n"
+    ) == ["bobanana6.adapters"]
+    assert ci_layer_offenders(
+        CI_LAYER_MODULE, "import bobanana6.agentloop.loop\n"
+    ) == ["bobanana6.agentloop.loop"]
+    assert ci_layer_offenders(
+        CI_LAYER_MODULE, "from .ci_runner import x\n"
+    ) == ["bobanana6.services.ci_runner"]
+    # 允许的那一侧：标准库与 core 都不报
+    assert ci_layer_offenders(CI_LAYER_MODULE, "import json\nfrom ..core import model\n") == []
+    assert ci_layer_offenders(CI_LAYER_MODULE, "from ..core.checkers import CHECKS\n") == []
+
+
+def test_the_layered_gate_schedules_every_registered_checker() -> None:
+    """★ 补充规格 §四③：三层门只许【调度】core 已有的 checker —— 一个都不许漏。
+
+    判据：注册表（`core/checkers/CHECKS`）与调度表（`services/ci.py::KIND_LAYER`）**完全相等**。
+    加了一个 checker 却没给它分层 ⇒ 这里立刻红，而不是静默漏判某一层。
+    """
+    from bobanana6.core.checkers import CHECKS
+    from bobanana6.services.ci import (
+        KIND_LAYER,
+        LAYER_ASSEMBLY,
+        LAYER_BLOCK,
+        LAYER_DELIVERY,
+        _require_layered,
+    )
+
+    _require_layered()  # 不抛就说明没有漏层的 kind
+    assert set(CHECKS) == set(KIND_LAYER)
+    assert set(KIND_LAYER.values()) == {LAYER_BLOCK, LAYER_ASSEMBLY}
+    assert LAYER_DELIVERY not in set(KIND_LAYER.values()), (
+        "the delivery layer must not be selected by checker kind: it is the five whole-run "
+        "judgments in core/, not a per-kind dispatch"
+    )
