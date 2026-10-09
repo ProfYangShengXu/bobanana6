@@ -72,6 +72,7 @@ from .answer_contract import (
     render_reference_note,
     render_shape,
 )
+from .artifact_shape import artifact_sections, clip_section, source_shapes
 
 __all__ = [
     "CANDIDATE_SCHEMA",
@@ -252,6 +253,15 @@ _HANDOFF_FILE_CAP = 40
 #: （13f 的 `input/instruction.md` 只有 5,355 字节），所以预算给得比交付输入小得多。
 #: 超预算要**可见地**截断（`…[truncated]` + 省了多少字），不许静默截。
 _STATEMENT_BRIEF_BUDGET = 40_000
+
+#: ★★ 来源表的**形状画像**（行数 / 列数 / 列名 / 按列分组后的组大小）。
+#: 这是**可算的事实**，不是对题目的解释：判据只用表头与行列（见 `artifact_shape.py`）。
+#: ★ 预算与 `_UPSTREAM_BRIEF_BUDGET` 同一套办法：按**表的个数**平分额度 ⇒
+#:   整段大小与来源个数无关地有界。装不下的部分**具名**写在 `omitted` 里（不静默）。
+_SOURCE_PROFILE_BUDGET = 5000
+_SOURCE_PROFILE_MIN_QUOTA = 400
+#: ★★ 题面里**归属到本块产物**的那一节（逐字切片）的字符预算；超了可见地截。
+_DELIVERABLE_SPEC_BUDGET = 2000
 
 
 def _brief_size(value: Any) -> int:
@@ -1534,6 +1544,14 @@ class LoopIOImpl(LoopIO):
     #:   `None` = 这个部署不记过程（既有读数一个字节都不变）。
     #:   ★ 记的落点在 `execute()` —— 每个工具结果都从那里过（与 `tool_result` 事件同一个单点）。
     traces: TraceStore | None = None  # blame: fail-closed — 省略即"这个部署不记过程"，既有读数一个字节都不变
+    #: ★★ 来源表形状画像的**一次算、全块复用**（`None` = 还没算过）。
+    #: 为什么必须缓存：`_constant_brief_entries` **每一轮**都会被调，而画像是 O(表的大小)。
+    #: ★ 缓存也保证"同一块内每一轮的前缀逐字节相同"（缓存从第 0 个 token 命中的前提）。
+    shape_cache: dict[str, Any] | None = field(  # blame: fail-closed — 省略即"还没算过"，第一次用到时才算（不是"没有画像"）
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def prompt(self, state: LoopState) -> list[dict[str, Any]]:
         """Stable instructions first, this block next, the transcript last.
@@ -1548,6 +1566,12 @@ class LoopIOImpl(LoopIO):
         #   恒定的那些进 system 的**恒定前缀**，brief 里**不再出现**（不许两边都放）。
         constant_entries = self._constant_brief_entries()
         brief: dict[str, Any] = {"subtask": dict(block), "authorized_sources": authorized}
+        # ★★ 题面里**归属到本块产物**的那一节（逐字切片）：让"这一段在描述哪个产物"
+        #   在结构上可见。放在 brief 最前面 —— 它是本块最该先看到的那件事。
+        #   ★ 题面全文一个字没少（仍在恒定前缀里），这里只是**再给它一次**。
+        deliverable_spec = self._deliverable_spec_entry()
+        if deliverable_spec:
+            brief["deliverable_spec"] = deliverable_spec
         # ★★ 写区（**按块变** ⇒ 进 brief，不进恒定前缀）：本块被授权写哪儿 + 谁都不许写哪儿。
         #   以前 brief 里只有 `subtask.output` 一个相对路径，没有任何一句说"以谁为基准"。
         write_scope = self._write_region_entry()
@@ -1560,6 +1584,11 @@ class LoopIOImpl(LoopIO):
         source_paths = self._source_paths()
         if source_paths and "source_files" not in constant_entries:
             brief["source_files"] = source_paths
+        # ★★ 每张来源表的**形状**（行/列/列名/按列分组的组大小）—— 与块无关 ⇒ 通常进
+        #   恒定前缀；这里只是"拿不到全 DAG 时"的兜底位置（两边**只会有一处**）。
+        profiles = self._source_profile_entries()
+        if profiles and "source_profiles" not in constant_entries:
+            brief["source_profiles"] = profiles
         # ★★ `#66` 上游的一切直接摆上桌（见 `_upstream_brief`）：产物形状 + 上游写过哪些
         #   文件 + 上游写给接手人的说明。下游不再需要花一轮去问"我手上有什么"。
         upstream_brief = self._upstream_brief()
@@ -1679,6 +1708,9 @@ class LoopIOImpl(LoopIO):
         return {
             "statement": lambda _subtask: self._statement_entry(),
             "source_files": lambda _subtask: self._source_paths(),
+            # ★★ 来源表的形状：**契约声明了哪些来源就有哪些** ⇒ 与块无关 ⇒ 全 DAG 恒定。
+            #   它进 system 的恒定前缀（缓存友好），而不是每块各带一份。
+            "source_profiles": lambda _subtask: self._source_profile_entries(),
             "what_this_task_is": lambda _subtask: contract.goal.strip(),
             "task": lambda subtask: task_nature(contract, self.judge.bundle, subtask),
             # ★★ 工作区根：**整跑级**的值，对每个块都取得到、且同值 ⇒ 全 DAG 恒定。
@@ -2300,8 +2332,13 @@ class LoopIOImpl(LoopIO):
             "truncated_chars": len(text) - budget,
         }
 
-    def _statement_text(self, ref: str, sources: Any) -> str:
-        """题面原文：优先工作区里那份（模型读的就是它），否则读冻结载体。"""
+    def _source_body(self, ref: str, sources: Any) -> str:
+        """一份来源的**原文**：优先工作区里那份（模型读的就是它），否则读冻结载体。
+
+        ★ 读不到 ⇒ 空串（**fail-closed**）：调用方据此"一个字都不加"，绝不猜。
+        """
+        if sources is None:
+            return ""
         encoding = "utf-8"
         for source in getattr(sources, "authorized", ()) or ():
             if getattr(source, "ref", "") == ref and getattr(source, "encoding", ""):
@@ -2320,6 +2357,59 @@ class LoopIOImpl(LoopIO):
             return Path(snapshot.body_path).read_text(encoding=encoding, errors="replace")
         except OSError:
             return ""
+
+    def _statement_text(self, ref: str, sources: Any) -> str:
+        """题面原文：优先工作区里那份（模型读的就是它），否则读冻结载体。"""
+        return self._source_body(ref, sources)
+
+    def _deliverable_spec_entry(self) -> dict[str, Any]:
+        """★ ① 题面里**归属到本块产物**的那一节（逐字切片，一个字不改写）。
+
+        为什么要它：题面一百多行一次内联进 system，产物规格埋在中间 —— 实测（真跑六轮）
+        模型读到的是**整段散文**，"哪一段在说我要产出的那个东西"要它自己去找、自己认。
+        这里按**契约声明的产物名**去题面里认标题，把本块那一节原样**再给一次**
+        （题面全文仍然在，见 `_statement_entry` —— 只做归属与前置，不删原文）。
+
+        ★ 只做归属：不解释、不判分、不替模型推结论、不写"所以你应该…"。
+        ★ 认不出 / 拿不到题面 ⇒ 一个字都不加（fail-closed）。
+        """
+        output = str(self.subtask.output or "")
+        if not output:
+            return {}
+        statement = self._statement_entry()
+        text = str(statement.get("text") or "")
+        if not text:
+            return {}
+        section = artifact_sections([output], text).get(output)
+        if not section:
+            return {}
+        return {
+            "artifact": output,
+            "verbatim_excerpt": True,
+            "section": clip_section(str(section["text"]), _DELIVERABLE_SPEC_BUDGET),
+        }
+
+    def _source_profile_entries(self) -> dict[str, Any]:
+        """★★ ② 每张**契约声明的**来源表的形状 —— 全 DAG 恒定 ⇒ 走 system 的恒定前缀。
+
+        为什么这是壳该算的：表长什么样是**可算的事实**，而模型看不到 —— 它只能先花
+        一轮把表读回来才知道有几行几列。这里把"行数 / 列数 / 列名 / 按两列分组后
+        最大的一组有多大"摆上桌（判据只用表头与行列，见 `artifact_shape.py`）。
+
+        ★ 只陈述形状：输出里**没有一格内容**（"最大几组"是**大小**，不是值），
+          也不写"所以你应该产出几行" —— 那一步是模型自己的判断，不是壳的。
+        ★ 读不到 / 不是表 ⇒ 那张不给；一张都给不出 ⇒ 空（fail-closed）。
+        ★ 算一次缓存一次：这一段**每轮**都要拼，且必须每轮逐字节相同（缓存前提）。
+        """
+        if self.shape_cache is None:
+            sources = getattr(self.toolset, "sources", None)
+            texts: dict[str, str] = {}
+            for source in self.toolset.task.contract().sources:
+                text = self._source_body(source.ref, sources)
+                if text:
+                    texts[source.ref] = text
+            self.shape_cache = source_shapes(texts, _SOURCE_PROFILE_BUDGET, _SOURCE_PROFILE_MIN_QUOTA)
+        return dict(self.shape_cache)
 
     def _upstream_brief(self) -> dict[str, Any]:
         """★★ 上游的一切直接摆上桌，不让下游再花一轮去问（`#66`）。
