@@ -1394,9 +1394,11 @@ def test_the_contract_tool_announces_declared_fields_but_keeps_bare_contracts_ve
 
 
 def test_the_served_tool_list_matches_the_declared_inventory() -> None:
-    """★ #39: 注册表服务 11 个工具，`TOOL_NAMES` 只列了 10 个（漏 `task.upstream_all`）——
+    """★ #39: 「部署能服务的工具」与「清单」的一致性判据 ——
+    当年注册表服务 11 个、`TOOL_NAMES` 只列了 10 个（漏 `task.upstream_all`），
     而 `TOOL_NAMES` 是 `runner` 喂给 `consist._tool_missing` 的"部署能服务什么"清单
-    ⇒ 一条 `spec.requires: [task.upstream_all]` 的约束会被误报成能力不可用。"""
+    ⇒ 一条 `spec.requires: [task.upstream_all]` 的约束会被误报成能力不可用。
+    ★ 个数会变（`#47` 之后是 17 条），所以只断言**集合相等**，不写死数字。"""
     from bobanana6.core.ports import _BASE_TOOL_SPECS
 
     assert set(TOOL_NAMES) == {spec.name for spec in _BASE_TOOL_SPECS}

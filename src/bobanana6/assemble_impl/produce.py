@@ -386,7 +386,14 @@ def tool_schemas(toolset: ToolSet) -> list[dict[str, Any]]:
     """
     schemas: list[dict[str, Any]] = []
     for spec in toolset.specs():
-        properties = {name: {"type": "string"} for name in (*spec.params, *spec.optional)}
+        # ★★ 默认每个参数渲染成 `{"type": "string"}`（这套工具的参数域一直是字符串）；
+        #   `spec.param_schemas` 给**不是字符串**的参数覆盖真形状 —— `files.patch` 的
+        #   `edits` 是一个 `[{oldText,newText}, …]` 数组，广告成 string 的话模型只能塞
+        #   一段 JSON 文本，弱模型几乎必错。
+        overrides = dict(spec.param_schemas)
+        properties = {
+            name: dict(overrides.get(name) or {"type": "string"}) for name in (*spec.params, *spec.optional)
+        }
         schemas.append(
             {
                 "type": "function",

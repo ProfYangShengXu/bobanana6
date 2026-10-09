@@ -21,7 +21,7 @@ and nothing else, so any *other* leak still fails.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from .model import (
@@ -219,6 +219,10 @@ class WorkspaceTools(Protocol):
 
     def patch(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> Mapping[str, Any]: ...
 
+    #: ★★ 定点修改（多条）：每条对**原文件**匹配、唯一、互不重叠，整体原子。
+    #:   `edits` = `[{oldText, newText}, …]`；写区/账本与 `patch` 同一条路。
+    def patch_edits(self, path: str, edits: Any) -> Mapping[str, Any]: ...
+
     def run(self, command: str, *, background: bool = False, timeout: float | None = None, workdir: str = "") -> Mapping[str, Any]: ...
 
     def run_code(self, code: str, *, reset: bool = False) -> Mapping[str, Any]: ...
@@ -254,6 +258,14 @@ class ToolSpec:
     #: 不写"怎么实现"（执行细节模型不需要），也不写"返回什么类型"
     #:   （`returns` 仍在，但它是给测试与清单看的，不再是给模型看的描述）。
     description: str = ""
+    #: ★★ 参数级的 JSON schema 覆盖。默认每个参数都被渲染成 `{"type": "string"}`，
+    #: 因为这套工具的参数域一直是字符串。**不是字符串**的参数必须在这里给出真形状，
+    #: 否则模型会把它当字符串填：实测触发条件是 `files.patch` 的 `edits` —— 它是一个
+    #: `[{oldText, newText}, …]` 数组，若广告成 string，模型只能塞一段 JSON 文本。
+    #: 不参与相等/哈希（判定与清单看的是 `params`/`optional`/`description`，
+    #: 模型看的是 `assemble_impl/produce.py::tool_schemas()` 渲染出来的那份）。
+    # blame: fail-closed — 省略即所有参数按字符串广告（旧形状），方向保守；只有显式声明了才给数组等真形状
+    param_schemas: Mapping[str, Mapping[str, Any]] = field(default_factory=dict, compare=False, hash=False)
 
 
 #: ★ 全部工具的完整描述。写法见 `ToolSpec.description` 的注记。
@@ -320,12 +332,15 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "改已有文件的几行用 files.patch。"
     ),
     "files.patch": (
-        "何时用：改一份【已存在】文件里的几处文字，且你知道原文确切长什么样。"
-        "输入：path；old_string = 要被替换的原文；new_string = 替换成什么；"
-        "replace_all = 是否替换全部匹配。"
-        "何时不用：整份重写用 files.write；"
-        "★ old_string 在文件里出现多次时会被拒（不猜你要改哪一处）—— "
-        "带足上下文让它唯一，或显式 replace_all=true。"
+        "何时用：★ 你已经诊断出【某份文件里哪几行错了】—— 用 path + edits[] 一次改完这几处。"
+        "别为了改几行就把整份文件重写一遍：整段重写会连已经写对的部分一起换掉，错越改越多。"
+        "输入：path = 工作区相对路径（必须落在你的写区内）；"
+        "edits = 数组，每条 {oldText, newText} —— oldText 是【要被替换的精确原文】，"
+        "newText 是替换成什么（空串 = 删掉这一段）。"
+        "★ 每条 oldText 必须在原文件里只出现一次；多条各自对【原文件】匹配，彼此不许重叠。"
+        "何时不用：整份新写 / 整份重写用 files.write；产物要交给程序算（pandas 等）用 code.run。"
+        "★ 原文匹配不上会被具名拒，并告诉你文件里那一段附近实际是什么 —— "
+        "把 oldText 往前/往后多带一行（相邻的 import、缩进、注释）就能唯一。"
     ),
     # -- exec：算出来、跑出来 ----------------------------------------------- #
     "code.run": (
@@ -436,14 +451,32 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
         group="files",
         description=_TOOL_DESCRIPTIONS["files.write"],
     ),
+    #: ★★ 定点修改（`#edit`）：**参数形状改成 `path` + `edits[]`**（flash `edit` 的语义）。
+    #: 原来它是 `path + old_string + new_string`（单条），描述却写着"改几处文字" ——
+    #: 说得到、做不到。实测（4B）：模型宁可整段重写 33~41 次 `code.run`，也一次没调它。
+    #: 旧参数在 **handler 里**仍兼容（既有调用方不被砍），但**不再广告**给模型：
+    #: 一个工具只留一种形状，模型才不会在两种写法之间选错。
     ToolSpec(
         "files.patch",
-        ("path", "old_string", "new_string"),
-        "exact text replacement; a non-unique match is refused",
+        ("path",),
+        "exact text replacement(s); a non-unique or overlapping match is refused, nothing is written",
         "write region",
-        optional=("replace_all",),
+        optional=("edits",),
         group="files",
         description=_TOOL_DESCRIPTIONS["files.patch"],
+        param_schemas={
+            "edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "oldText": {"type": "string", "description": "要被替换的精确原文"},
+                        "newText": {"type": "string", "description": "替换成什么（空串 = 删掉）"},
+                    },
+                    "required": ["oldText", "newText"],
+                },
+            }
+        },
     ),
     #: ★ 执行：cwd 落在工作区内；产生的文件与 `files.write` 同等处理。
     ToolSpec(

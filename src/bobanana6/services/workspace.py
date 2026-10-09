@@ -28,8 +28,9 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,7 @@ __all__ = [
     "may_write",
     "relative_parts",
 ]
+
 
 #: 单个窗口/单次写入的字节上限（与 `produce.MAX_CODE_BYTES` 同一量级：越过它就该分次写）。
 MAX_WRITE_BYTES = 200_000
@@ -330,6 +332,121 @@ class BoundWorkspace:
         target.write_text(text.replace(old_string, new_string), encoding="utf-8")
         return {**_written(root, target), "replacements": replacements}
 
+    def patch_edits(self, path: str, edits: Any) -> Mapping[str, Any]:
+        """★ 定点修改（多条）：每条对【原文件】匹配、唯一、互不重叠，整体原子。
+
+        语义照 flash 的 `edit`（`设计文档-bobanana6_flash-20261008.md §2.3` /
+        `bobanana6_flash/src/bobanana6_flash/tools/edit.py`）：
+
+        ```
+        ① 用【原文】匹配，不用行号 —— 行号会漂，文本不会漂
+        ② 每条 oldText 必须在原文件里【恰好出现一次】（0 次 = 找不到，>1 次 = 不唯一）
+        ③ 多条各自对【原文件】匹配，彼此【不许重叠】（重叠就拒，不做合并语义）
+        ④ 原子：任何一条不通过 ⇒ 一个字节都不落盘
+        ⑤ 失败【具名说清】：哪一条 / 期望什么 / 文件里那一段附近实际是什么
+        ```
+
+        ★ 与 `patch()` 走**同一条**边界：`_check_region`（写区/冻结）+ `_note`（ledger）
+          + `WriteBudget`。所以它既不是绕过写区的后门，也不会漏记 —— 块结束时
+          `_reconcile_workspace` 照样把它 diff 成候选产物。
+
+        ★ `edits` 接受真数组，也接受一段 JSON 文本（宽松端点 / 模型偶发把数组写成字符串）。
+        """
+        if isinstance(edits, str):
+            try:
+                edits = json.loads(edits)
+            except json.JSONDecodeError as exc:
+                raise WorkspaceError(
+                    f"edits must be an array of {{oldText, newText}}, got a string that is not JSON: {exc}"
+                ) from None
+        if not isinstance(edits, Sequence) or isinstance(edits, (str, bytes)) or not edits:
+            raise WorkspaceError(
+                f"edits must be a non-empty array of {{oldText, newText}} objects, got {type(edits).__name__}"
+            )
+
+        self._check_region(path)
+        self._note()
+        root = self._require_root()
+        target = self._inside(root, path)
+        if not target.is_file():
+            raise WorkspaceError(f"cannot patch {path!r}: no such file in the workspace")
+        raw = target.read_bytes()
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # ★ 不具名的 `UnicodeDecodeError` 会冒到 registry 的通用兜底，`cause` 变成空
+            #   （归因落到"无人声明"）。这里改成具名的 `WorkspaceError`（blame=model）：
+            #   是调用方挑错了文件（xlsx / 图片 / GBK csv），不是壳坏了。
+            raise WorkspaceError(f"cannot patch {path!r}: it is not valid UTF-8 text ({exc})") from None
+        # ★★ "只改那几处" = **文件里其它字节一个都不动**。CRLF 载体必须原样保住：
+        #   `Path.read_text/write_text` 的 universal newline 会把整份文件的行尾从 CRLF
+        #   翻成 LF —— 只改一行却动了全文（判定器只看见整份 sha256 变了，而事件流里
+        #   没有行号，事后无法定位）。所以：匹配在 LF 化副本上做（oldText 写 `\n` 即可），
+        #   落盘前再按原样换回 CRLF。
+        crlf = "\r\n" in decoded
+        original = decoded.replace("\r\n", "\n") if crlf else decoded
+
+        spans: list[tuple[int, int, str, int]] = []
+        for index, raw in enumerate(edits):
+            if not isinstance(raw, Mapping):
+                raise WorkspaceError(
+                    f"edits[{index}] must be an object {{oldText, newText}}, got {type(raw).__name__}"
+                )
+            old = raw.get("oldText")
+            new = raw.get("newText")
+            if not isinstance(old, str) or old == "":
+                raise WorkspaceError(
+                    f"edits[{index}].oldText must be a non-empty string (there is nothing to find otherwise); "
+                    f"got {dict(raw)!r}"
+                )
+            if not isinstance(new, str):
+                raise WorkspaceError(f"edits[{index}].newText must be text, got {type(new).__name__}")
+            occurrences = original.count(old)
+            if occurrences == 0:
+                raise WorkspaceError(
+                    f"edits[{index}].oldText was not found in {path!r}.\n"
+                    f"  expected (what you asked to replace): {_clip(old)}\n"
+                    f"  got (what is actually there, near its first line): {_nearby(original, old)}"
+                )
+            if occurrences > 1:
+                raise WorkspaceError(
+                    f"edits[{index}].oldText appears {occurrences} times in {path!r} "
+                    "(not unique; this tool will not guess which one).\n"
+                    "  expected: a span that occurs exactly once -- include the line above/below to make it unique\n"
+                    f"  got: {_clip(old)}  <- {occurrences} matches"
+                )
+            position = original.index(old)
+            spans.append((position, position + len(old), new, index))
+
+        spans.sort()
+        for (start_one, end_one, _new_one, index_one), (start_two, _end_two, _new_two, index_two) in pairwise(spans):
+            if start_two < end_one:
+                raise WorkspaceError(
+                    f"edits[{index_one}] and edits[{index_two}] match overlapping spans "
+                    f"(offsets {start_one}-{end_one} and {start_two}).\n"
+                    "  expected: non-overlapping replacements, each matched against the ORIGINAL file\n"
+                    "  got: two spans that intersect -- merge them into one edit"
+                )
+
+        # ★ 全部校验通过才动盘（原子）：先在内存里算完**最终全文**，再**单次**写。
+        #   账本与 `patch()` 同一套：净占用先过闸。
+        pieces: list[str] = []
+        cursor = 0
+        for start, end, new, _index in spans:
+            pieces.append(original[cursor:start])
+            pieces.append(new)
+            cursor = end
+        pieces.append(original[cursor:])
+        final_text = "".join(pieces)
+        encoded = (final_text.replace("\n", "\r\n") if crlf else final_text).encode("utf-8")
+        delta = len(encoded) - len(raw)
+        projected = self.write_budget.project(root, path, new_size=max(0, len(encoded)))
+        self.write_budget.ensure(projected, where=f"files.patch({path!r})", attempted=max(0, delta))
+        self.write_budget.note_write(path)
+        self.write_budget.note_bytes(max(0, delta))
+        target.write_bytes(encoded)
+        return {**_written(root, target), "replacements": len(spans)}
+
     def run(
         self,
         command: str,
@@ -427,6 +544,24 @@ def _timeout(raw: float | str | None) -> float:
 
 def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def _clip(text: str, limit: int = 300) -> str:  # blame: fail-closed — 省略即给错误报文一个有上限的短摘要，不会把整份文件倒进上下文
+    """一段原文的短摘要（失败报文里给模型看的东西，不倾泻整份文件）。"""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _nearby(original: str, old: str) -> str:
+    """文件里**你说要改的那段附近**实际是什么（照 flash `edit.py::_nearby`）。
+
+    先按 `old` 的第一行（去掉首尾空白）定位；定位不到就退回文件开头几行。
+    失败报文没有它，模型只能盲重试 —— 这正是不具名报错最贵的地方。
+    """
+    head = old.split("\n")[0].strip()
+    if head and head in original:
+        index = original.index(head)
+        return _clip(original[max(0, index - 120) : index + 300])
+    return _clip("\n".join(original.split("\n")[:6]))
 
 
 def _written(root: Path, path: Path) -> dict[str, Any]:

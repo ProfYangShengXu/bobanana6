@@ -40,6 +40,7 @@ from .textops import (
     line_window,
     search_lines,
 )
+from .workspace import WorkspaceError
 
 __all__ = [
     "TOOL_NAMES",
@@ -571,10 +572,30 @@ def build_registry(
         )
 
     def files_patch(args: Mapping[str, Any]) -> str:
+        """定点修改：新形状是 `path + edits[]`（一次多条、整体原子）。
+
+        ★ 旧形状（`path + old_string + new_string`，可选 `replace_all`）**仍然兼容**，
+          但它已经不再广告给模型 —— 一个工具只留一种形状，模型才不用在两种写法里选。
+        ★★ 这里**不许**把缺失的参数默认成空串：`args.get("new_string", "")` 会把
+          "没给 new_string" 变成"把这段删掉"，还回一个 ok=True（只读审计探针实测：
+          `{path, old_string:"world"}` 把 `'hello world\n'` 静默改成 `'hello \n'`）。
+          壳侧不校验 required，所以这道检查必须在执行层自己做。
+        """
+        workspace = _workspace()
+        path = str(args.get("path", ""))
+        edits = args.get("edits")
+        if edits not in (None, "", []):
+            return payload(dict(workspace.patch_edits(path, edits)))
+        if "old_string" not in args or "new_string" not in args:
+            raise WorkspaceError(
+                "files.patch needs `edits` = [{oldText, newText}, …]; "
+                "the older `old_string`/`new_string` shape is still accepted but both keys must be given "
+                "(a missing key would silently delete text)"
+            )
         return payload(
             dict(
-                _workspace().patch(
-                    str(args.get("path", "")),
+                workspace.patch(
+                    path,
                     str(args.get("old_string", "")),
                     str(args.get("new_string", "")),
                     replace_all=str(args.get("replace_all", "")).strip().lower() in ("true", "1", "yes"),
