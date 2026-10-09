@@ -682,7 +682,7 @@ def build_registry(
         "traces.read": (traces_read, "read", ()),
     }
     tools: list[RegisteredTool] = []
-    for spec in toolset.specs():
+    for spec in toolset.servable_specs():
         entry = catalog.get(spec.name)
         if entry is None:
             raise KeyError(f"tool {spec.name!r} is advertised but has no implementation")

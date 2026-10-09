@@ -12,6 +12,7 @@ decides whether a block passed -- that is ``core/kernel.py``.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -326,6 +327,8 @@ def build_toolset(
     #: ★ ARTEX 机制 ②：上游块的**过程**。`None` = 本块没有可检索的上游（入口块）
     #: ⇒ `traces.*` 不广告。装配方按 DAG 依赖算出的上游闭包构造它。
     traces: TraceTools | None = None,  # blame: fail-closed — 省略即"本块没有可检索的上游"，traces.* 不广告
+    #: ★ 工具面收束的部署开关：`None` = 读 `BOBANANA6_CODE_RUN`（缺省开 = 不改变既有行为）。
+    code_run: bool | None = None,  # blame: whitelist — 省略即读部署开关（默认开），不参与判定
 ) -> ToolSet:
     """Bind the tool surface to one block.
 
@@ -339,6 +342,10 @@ def build_toolset(
     ★ `#47`: ``workspace`` is the block's own working area (or ``None`` when the
     deployment declared none) -- the write/execute tools are advertised only when
     it is present, so a capability the deployment never granted cannot be asked for.
+
+    ★★ 工具面收束（本轮）：这里把**按需层**的三条判据算出来交给 `ToolSet` ——
+      `semantics_declared`（契约里真有语义声明吗）/ `has_deliverable`（本块产出交付物吗）
+      / `code_run`（部署开关）。三条都**从现成的数据现算**，拿不到就是 False（fail-closed）。
     """
     # ★ 判据 = 【契约声明了来源】。与 `axis` 无关 —— 理由见本文件上方那段注记。
     #   一个块的素材只有两个来处：声明的来源、或上游产物。白名单按轴名放行时，
@@ -358,8 +365,44 @@ def build_toolset(
         sources=sources,
         workspace=workspace,
         traces=traces,
+        # ★★ 按需层三条（都从现成数据现算，拿不到就是 False）：
+        semantics_declared=declares_semantics(contract),
+        has_deliverable=subtask.output in contract.deliverable_names,
+        code_run=code_run_enabled() if code_run is None else code_run,
         allowed_inputs=subtask.inputs,
         inherited_sources=inherited_sources,
+    )
+
+
+#: ★ `code.run` 的部署开关。默认**开**（不改变既有行为）；`BOBANANA6_CODE_RUN=off` 关掉。
+#: 关掉之后唯一能"跑代码"的路径是 `files.write` 写文件 → `shell.run` 跑它 → `files.patch` 改它
+#: —— 于是"重写一段代码"这个动作在工具面里**不存在**了。
+#: ★ 只有**装配层**（这里）读环境；`core/ports.py::ToolSet` 只收一个 bool（core 是环境无关的）。
+CODE_RUN_ENV = "BOBANANA6_CODE_RUN"
+
+
+def code_run_enabled(
+    environ: Mapping[str, str] | None = None,  # blame: whitelist — 省略即读进程环境（部署层的常规入口，与既有部署一致）
+) -> bool:
+    """这个部署要不要把 `code.run` 放进工具面。**默认开**，只有显式关掉才关。"""
+    source = os.environ if environ is None else environ
+    # blame: whitelist — 变量没设 = 部署没表达偏好 ⇒ 保持既有行为（开）；这是白名单式的缺省，不是"猜一个保守值"
+    raw = str(source.get(CODE_RUN_ENV, "")).strip().lower()
+    return raw not in ("off", "0", "false", "no")
+
+
+def declares_semantics(contract: TaskContract) -> bool:
+    """★ 契约里**真有**语义声明吗 —— 从契约现算（不硬编码、不按题写死）。
+
+    判据只有一条：**任一交付物字段声明了类型以外的东西**（`domain` / `granularity` /
+    `source` —— 见 `DeliverableField.declared`，那是"一个字段声明"的唯一定义）。
+    裸类型契约（`{text: str}`）⇒ 没声明 ⇒ **不给** `semantics.*`：
+    那种题上 `semantics.lookup` / `map` / `check` 没有可查的东西，只是占位噪声。
+    """
+    return any(
+        declaration.declared
+        for deliverable in contract.deliverables
+        for declaration in deliverable.schema.values()
     )
 
 

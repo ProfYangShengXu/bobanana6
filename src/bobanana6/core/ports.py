@@ -583,6 +583,16 @@ class ToolSet:
     #: ★ A11: the snapshots this block did not read itself but inherited from the
     #: parts it consumes. A merge block may cite these and nothing else.
     inherited_sources: tuple[str, ...] = ()
+    #: ★★ 工具面收束（核心层 + 按需层）：契约里**真有语义声明**吗 —— 由装配方从契约现算
+    #: （交付物字段声明了类型以外的东西，见 `DeliverableField.declared`）。
+    #: 拿不到/没声明 ⇒ **不给** `semantics.*`（fail-closed：不知道就不广告）。
+    semantics_declared: bool = False  # blame: fail-closed — 省略即"契约没声明语义"⇒ 不广告 semantics.*
+    #: ★★ 本块**有交付物**吗 —— 由装配方从 `subtask.output × contract.deliverables` 现算。
+    #: 没有 ⇒ 不广告 `check.*`（一个不产出交付物的块，让它自查"这一块过没过"是噪声）。
+    has_deliverable: bool = False  # blame: fail-closed — 省略即"本块不产出交付物"⇒ 不广告 check.*
+    #: ★★ `code.run` 的**部署开关**（默认开 = 不改变既有行为）。关掉之后唯一能跑代码的路径是
+    #: `files.write` 写文件 → `shell.run` 跑它 → `files.patch` 改它。
+    code_run: bool = True  # blame: whitelist — 省略即"保持既有行为"（开）；开关由部署用环境变量给，不参与判定
 
     def __post_init__(self) -> None:
         if self.subtask == "":
@@ -595,19 +605,62 @@ class ToolSet:
         if not self.allows_upstream(name):
             raise PermissionError(f"input {name!r} is not declared by subtask {self.subtask!r}")
 
+    def _wrote_a_file(self) -> bool:
+        """★ 按需层：本块**已经写过至少一个文件**了吗 —— 从运行时状态现算。
+
+        判据是 `WriteBudget.paths`（`files.write` / `files.patch` / 答案 `files` 都会
+        `note_write` 进来）。★ **拿不到就 False**（fail-closed）：没有 workspace、
+        或者它还没写过 —— 两种都不该让 `files.patch` 出现在菜单上。
+
+        ★ 代价是 O(1)（读一个集合），因为 `specs()` **每一轮都会被调**（`tool_schemas`）。
+        ⚠️ 已知边界：`shell.run("> x")` 造出来的文件**不算**（执行副作用不 `note_write`）——
+        那种块看不到 `files.patch`。fail-closed 方向，如实记在报告里。
+        """
+        if self.workspace is None:
+            return False
+        budget = getattr(self.workspace, "write_budget", None)
+        paths = getattr(budget, "paths", None)
+        return bool(paths)
+
+    def _advertises(self, name: str, *, dynamic: bool) -> bool:
+        """这一条工具在当前状态下该不该出现。
+
+        ``dynamic=False`` 时**忽略会随轮次变化的门**（`files.patch` 的"写过没有"）——
+        注册表要按那个超集注册，否则菜单后出现的工具派发不到（见 `servable_specs`）。
+        """
+        # -- 能力门（既有规则，一条不动） ---------------------------------- #
+        if name.startswith("sources.") and self.sources is None:
+            return False
+        if name.startswith(("files.", "shell.", "code.")) and self.workspace is None:
+            return False
+        if name.startswith("traces.") and self.traces is None:
+            return False
+        # -- 部署开关（`code.run` 可关；关掉后跑代码只剩 写文件→shell→patch） -- #
+        if name.startswith("code.") and not self.code_run:
+            return False
+        # -- 按需层：满足条件才暴露（三条都从状态现算，拿不到就不给） -------- #
+        if name.startswith("semantics.") and not self.semantics_declared:
+            return False
+        if name.startswith("check.") and not self.has_deliverable:
+            return False
+        # ★ 唯一的**轮内会变**的门：本块写过文件之后 `files.patch` 才亮出来。
+        #   `dynamic=False`（注册表那一遍）忽略它 —— 否则菜单后出现的工具派发不到。
+        return not (dynamic and name == "files.patch" and not self._wrote_a_file())
+
     def specs(self) -> tuple[ToolSpec, ...]:
-        """The tool schema, independent of any specific runtime.
+        """**这一轮**广告给模型的工具面（核心层 + 满足条件的按需层）。
 
         A capability the block does not hold is not advertised: no ``sources``
         means no read tools, no ``workspace`` means no write/execute tools.
         """
-        available: list[ToolSpec] = []
-        for spec in _BASE_TOOL_SPECS:
-            if spec.name.startswith("sources.") and self.sources is None:
-                continue
-            if spec.name.startswith(("files.", "shell.", "code.")) and self.workspace is None:
-                continue
-            if spec.name.startswith("traces.") and self.traces is None:
-                continue
-            available.append(spec)
-        return tuple(available)
+        return tuple(spec for spec in _BASE_TOOL_SPECS if self._advertises(spec.name, dynamic=True))
+
+    def servable_specs(self) -> tuple[ToolSpec, ...]:
+        """★ 注册表必须能**派发**的全部工具 —— `specs()` 的**超集**。
+
+        为什么必须有这一层：`files.patch` 是**轮内会变**的（本块写过文件才出现），
+        而注册表在块开始时只建一次（`services/registry.py::build_registry`）。
+        只按 `specs()` 注册 ⇒ 菜单后来出现了 `files.patch`，派发却答 "unknown tool"
+        —— 模型照着菜单调用却吃闭门羹，比不给它更糟。
+        """
+        return tuple(spec for spec in _BASE_TOOL_SPECS if self._advertises(spec.name, dynamic=False))

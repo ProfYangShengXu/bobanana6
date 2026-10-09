@@ -610,10 +610,13 @@ def test_loop_io_execute_records_tool_events_and_recovery(tmp_path: Path) -> Non
         task_id="t-one",
         epoch=lambda: 2.0,
     )
-    bad = ToolCall(call_id="c1", name="semantics.lookup", raw_arguments="{not json")
+    # ★ 工具面收束后，这道题的契约是**裸类型 schema** ⇒ `semantics.*` 不进菜单
+    #   （也不注册：按需层的判据是 per-块 恒定的，不需要像 `files.patch` 那样预注册）。
+    #   本条考的是「参数坏 → 恢复」的记账，换一个**恒定在菜单里**的核心工具照样考。
+    bad = ToolCall(call_id="c1", name="task.mysubtask", raw_arguments="{not json")
     first = io.execute((bad,))
     assert first[0].ok is False
-    good = ToolCall(call_id="c2", name="semantics.lookup", raw_arguments='{"term": "pd"}')
+    good = ToolCall(call_id="c2", name="task.mysubtask", raw_arguments="{}")
     second = io.execute((good,))
     assert second[0].ok is True
     kinds = [event.kind for event in log.events]

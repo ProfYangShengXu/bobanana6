@@ -378,6 +378,8 @@ def test_the_registry_refuses_the_old_shape_when_a_key_is_missing(tmp_path: Path
 
 def test_the_advertised_schema_shapes_edits_as_an_array(tmp_path: Path) -> None:
     tools, _registry = _full_toolset(tmp_path)
+    # ★ 按需层：`files.patch` 在本块**写过至少一个文件**之后才进菜单（工具面收束）。
+    tools.workspace.write("out.csv", "x\n")  # type: ignore[attr-defined]
     entries = {entry["function"]["name"]: entry["function"] for entry in _tool_schemas(tools)}
     entry = entries["files.patch"]
     parameters = entry["parameters"]

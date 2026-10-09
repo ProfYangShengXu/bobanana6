@@ -1289,6 +1289,10 @@ def test_the_batch_tool_returns_every_declared_input_at_once() -> None:
                 self.ToolSpec("task.upstream_all", (), "every declared input, by name", "inputs"),
             )
 
+        # ★ 注册表按 `servable_specs()` 注册（`specs()` 的**超集** —— 菜单轮内会变，
+        #   注册表只建一次）。这个替身没有轮内会变的工具，两个方法同形。
+        servable_specs = specs
+
         def require_upstream(self, name):  # type: ignore[no-untyped-def]
             if name not in self.allowed_inputs:
                 raise PermissionError(name)
