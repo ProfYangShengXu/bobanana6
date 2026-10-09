@@ -80,6 +80,7 @@ from ..services import (
 )
 from ..services.artifacts import ArtifactStore, BlockRecord
 from ..services.ci import invariant_findings, truncation_findings
+from ..services.traces import TraceStore
 from ..sources import SnapshotStore, SourceError
 from .produce import artifact_from_disk
 from .runtime import (
@@ -183,6 +184,10 @@ class Runner:
 
     def run(self) -> RunResult:
         contract = self.document.contract
+        # ★★ 过程级信息交换（ARTEX 机制 ②）：**一次 run 一份**过程记录。
+        #   在这里重置，是为了"同一个 Runner 被复用两次"时不会把上一轮的过程带进来
+        #   （那会让下游检索到别的 run 的现场 —— 比没有更糟）。
+        self.runtime.traces = TraceStore()
         survey_note = f"{len(contract.sources)} declared sources"
         from ..core.model import InputSurvey
 
@@ -950,8 +955,12 @@ class Runner:
                 paths=paths,
                 summary=summary,
                 inputs=inputs,
+                # ★ 过程记录与产物同一个 commit：事后复盘读的就是这份。
+                traces=self.runtime.traces.as_lines(subtask.id),
+                # ★ 预算丢掉的那几条**要有读数**（丢的是过程；静默丢就没人知道少了什么）。
+                traces_dropped=self.runtime.traces.dropped_for(subtask.id),
             )
-        except (OSError, subprocess.SubprocessError) as exc:  # 痕迹不能把业务跑挂
+        except (OSError, subprocess.SubprocessError, UnicodeError) as exc:  # 痕迹不能把业务跑挂
             self.event_log.record(
                 kind="gate_check",
                 task_id=self.document.contract.task_id,

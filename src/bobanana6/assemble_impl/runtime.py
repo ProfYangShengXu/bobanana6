@@ -47,6 +47,8 @@ from ..core.ontology import map_field
 from ..core.ports import LLMClient, ToolSet
 from ..services.checks import BlockJudge
 from ..services.registry import build_registry
+from ..services.tools import BoundTraces
+from ..services.traces import TraceStore, upstream_closure
 from ..services.workspace import BoundWorkspace, WorkspaceLedger
 from ..sources import SnapshotStore
 from ..sources.form import forms_for
@@ -253,6 +255,10 @@ class BlockRuntime:
     response_format: ResponseFormatSupport = field(default_factory=ResponseFormatSupport)
     last_candidate: Candidate | None = None
     last_judge: BlockJudge | None = None
+    #: ★★ 过程级信息交换（ARTEX 机制 ②）：整个 run **共用一份**过程记录 ——
+    #: 每个块都往同一份里写，下游按【上游闭包】从同一份里读。runner 持有它，
+    #: 块跑完时把它落进 git-backed 痕迹仓库（与产物同一个 commit）。
+    traces: TraceStore = field(default_factory=TraceStore)  # blame: fail-closed — 省略即给一份**空**的过程记录（没有可检索内容），不会凭空造
 
     # -- the port ---------------------------------------------------------- #
 
@@ -294,6 +300,16 @@ class BlockRuntime:
             root=self.workspace, write_region=region, frozen_paths=frozen, ledger=ledger
         )
         tools = replace(tools, workspace=workspace)
+        # ★★ 过程级信息交换（ARTEX 机制 ②）：把【上游闭包】内的过程检索交给这个块。
+        #   可见范围从 DAG 依赖**现算**（`upstream_closure`），不硬编码任何块名。
+        #   ★ 闭包为空（入口块 / 拿不到全 DAG）⇒ `traces.*` **不广告** ——
+        #     与 `sources`/`workspace` 同一条规则：拿不到的能力不该被广告出来。
+        visible_upstream = upstream_closure(subtask, dag_subtasks)
+        if visible_upstream:
+            tools = replace(
+                tools,
+                traces=BoundTraces(store=self.traces, visible=visible_upstream, block=subtask.id),
+            )
         # ★ `#32`: 派活前按任务声明的形式规整载体（encoding / eol）—— 规整清单来自契约，动作只有一套。
         registry = build_registry(tools, self.store.read, forms=forms_for(self.contract.sources))
         io = LoopIOImpl(
@@ -319,6 +335,8 @@ class BlockRuntime:
             epoch=self.epoch,
             response_format=self.response_format,
             dag_subtasks=dag_subtasks,
+            # ★ 同一个单点（`LoopIOImpl.execute`）既写 `tool_result` 事件，也写过程记录。
+            traces=self.traces,
         )
         loop = WorkerLoop(
             io,

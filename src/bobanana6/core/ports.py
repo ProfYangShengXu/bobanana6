@@ -57,6 +57,7 @@ __all__ = [
     "TaskTools",
     "ToolSet",
     "ToolSpec",
+    "TraceTools",
     "WorkspaceTools",
 ]
 
@@ -228,6 +229,19 @@ class WorkspaceTools(Protocol):
     def run_code(self, code: str, *, reset: bool = False) -> Mapping[str, Any]: ...
 
 
+class TraceTools(Protocol):
+    """★ 上游块的【过程】—— 按需检索，不是全量灌进上下文。
+
+    与交接件的分工：交接件是**结果**（推给下游），这里是**过程**（下游主动拉）。
+    可见范围由装配方限死在本块的**上游闭包**上：`search` 只能看那些块，
+    `read` 只能取那些块里的步骤。过程里常有半成品与错路，扩散出去只会污染。
+    """
+
+    def search(self, query: str) -> Mapping[str, Any]: ...
+
+    def read(self, block_id: str, seq: str) -> Mapping[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -269,7 +283,7 @@ class ToolSpec:
 
 
 #: ★ 全部工具的完整描述。写法见 `ToolSpec.description` 的注记。
-#: 17 条合计约 2.6 KB —— 每轮常驻，所以每条都按"决策信息"写，
+#: 19 条合计约 3 KB —— 每轮常驻，所以每条都按"决策信息"写，
 #: 不重复 `returns` 里的类型说明。
 _TOOL_DESCRIPTIONS: dict[str, str] = {
     # -- task：我是谁 / 我的输入 / 我的契约 ---------------------------------- #
@@ -354,6 +368,23 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "输入：command = 命令；workdir = 工作目录；timeout = 秒；background = 后台跑。"
         "何时不用：要执行【一段 Python 逻辑】时用 code.run（会话持久、不用拼字符串）。"
         "★ 产出的文件与 files.write 同等记账。"
+    ),
+    # -- traces：上游的【过程】（不是结果） ---------------------------------- #
+    "traces.search": (
+        "何时用：★ 你想知道【上游某个块当时到底试过什么、被什么拒了、卡在哪一步】—— "
+        "产物与交接件里没写、而你又不想自己重建一遍来找原因时。"
+        "输入：query = 关键字（工具名、报错词、文件名、字段名都行，大小写不敏感）。"
+        "返回：命中项列表（哪一块 / 第几步 / 用的什么工具 / 命中片段）。"
+        "★ 标记是【过程】：那是上游当时的行为，不是经过判定的结论，要用先自己核。"
+        "何时不用：brief 的 upstream 已经够用时不用；它只覆盖你【上游闭包】里已跑完的块，"
+        "看不到下游、也看不到平行的别块；每块每次跑测最多调 12 次（search + read 合计），超了会被拒。"
+    ),
+    "traces.read": (
+        "何时用：`traces.search` 给了你某一块某几步的线索，你要看那几步的【完整内容】时。"
+        "输入：block_id = search 结果里给的那个；seq = 第几步，可写单个 `3`，也可写一串 `3,5,7`。"
+        "何时不用：还想先按关键字找用 `traces.search`；只想拿上游的【产物】用 `task.upstream`"
+        "（那是结果，这是过程）；读上游写给接手人的说明，在 brief 的 upstream 里。"
+        "★ 一个块一次跑测最多 12 次 traces.* 调用，超了会被具名拒。"
     ),
     # -- semantics：查口径 -------------------------------------------------- #
     "semantics.lookup": (
@@ -497,6 +528,22 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
         group="exec",
         description=_TOOL_DESCRIPTIONS["code.run"],
     ),
+    #: ★ 过程检索：**两段式**（先 search 再 read），照 ARTEX 的机制 ②。
+    #:   两段不是风格，是预算：一次把上游过程整份灌进上下文，正是 B 臂 88K 上下文卡死的那条路。
+    ToolSpec(
+        "traces.search",
+        ("query",),
+        "hits (block_id / seq / tool / snippet) from this block's upstream traces",
+        group="traces",
+        description=_TOOL_DESCRIPTIONS["traces.search"],
+    ),
+    ToolSpec(
+        "traces.read",
+        ("block_id", "seq"),
+        "the full recorded steps named by block_id + seq",
+        group="traces",
+        description=_TOOL_DESCRIPTIONS["traces.read"],
+    ),
 )
 
 
@@ -524,6 +571,10 @@ class ToolSet:
     #: (the same rule `sources` follows) -- a block cannot ask for a capability
     #: the deployment never granted.
     workspace: WorkspaceTools | None = None
+    #: ★★ 上游块的**过程**（ARTEX 机制 ②）。``None`` = 本块没有可检索的上游
+    #: （入口块 / 部署没给）⇒ `traces.*` **根本不广告** —— 与 `sources`/`workspace`
+    #: 同一条规则：拿不到的能力不该被广告出来（否则模型只会撞一堵墙）。
+    traces: TraceTools | None = None  # blame: fail-closed — 省略即"本块没有可检索的上游"⇒ traces.* 根本不广告，方向保守
     allowed_inputs: tuple[str, ...] = ()
     #: ★ A11: the snapshots this block did not read itself but inherited from the
     #: parts it consumes. A merge block may cite these and nothing else.
@@ -551,6 +602,8 @@ class ToolSet:
             if spec.name.startswith("sources.") and self.sources is None:
                 continue
             if spec.name.startswith(("files.", "shell.", "code.")) and self.workspace is None:
+                continue
+            if spec.name.startswith("traces.") and self.traces is None:
                 continue
             available.append(spec)
         return tuple(available)

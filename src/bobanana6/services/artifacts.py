@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -165,6 +165,8 @@ class ArtifactStore:
         paths: Iterable[str],
         summary: str = "",
         inputs: Sequence[tuple[str, str]] = (),
+        traces: Sequence[Mapping[str, Any]] = (),  # blame: fail-closed — 省略即"这个块没有过程记录"，不会凭空造一条
+        traces_dropped: int = 0,  # blame: whitelist — 只是"被预算丢掉几条"的读数，缺省 0 不改变任何行为
     ) -> BlockRecord:
         """Commit everything this block produced; return the record it left behind."""
         if self.source_root is None:
@@ -174,12 +176,16 @@ class ArtifactStore:
             record = self._stage(block_id, raw)
             if record is not None:
                 files.append(record)
+        # ★★ 过程记录：与产物**同一个 commit**（下面的 `git add -A` 会把它一起收进去）。
+        #   它是"这个过程当时试过什么"，与 `files`（"产出了什么"）分开记 —— 两件事。
+        trace_pointer = self._write_traces(block_id, traces, traces_dropped)
         manifest = {
             "block": block_id,
             "verdict": verdict,
             "inputs": [{"name": name, "commit": commit} for name, commit in inputs],
             "summary": summary,
             "files": [record.as_pointer() for record in files],
+            "traces": trace_pointer,
         }
         target = self.tree / block_id
         target.mkdir(parents=True, exist_ok=True)
@@ -210,6 +216,50 @@ class ArtifactStore:
         for entry in files:
             self._records[entry.path] = record
         return record
+
+    def _write_traces(
+        self,
+        block_id: str,
+        traces: Sequence[Mapping[str, Any]],
+        dropped: int = 0,  # blame: whitelist — 只是"被预算丢掉几条"的读数，缺省 0 不改变任何行为
+    ) -> dict[str, Any] | None:
+        """把这一块的过程记录写成 `<block>/traces.jsonl`（一行一条），返回规模读数。
+
+        ★ 它是**过程**，不进 `files`：`files` 说的是"这块产出了什么"，这里说的是
+          "它当时试过什么、被什么拒了"。两者随同一个 commit 落进痕迹仓库 ——
+          下游检索读的是内存里同一份，事后复盘读的是这份落盘。
+        ★ 空记录**不写文件**（不制造空 diff）；返回 `None` 是事实，不假装有。
+        ★★ 两条纪律（只读审计 #55 / #60）：
+          ① **与 `_stage` 共用同一本归档预算** —— 否则"归档带预算"对这条新路失效；
+          ② **痕迹不许把业务跑挂** —— 编码/IO 异常在这里收掉，只留一条具名读数。
+        """
+        if not traces:
+            return None
+        # `ensure_ascii=True`：代理字符/异常码位在这里被转义成 ASCII，落盘永远不会因编码失败。
+        lines = [json.dumps(dict(entry), ensure_ascii=True, default=str) for entry in traces]
+        body = "\n".join(lines) + "\n"
+        size = len(body.encode("utf-8"))
+        pointer: dict[str, Any] = {
+            "path": f"{block_id}/traces.jsonl",
+            "entries": len(lines),
+            "bytes": size,
+            "dropped": int(dropped),
+        }
+        if self.archived_bytes + size > self.budget_bytes:
+            pointer["stored"] = False
+            pointer["reason"] = "archive budget exhausted"
+            return pointer
+        try:
+            target = self.tree / block_id / "traces.jsonl"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body, encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            pointer["stored"] = False
+            pointer["error"] = f"{type(exc).__name__}: {exc}"
+            return pointer
+        self.archived_bytes += size
+        pointer["stored"] = True
+        return pointer
 
     def _stage(self, block_id: str, relative: str) -> FileRecord | None:
         source = self.source_root / relative  # type: ignore[operator]

@@ -31,14 +31,17 @@ from ..core.ports import (
     SourceTools,
     TaskTools,
     ToolSet,
+    TraceTools,
     WorkspaceTools,
 )
+from .traces import TRACE_SEARCH_LIMIT, TraceError, TraceStore
 
 __all__ = [
     "BoundChecks",
     "BoundSemantics",
     "BoundSources",
     "BoundTask",
+    "BoundTraces",
     "build_toolset",
 ]
 
@@ -223,6 +226,90 @@ class BoundChecks(CheckTools):
 #: 轴名是**切口**，权限是**能力**，两者本来就不该互相决定。删除白名单即治本。
 
 
+@dataclass
+class BoundTraces(TraceTools):
+    """★ 上游**过程**的检索入口 —— 可见范围与调用上限都在这里（执行层，不是提示词）。
+
+    为什么把这两件事放在执行层：
+
+    ```
+    可见范围  process 里常有半成品与错路，扩散到平行块/下游只会污染 ⇒ 只给【上游闭包】
+    调用上限  过程是补充不是替代 ⇒ 每块每次跑测 12 次封顶，超了**具名拒**，不静默截断
+    ```
+    """
+
+    store: TraceStore
+    #: 本块的**上游闭包**（已跑完的块 id）。空 ⇒ `traces.*` 根本不会被广告。
+    visible: tuple[str, ...] = ()  # blame: fail-closed — 省略即"看不到任何上游"⇒ 检索只会被具名拒
+    block: str = ""  # blame: whitelist — 只用于报文里的自我标识，不参与任何判定
+    #: 一次跑测里这个块能调多少次 `traces.*`（search 与 read **合并**计）。
+    limit: int = TRACE_SEARCH_LIMIT  # blame: fail-closed — 省略即给一个**有上限**的调用次数，方向保守
+    used: int = 0  # blame: fail-closed — 省略即"还没花过额度"，只会更早触发上限
+
+    def _spend(self, tool: str) -> None:
+        if self.used >= self.limit:
+            raise TraceError(
+                f"{tool} refused: this block already used {self.used}/{self.limit} trace calls "
+                f"(violated: per-block trace-call limit; expected: <= {self.limit}; got: {self.used + 1}). "
+                "Process retrieval is a supplement -- work from what you already have."
+            )
+        self.used += 1
+
+    def search(self, query: str) -> Mapping[str, Any]:
+        # ★ 先校验、后计费：被拒的坏调用**不该吃掉**这个块本来就有限的检索额度
+        #   （否则 12 次空 query 就能把它锁死 —— 那是壳的 bug，不是它的错）。
+        text = str(query or "").strip()
+        if not text:
+            raise TraceError(
+                "traces.search needs a non-empty query (violated: query is empty; "
+                "expected: a keyword such as a tool name, an error word, or a file name)"
+            )
+        if not self.visible:
+            raise TraceError("traces.search refused: this block has no completed upstream blocks")
+        self._spend("traces.search")
+        found = self.store.search(text, self.visible)
+        return {**found, "searched_blocks": list(self.visible)}
+
+    def read(self, block_id: str, seq: str) -> Mapping[str, Any]:
+        name = str(block_id or "")
+        if name not in set(self.visible):
+            raise TraceError(
+                f"traces.read refused: {name!r} is not in this block's upstream closure "
+                f"(violated: visibility; expected: one of {list(self.visible)!r}; got: {name!r})"
+            )
+        wanted = _seq_numbers(seq)
+        self._spend("traces.read")
+        steps = self.store.read(name, wanted)
+        if not steps:
+            recorded = [entry.seq for entry in self.store.entries(name)]
+            raise TraceError(
+                f"traces.read refused: block {name!r} has no recorded step {list(wanted)!r} "
+                f"(violated: unknown step; expected: one of {recorded!r}; got: {list(wanted)!r})"
+            )
+        return {"steps": list(steps), "count": len(steps)}
+
+
+def _seq_numbers(raw: Any) -> tuple[int, ...]:
+    """`seq` 既收 `3` / `3,5,7` 这种文本，也收真正的数组（宽松端点/模型写法不一）。"""
+    if isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            raise TraceError("traces.read needs seq (e.g. `3` or `3,5,7`); violated: seq is empty")
+        values = [piece.strip() for piece in text.split(",")]
+    out: list[int] = []
+    for value in values:
+        token = str(value).strip()
+        if not token.isdigit():
+            raise TraceError(
+                f"traces.read needs numeric seq values; got {token!r} "
+                "(violated: not a number; expected: e.g. `3` or `3,5,7`)"
+            )
+        out.append(int(token))
+    return tuple(out)
+
+
 def build_toolset(
     *,
     plan: SplitPlan,
@@ -236,6 +323,9 @@ def build_toolset(
     inherited_sources: tuple[str, ...] = (),
     workspace: WorkspaceTools | None = None,
     statement: str = "",
+    #: ★ ARTEX 机制 ②：上游块的**过程**。`None` = 本块没有可检索的上游（入口块）
+    #: ⇒ `traces.*` 不广告。装配方按 DAG 依赖算出的上游闭包构造它。
+    traces: TraceTools | None = None,  # blame: fail-closed — 省略即"本块没有可检索的上游"，traces.* 不广告
 ) -> ToolSet:
     """Bind the tool surface to one block.
 
@@ -267,6 +357,7 @@ def build_toolset(
         check=checks,
         sources=sources,
         workspace=workspace,
+        traces=traces,
         allowed_inputs=subtask.inputs,
         inherited_sources=inherited_sources,
     )

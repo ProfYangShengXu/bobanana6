@@ -84,6 +84,9 @@ TOOL_NAMES: tuple[str, ...] = (
     "files.patch",
     "shell.run",
     "code.run",
+    # ★ 过程检索（ARTEX 机制 ②）：先 search 再 read —— 两段式是**预算**，不是风格。
+    "traces.search",
+    "traces.read",
 )
 
 
@@ -625,6 +628,24 @@ def build_registry(
             )
         )
 
+    def _traces() -> Any:
+        """★ 与 `_workspace()` 同一条规则：**不广告就不该被调用**（拿不到的能力不硬撑）。"""
+        traces = getattr(toolset, "traces", None)
+        if traces is None:
+            raise PermissionError(
+                f"subtask {toolset.subtask!r} has no traces; upstream process retrieval is not granted"
+            )
+        return traces
+
+    def traces_search(args: Mapping[str, Any]) -> str:
+        query = str(args.get("query", ""))  # blame: fail-closed — 缺 query 即空串 ⇒ `search` 具名拒，不会凭空受理
+        return payload(dict(_traces().search(query)))
+
+    def traces_read(args: Mapping[str, Any]) -> str:
+        block_id = str(args.get("block_id", ""))  # blame: fail-closed — 缺 block_id 即空串 ⇒ 不在可见闭包 ⇒ 具名拒
+        seq = str(args.get("seq", ""))  # blame: fail-closed — 缺 seq 即空串 ⇒ 具名拒，不静默取整块
+        return payload(dict(_traces().read(block_id, seq)))
+
     #: name -> (handler, effect, target arguments).
     #: ★ The **effect** is declared here, once, by the tool itself -- a write is
     #: a barrier for call-level concurrency (``agentloop/tools.plan_tool_segments``),
@@ -647,6 +668,9 @@ def build_registry(
         "files.patch": (files_patch, "write", ("path",)),
         "shell.run": (shell_run, "write", ()),
         "code.run": (code_run, "write", ()),
+        # ★ 只读：检索别人的过程不改任何东西，也不该被当成写屏障。
+        "traces.search": (traces_search, "read", ()),
+        "traces.read": (traces_read, "read", ()),
     }
     tools: list[RegisteredTool] = []
     for spec in toolset.specs():

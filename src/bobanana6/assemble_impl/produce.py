@@ -54,6 +54,7 @@ from ..core.model import (
 from ..core.ports import LLMClient, ToolSet
 from ..services.checks import SHELL_COMMAND_CHECK, BlockJudge
 from ..services.registry import ToolRegistry
+from ..services.traces import TraceStore
 from ..services.workspace import (
     WorkspaceLedger,
     WriteBudget,
@@ -1529,6 +1530,10 @@ class LoopIOImpl(LoopIO):
     #: ★ 空元组 = 拿不到全 DAG ⇒ **一个字都不动**（不能证明恒定就不动，fail-closed）——
     #: 这正是规格警告的"跑到哪算到哪"：只有当前块看，前三个块相同、第四个不同就会被误判。
     dag_subtasks: tuple[Subtask, ...] = ()
+    #: ★★ 过程级信息交换（ARTEX 机制 ②）：本块**每次工具调用**都往这里记一条。
+    #:   `None` = 这个部署不记过程（既有读数一个字节都不变）。
+    #:   ★ 记的落点在 `execute()` —— 每个工具结果都从那里过（与 `tool_result` 事件同一个单点）。
+    traces: TraceStore | None = None  # blame: fail-closed — 省略即"这个部署不记过程"，既有读数一个字节都不变
 
     def prompt(self, state: LoopState) -> list[dict[str, Any]]:
         """Stable instructions first, this block next, the transcript last.
@@ -2608,6 +2613,9 @@ class LoopIOImpl(LoopIO):
     def execute(self, calls: tuple[ToolCall, ...]) -> tuple[ToolResult, ...]:
         results = self.registry.execute(calls)
         now = self.epoch()
+        # ★★ 过程级信息交换的第一步：**每个工具结果都从这一个点过** ⇒ 就在这里记。
+        #   与下面的 `tool_result` 事件同一个单点，不另开一条旁路。
+        self._record_traces(calls, results, now)
         for result in results:
             name = _name_of(calls, result.call_id)
             # ★ "recovered" means this tool failed earlier in this block and has
@@ -2642,6 +2650,85 @@ class LoopIOImpl(LoopIO):
             if result.ok and name.startswith("sources."):
                 self.read_sources = True
         return results
+
+    def _record_traces(
+        self, calls: Sequence[ToolCall], results: Sequence[ToolResult], now: float
+    ) -> None:
+        """★ 把这一批工具调用记进【过程】存储（ARTEX 机制 ② 的第一步）。
+
+        记什么：哪一块 / 第几次 / 什么工具 / args 的可检索文本 / result 的可检索文本 /
+        时间戳 / 成功与否 / 失败类型。**不记判定** —— 过程只回答"当时发生了什么"。
+
+        ★★ 硬边界：这一步读了**工作区之外真实存在的文件**（判分器那种）时，结果内容
+          不进索引。存储层收到 `result_indexed=False` 时**根本不存正文**（不是存了再遮），
+          所以那条内容从检索路径上取不回来。
+        """
+        if self.traces is None:
+            return
+        by_call = {call.call_id: call for call in calls}
+        for result in results:
+            call = by_call.get(result.call_id)
+            arguments = (
+                dict(call.arguments)
+                if call is not None and isinstance(call.arguments, Mapping)
+                else {}
+            )
+            name = str(getattr(call, "name", "") or "")
+            self.traces.add(
+                block_id=self.subtask.id,
+                # `self.calls` 是这一块的**模型调用**计数 ⇒ 它就是"第几轮"（`seq` 是第几次工具调用）。
+                turn=self.calls,
+                tool=name or "<unknown>",
+                args_text=self._trace_args_text(name, arguments),
+                result_text=str(getattr(result, "content", "") or ""),
+                at=now,
+                ok=bool(getattr(result, "ok", False)),
+                error_type=str(getattr(result, "error_type", "") or ""),
+                result_indexed=not self._trace_reads_outside(name, arguments),
+            )
+
+    @staticmethod
+    def _trace_args_text(name: str, arguments: Mapping[str, Any]) -> str:
+        """args 的可检索文本 —— 工具名 + 参数（一行 JSON）。不读盘、不展开附件。"""
+        return f"{name} {json.dumps(dict(arguments), ensure_ascii=False, default=str)}"
+
+    def _trace_reads_outside(self, name: str, arguments: Mapping[str, Any]) -> bool:
+        """这一步有没有**可能**读到工作区之外的东西（保守方向：拿不准也遮）。
+
+        ★★ 这是那条硬边界（"过程检索不许成为读判分器的通道"）**唯一**的执行点，
+          所以它不能只做"路径是不是一个真实存在的文件"那一种判断：
+          静态扫描做不到精确，就必须往**保守**那边倒 —— 判分器内容进索引是不可接受的，
+          而多遮一条无害的过程观察只是少一点信息。三条都遮：
+
+        ```
+        ① 绝对路径（含 `/abs/checks/*` 这种**通配**形式 —— token 本身不是文件）
+        ② 向上逃逸（token 里带 `..`）
+        ③ 相对路径 + 通配/命令替换（`sub/*.py` / `$(pwd)/x`）—— 解析不出它最终指哪
+        ```
+        ★ 只扫执行类调用（args 里带 `command` / `code`）：`sources.*` 读的是**声明的来源**，
+          它已经在工作区里，不需要遮。
+        """
+        workspace = Path(self.workspace).resolve() if self.workspace is not None else None
+        if workspace is None:
+            return False
+        blob = " ".join(str(arguments.get(key) or "") for key in self._EXECUTION_ARGUMENTS).strip()
+        if not blob:
+            return False
+        for token in _path_tokens(blob, self._PATH_SUFFIXES):
+            if token.startswith(("/", "\\")) or ".." in Path(token).parts:
+                return True
+            if "/" in token and any(char in token for char in "*?[$`"):
+                return True
+            absolute = Path(token)
+            if not absolute.is_absolute():
+                absolute = workspace / token
+            if not absolute.is_file():
+                continue
+            try:
+                absolute.resolve().relative_to(workspace)
+            except ValueError:
+                return True
+        return False
 
     def _declared_cause(self, name: str, result: Any, calls: Sequence[Any]) -> str:
         """Which layer owns this tool outcome, as declared (``AGENTS.md §7⑫``).
