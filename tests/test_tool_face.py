@@ -1,9 +1,8 @@
-"""工具面收束（核心层 + 按需层）+ `code.run` 开关。
+"""工具面收束（核心层 + 按需层）。
 
-证据（五轮 4B 实测）：`code.run` 被用 18~41 次，而 `files.patch` **五轮全是 0**
-—— 因为"重写一段代码"这个动作在工具面里**是默认**，而"改上一版"**不存在**。
-本轮把它收成：**核心层**（干活的最小集）+ **按需层**（满足条件才亮），
-并给 `code.run` 一个**能开回来的**部署开关。
+证据（五轮 4B 实测）：模型把"重写一段脚本"当默认动作（一轮 18~41 次），
+而 `files.patch` **五轮全是 0** —— 因为"重写"在工具面里**是默认**，而"改上一版"**不存在**。
+本轮把它收成：**核心层**（干活的最小集）+ **按需层**（满足条件才亮）。
 
 三条按需判据都要能从**运行时状态现算**，拿不到就不给（fail-closed）：
 
@@ -32,7 +31,7 @@ from bobanana6.core.model import (
     ModelResponse,
     TaskContract,
 )
-from bobanana6.services.tools import code_run_enabled, declares_semantics
+from bobanana6.services.tools import declares_semantics
 from bobanana6.services.workspace import BoundWorkspace
 from tests.fakes import contract as bare_contract
 from tests.fakes import toolset_for
@@ -159,40 +158,6 @@ def test_a_tool_that_appears_later_can_actually_be_called(tmp_path: Path) -> Non
 
 
 # --------------------------------------------------------------------------- #
-# 第二件：`code.run` 的开关（可开回来）
-# --------------------------------------------------------------------------- #
-
-
-def test_code_run_defaults_to_on_and_can_be_switched_off() -> None:
-    """★ 默认**开**（不改变既有行为）；显式关掉才关；解析是集合式的显式值。"""
-    assert code_run_enabled({}) is True
-    assert code_run_enabled({"BOBANANA6_CODE_RUN": "on"}) is True
-    for off in ("off", "OFF", "0", "false", "no"):
-        assert code_run_enabled({"BOBANANA6_CODE_RUN": off}) is False
-
-    workspace = BoundWorkspace(root=Path("/tmp/x"), write_region=(), frozen_paths=())
-    on = replace(toolset_for("T-1"), workspace=workspace)
-    assert "code.run" in _names(on)
-    off_toolset = replace(on, code_run=False)
-    assert "code.run" not in _names(off_toolset)
-    assert "shell.run" in _names(off_toolset) and "files.write" in _names(off_toolset)  # 核心层不动
-
-
-def test_the_switch_reaches_the_assembled_toolset(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """★ 开关走 `build_toolset` 读环境（core 不读环境；装配层读一次后给 bool）。"""
-    tools, registry = _full_toolset(tmp_path)
-    assert "code.run" in _names(tools)  # 默认：开
-    assert "code.run" in registry.names()
-
-    monkeypatch.setenv("BOBANANA6_CODE_RUN", "off")
-    off_tools, off_registry = _full_toolset(tmp_path)
-    assert "code.run" not in _names(off_tools)  # 关掉之后：菜单里没有
-    assert "shell.run" in _names(off_tools) and "files.write" in _names(off_tools)
-    # ★ 关掉也**不注册**（不是"注册了但不广告"）：这一个工具是被显式撤下的能力。
-    assert "code.run" not in off_registry.names()
-
-
-# --------------------------------------------------------------------------- #
 # ① 端到端读数：真跑里开局那份菜单就是收束后的样子
 # --------------------------------------------------------------------------- #
 
@@ -232,7 +197,7 @@ def test_the_opening_menu_of_a_real_run_is_the_tightened_one(tmp_path: Path) -> 
     assert "files.patch" not in opened  # 开局：还没写过
     assert _has(opened, "semantics.") == set()  # 裸类型契约
     assert _has(opened, "check.") == CHECKS  # 本块有交付物
-    assert "code.run" in opened  # 本轮的默认：开（真跑的开关见报告 §3）
+    assert _has(opened, "code.") == set()  # ★ 本轮把 `code.*` 删了（能力交给 shell.run）
     assert "traces.read" not in opened  # 按需：不是每个块都有轨迹可读
 
     # ★ 写过之后同一块里 `files.patch` 出现（收束不是"一次性削掉"）
@@ -264,8 +229,6 @@ def test_the_advertised_menu_is_always_a_subset_of_what_the_registry_serves(tmp_
         replace(toolset_for("T-1"), traces=object()),
         replace(toolset_for("T-1"), workspace=workspace),
         replace(toolset_for("T-1"), workspace=workspace, semantics_declared=True),
-        replace(toolset_for("T-1"), workspace=workspace, semantics_declared=True, code_run=False),
-        replace(toolset_for("T-1"), workspace=workspace, semantics_declared=True, code_run=True),
         replace(toolset_for("T-1"), workspace=workspace, semantics_declared=True, has_deliverable=True),
     )
     for toolset in configurations:

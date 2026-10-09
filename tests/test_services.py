@@ -1202,17 +1202,19 @@ def test_the_prose_reask_is_bounded(tmp_path: Path) -> None:
 
 
 def test_pandas_and_numpy_are_importable_in_the_block_execution_environment(tmp_path: Path) -> None:
-    """★ ④ 块的执行环境（`code.run` 用 `sys.executable`）真的能 import pandas / numpy。
+    """★ ④ 块的执行环境（`shell.run` 跑的 Python）真的能 import pandas / numpy。
 
     没有它们时，块只能手工逐行读 CSV、手工决定写几位小数 —— 13f 的 `hhi` 就是这么
     撒掉精度的（相对误差 7.45e-5 > `np.allclose` 的 rtol=1e-5）。
     依赖是**构建期**装好的（`pyproject.toml`），不是运行期 pip install。
     """
     workspace = BoundWorkspace(root=tmp_path / "ws", write_region=("out.csv",), frozen_paths=())
-    result = workspace.run_code("import pandas, numpy\nprint(pandas.__version__, numpy.__version__)")
+    result = workspace.run(
+        f'"{sys.executable}" -c "import pandas, numpy; print(pandas.__version__, numpy.__version__)"'
+    )
     workspace.close()
 
-    assert result["ok"] is True, result
+    assert result["exit_code"] == 0, result
     assert len(str(result["stdout"]).split()) >= 2, result
 
 
@@ -1291,7 +1293,6 @@ _PLAUSIBLE_ARGS: dict[str, dict[str, Any]] = {
     "files.write": {"path": "out.csv", "content": "x\n"},
     "files.patch": {"path": "out.csv", "old_string": "x", "new_string": "y"},
     "shell.run": {"command": "true"},
-    "code.run": {"code": "1 + 1"},
 }
 
 
@@ -1577,21 +1578,6 @@ def test_the_ledger_sees_a_file_a_shell_command_created(tmp_path: Path) -> None:
     assert ledger.changed() == ("other.txt", "out.csv")
 
 
-def test_the_code_session_keeps_its_namespace_and_reset_drops_it(tmp_path: Path) -> None:
-    """★ `execute_code` 的契约：会话在调用之间保持，`reset` 丢掉它。"""
-    workspace = BoundWorkspace(root=tmp_path / "ws", write_region=("out.csv",))
-    first = workspace.run_code("counter = 41\ncounter + 1")
-    assert first["ok"] is True and first["value"] == "42", first
-    second = workspace.run_code("counter += 1\ncounter")
-    assert second["value"] == "42", second
-    third = workspace.run_code("counter", reset=True)
-    assert third["ok"] is False and "NameError" in third["error"], third
-    # 代码在工作区里跑：相对路径落到工作区
-    workspace.run_code("open('made.txt', 'w').write('x')")
-    assert (tmp_path / "ws" / "made.txt").read_text(encoding="utf-8") == "x"
-    workspace.close()
-
-
 def test_the_write_and_execute_tools_are_not_advertised_without_a_workspace(tmp_path: Path) -> None:
     """★ 部署没给工作区 ⇒ 这些工具**根本不该被广告**（与 `sources` 同一条规则）。"""
     _store, snap = _snapshot(tmp_path)
@@ -1607,7 +1593,7 @@ def test_the_write_and_execute_tools_are_not_advertised_without_a_workspace(tmp_
         checks=BoundChecks(block="T-01"),
     )
     names = {spec.name for spec in without.specs()}
-    assert not (names & {"files.write", "files.patch", "shell.run", "code.run"})
+    assert not (names & {"files.write", "files.patch", "shell.run"})
     assert "sources.read" in names and "sources.grep" in names
 
 

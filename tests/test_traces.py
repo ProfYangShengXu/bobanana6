@@ -50,14 +50,14 @@ def _block(block_id: str, output: str, inputs: tuple[str, ...] = ()) -> Subtask:
 def _store_with_chain() -> TraceStore:
     """T-01 → T-02 → 另一条支线上的 T-09（不可见）。"""
     store = TraceStore()
-    store.add(block_id="T-01", turn=1, tool="code.run", args_text='code.run {"code": "print(boom)"}',
+    store.add(block_id="T-01", turn=1, tool="shell.run", args_text='shell.run {"command": "cat missing.txt"}',
               result_text="NameError: name 'boom' is not defined", at=1.0, ok=False,
               error_type="WorkspaceError", result_indexed=True)
     store.add(block_id="T-01", turn=2, tool="files.write", args_text='files.write {"path": "a.csv"}',
               result_text='{"path": "a.csv", "bytes": 12}', at=2.0, ok=True, result_indexed=True)
-    store.add(block_id="T-02", turn=1, tool="code.run", args_text='code.run {"code": "print(42)"}',
+    store.add(block_id="T-02", turn=1, tool="shell.run", args_text='shell.run {"command": "echo 42"}',
               result_text="42", at=3.0, ok=True, result_indexed=True)
-    store.add(block_id="T-09", turn=1, tool="code.run", args_text='code.run {"code": "print(secret)"}',
+    store.add(block_id="T-09", turn=1, tool="shell.run", args_text='shell.run {"command": "echo secret"}',
               result_text="SECRET_OF_A_SIBLING", at=4.0, ok=True, result_indexed=True)
     return store
 
@@ -98,7 +98,7 @@ def test_the_store_keeps_entries_and_reports_size_distribution() -> None:
 def test_the_store_drops_by_budget_by_name_never_silently() -> None:
     store = TraceStore()
     for index in range(TRACE_MAX_ENTRIES_PER_BLOCK + 3):
-        store.add(block_id="T-01", turn=1, tool="code.run", args_text=f"n={index}", result_text="ok",
+        store.add(block_id="T-01", turn=1, tool="shell.run", args_text=f"n={index}", result_text="ok",
                   at=float(index), ok=True, result_indexed=True)
     assert len(store.entries("T-01")) == TRACE_MAX_ENTRIES_PER_BLOCK
     assert store.dropped_for("T-01") == 3
@@ -108,7 +108,7 @@ def test_the_store_drops_by_budget_by_name_never_silently() -> None:
 def test_a_lone_surrogate_never_breaks_the_record() -> None:
     """★ 只读审计 #60：代理字符不许把业务跑挂（trace 没有这种权力）。"""
     store = TraceStore()
-    entry = store.add(block_id="T-01", turn=1, tool="code.run", args_text="code.run {'code': '\\ud800'}",
+    entry = store.add(block_id="T-01", turn=1, tool="shell.run", args_text="shell.run {'command': '\\ud800'}",
                       result_text="print('\ud800')", at=0.0, ok=True, result_indexed=True)
     assert entry is not None
     entry.result_text.encode("utf-8")  # 不抛
@@ -126,7 +126,7 @@ def test_search_and_read_round_trip() -> None:
     assert found["total"] == 1 and found["truncated"] is False
     assert len(found["hits"]) == 1
     assert found["hits"][0]["block_id"] == "T-01" and found["hits"][0]["seq"] == 1
-    assert found["hits"][0]["tool"] == "code.run"
+    assert found["hits"][0]["tool"] == "shell.run"
     assert "NameError" in found["hits"][0]["snippet"]
     assert found["searched_blocks"] == ["T-01", "T-02"]
 
@@ -141,7 +141,7 @@ def test_search_says_when_it_truncated() -> None:
     """★ 只读审计 #56：'真就这么多'与'被砍了'必须分得清。"""
     store = TraceStore()
     for index in range(30):
-        store.add(block_id="T-01", turn=1, tool="code.run", args_text=f"common-token {index}",
+        store.add(block_id="T-01", turn=1, tool="shell.run", args_text=f"common-token {index}",
                   result_text="", at=float(index), ok=True, result_indexed=True)
     found = store.search("common-token", ["T-01"])
     assert len(found["hits"]) == 20 and found["total"] == 30 and found["truncated"] is True
@@ -245,10 +245,10 @@ def test_reading_outside_the_workspace_is_detected(tmp_path: Path) -> None:
     # ② 向上逃逸
     assert LoopIOImpl._trace_reads_outside(case, "shell.run", {"command": "cat ../checks/x.py"})
     # ③ 相对路径 + 通配（解析不出它最终指哪）
-    assert LoopIOImpl._trace_reads_outside(case, "code.run", {"code": "print(open('sub/*.py').read())"})
+    assert LoopIOImpl._trace_reads_outside(case, "shell.run", {"command": "cat sub/*.py"})
     # 反证：工作区内的相对路径**不许**误伤
     assert not LoopIOImpl._trace_reads_outside(case, "shell.run", {"command": "cat input/data/seed.txt"})
-    assert not LoopIOImpl._trace_reads_outside(case, "code.run", {"code": "print(open('input/data/seed.txt').read())"})
+    assert not LoopIOImpl._trace_reads_outside(case, "shell.run", {"command": "cat input/data/seed.txt"})
     # ★ `sources.*` 读的是**声明的来源**（已在工作区里），不遮
     assert not LoopIOImpl._trace_reads_outside(case, "sources.read", {"ref": "seed"})
 
@@ -313,7 +313,7 @@ def _e2e(tmp_path: Path):
                     )
                 if turn == 2:
                     return ModelResponse(
-                        tool_calls=(_tool_call("c2", "code.run", {"code": "print('NEEDLE_FROM_T01')"}),)
+                        tool_calls=(_tool_call("c2", "shell.run", {"command": "echo NEEDLE_FROM_T01"}),)
                     )
             if block == "T-02":
                 if turn == 0:

@@ -79,7 +79,7 @@ def _clip(text: str, limit: int) -> str:
 def _safe_text(text: Any) -> str:
     """把**孤立代理字符**换掉 —— 它们能写坏 UTF-8 编码。
 
-    ★ `code.run("print('\\ud800')")` 这种工具结果会带一个孤立代理字符；直接落盘会抛
+    ★ 工具结果里可能带**孤立代理字符**（任何工具输出都可能）；直接落盘会抛
       `UnicodeEncodeError`，那会把整个 run 打挂 —— 痕迹绝不许有这种权力。
     """
     return str(text).encode("utf-8", "replace").decode("utf-8")

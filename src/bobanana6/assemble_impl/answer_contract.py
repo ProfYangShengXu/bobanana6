@@ -118,7 +118,7 @@ ANSWER_CONTRACT: tuple[AnswerField, ...] = (
         domain=(
             "a map of workspace-relative path -> the file's text; "
             "★ a file you have already written into the workspace yourself "
-            "(`files.write` / `code.run` / `shell.run`) takes an **empty string** — "
+            "(`files.write` / `shell.run`) takes an **empty string** — "
             "the shell reads it from disk"
         ),
         granularity=(

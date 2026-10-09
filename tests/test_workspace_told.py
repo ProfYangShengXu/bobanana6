@@ -10,7 +10,7 @@ T-01 把 `filing_resolution.csv` 写到了 `<repo>/13f-crowding/output/`，
 
   ① system 的恒定前缀里有**绝对**工作目录 + "brief 里的相对路径以它为基准" + "不许猜绝对路径"
   ② brief 里有本块的写区（`you_may_write` / `never_write` / `rule`），与 `frozen_paths` 对齐
-  ③ `shell.run` / `code.run` 的返回带**绝对** cwd（原来 shell 是 `"."`、code 干脆没有这个字段）
+  ③ `shell.run` 的返回带**绝对** cwd（原来它是 `"."`）
 """
 
 from __future__ import annotations
@@ -288,14 +288,3 @@ def test_shell_run_reports_an_absolute_cwd(tmp_path: Path) -> None:
         assert result["cwd"] == str(root), result
         assert Path(result["cwd"]).is_absolute()
         assert result["cwd"] != "."
-
-
-def test_run_code_reports_an_absolute_cwd(tmp_path: Path) -> None:
-    """★ `code.run` 以前**没有** cwd 字段 ⇒ 27 轮代码之后模型只能自己猜输出目录。"""
-    root = (tmp_path / "ws").resolve()
-    workspace = BoundWorkspace(root=root, write_region=("out.csv",), frozen_paths=("other.csv",))
-    result = workspace.run_code("1 + 1")
-    workspace.close()
-    assert result["cwd"] == str(root), result
-    assert Path(result["cwd"]).is_absolute()
-    assert result["value"] == "2"  # 既有字段一字未动

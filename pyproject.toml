@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 # `core/` itself stays stdlib-only -- the architecture guard enforces it. These
 # are for the environment-side packages: `ontology/` reads YAML, and the JSON
 # Schema in `ontology/schemas/` is validated with jsonschema.
-# ★ pandas/numpy 是给**块的执行环境**用的（`code.run` / `shell.run`）：13f 实测里块
+# ★ pandas/numpy 是给**块的执行环境**用的（`shell.run` 跑 Python）：13f 实测里块
 #   只有标准库 ⇒ 只能手工逐行读 CSV、手工决定 `hhi` 写几位小数 ⇒ 精度撒了（相对误差
 #   7.45e-5 > np.allclose 的 rtol=1e-5）。装上之后 `to_csv()`/`allclose` 才是自然选择。
 dependencies = ["pyyaml>=6", "jsonschema>=4", "pandas>=2", "numpy>=1.26"]

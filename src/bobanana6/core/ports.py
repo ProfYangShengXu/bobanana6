@@ -208,7 +208,7 @@ class SourceTools(Protocol):
 
 
 class WorkspaceTools(Protocol):
-    """The block's own working area: files it may write, code it may run.
+    """The block's own working area: files it may write, commands it may run.
 
     ★ Deliberately narrow and *bound*: the paths are workspace-relative and the
     process cwd stays inside the workspace, so a block cannot reach the host.
@@ -225,8 +225,6 @@ class WorkspaceTools(Protocol):
     def patch_edits(self, path: str, edits: Any) -> Mapping[str, Any]: ...
 
     def run(self, command: str, *, background: bool = False, timeout: float | None = None, workdir: str = "") -> Mapping[str, Any]: ...
-
-    def run_code(self, code: str, *, reset: bool = False) -> Mapping[str, Any]: ...
 
 
 class TraceTools(Protocol):
@@ -283,7 +281,7 @@ class ToolSpec:
 
 
 #: ★ 全部工具的完整描述。写法见 `ToolSpec.description` 的注记。
-#: 19 条合计约 3 KB —— 每轮常驻，所以每条都按"决策信息"写，
+#: 18 条合计约 3 KB —— 每轮常驻，所以每条都按"决策信息"写，
 #: 不重复 `returns` 里的类型说明。
 _TOOL_DESCRIPTIONS: dict[str, str] = {
     # -- task：我是谁 / 我的输入 / 我的契约 ---------------------------------- #
@@ -342,7 +340,7 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "输入：path = 工作区相对路径（必须落在你的写区内，越界会被拒）；"
         "content = 文件全文；append = 追加而非覆盖。"
         "★ 何时不用：文件很大时不要试图一次写完 —— 用 append 分次写，"
-        "或干脆用 code.run 让程序生成它。"
+        "或干脆用 shell.run 让程序生成它。"
         "改已有文件的几行用 files.patch。"
     ),
     "files.patch": (
@@ -352,24 +350,16 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "edits = 数组，每条 {oldText, newText} —— oldText 是【要被替换的精确原文】，"
         "newText 是替换成什么（空串 = 删掉这一段）。"
         "★ 每条 oldText 必须在原文件里只出现一次；多条各自对【原文件】匹配，彼此不许重叠。"
-        "何时不用：整份新写 / 整份重写用 files.write；产物要交给程序算（pandas 等）用 code.run。"
+        "何时不用：整份新写 / 整份重写用 files.write；产物要交给程序算（pandas 等）用 shell.run。"
         "★ 原文匹配不上会被具名拒，并告诉你文件里那一段附近实际是什么 —— "
         "把 oldText 往前/往后多带一行（相邻的 import、缩进、注释）就能唯一。"
     ),
     # -- exec：算出来、跑出来 ----------------------------------------------- #
-    "code.run": (
-        "何时用：★ 数据要【算】（过滤、聚合、连接、格式转换），"
-        "或产物大到写不完、必须由程序生成时。让程序算，不要手写大表。"
-        "输入：code = 一段 Python；reset = 清空会话（否则变量在多次调用间保留）。"
-        "★ 每次调用会把这段代码**原样存成工作区里的一个文件**，路径在返回的 `code_path` 里；"
-        "所以【改哪一行就去改那个文件】（`files.patch` 按原文改），不必重贴整段。"
-        "★ 输出太长时正文只留末尾，完整输出在返回的 `full_output_path` 里，取回得回来。"
-        "何时不用：只跑一条 shell 命令时用 shell.run；只写一份短文件用 files.write。"
-    ),
     "shell.run": (
-        "何时用：你要跑一条 shell 命令 —— 看目录、查文件、跑一个已有的脚本。"
+        "何时用：你要跑一条 shell 命令 —— 看目录、查文件、跑一个已有的脚本"
+        "（数据要【算】就写成 `*.py` 再 `python x.py`，产物大到写不完时尤其如此）。"
         "输入：command = 命令；workdir = 工作目录；timeout = 秒；background = 后台跑。"
-        "何时不用：要执行【一段 Python 逻辑】时用 code.run（会话持久、不用拼字符串）。"
+        "何时不用：产物是一份短文件时用 files.write。"
         "★ 产出的文件与 files.write 同等记账。"
     ),
     # -- traces：上游的【过程】（不是结果） ---------------------------------- #
@@ -487,7 +477,7 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     #: ★★ 定点修改（`#edit`）：**参数形状改成 `path` + `edits[]`**（flash `edit` 的语义）。
     #: 原来它是 `path + old_string + new_string`（单条），描述却写着"改几处文字" ——
-    #: 说得到、做不到。实测（4B）：模型宁可整段重写 33~41 次 `code.run`，也一次没调它。
+    #: 说得到、做不到。实测（4B）：模型宁可整段重写脚本 33~41 次，也一次没调它。
     #: 旧参数在 **handler 里**仍兼容（既有调用方不被砍），但**不再广告**给模型：
     #: 一个工具只留一种形状，模型才不会在两种写法之间选错。
     ToolSpec(
@@ -521,16 +511,6 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
         optional=("background", "timeout", "workdir"),
         group="exec",
         description=_TOOL_DESCRIPTIONS["shell.run"],
-    ),
-    ToolSpec(
-        "code.run",
-        ("code",),
-        "run a code snippet in the workspace (persistent between calls; the code is saved to code_path, "
-        "a truncated stdout is paged to full_output_path)",
-        "workspace cwd",
-        optional=("reset",),
-        group="exec",
-        description=_TOOL_DESCRIPTIONS["code.run"],
     ),
     #: ★ 过程检索：**两段式**（先 search 再 read），照 ARTEX 的机制 ②。
     #:   两段不是风格，是预算：一次把上游过程整份灌进上下文，正是 B 臂 88K 上下文卡死的那条路。
@@ -590,10 +570,6 @@ class ToolSet:
     #: ★★ 本块**有交付物**吗 —— 由装配方从 `subtask.output × contract.deliverables` 现算。
     #: 没有 ⇒ 不广告 `check.*`（一个不产出交付物的块，让它自查"这一块过没过"是噪声）。
     has_deliverable: bool = False  # blame: fail-closed — 省略即"本块不产出交付物"⇒ 不广告 check.*
-    #: ★★ `code.run` 的**部署开关**（默认开 = 不改变既有行为）。关掉之后唯一能跑代码的路径是
-    #: `files.write` 写文件 → `shell.run` 跑它 → `files.patch` 改它。
-    code_run: bool = True  # blame: whitelist — 省略即"保持既有行为"（开）；开关由部署用环境变量给，不参与判定
-
     def __post_init__(self) -> None:
         if self.subtask == "":
             raise ValueError("ToolSet.subtask must not be empty")
@@ -631,12 +607,9 @@ class ToolSet:
         # -- 能力门（既有规则，一条不动） ---------------------------------- #
         if name.startswith("sources.") and self.sources is None:
             return False
-        if name.startswith(("files.", "shell.", "code.")) and self.workspace is None:
+        if name.startswith(("files.", "shell.")) and self.workspace is None:
             return False
         if name.startswith("traces.") and self.traces is None:
-            return False
-        # -- 部署开关（`code.run` 可关；关掉后跑代码只剩 写文件→shell→patch） -- #
-        if name.startswith("code.") and not self.code_run:
             return False
         # -- 按需层：满足条件才暴露（三条都从状态现算，拿不到就不给） -------- #
         if name.startswith("semantics.") and not self.semantics_declared:

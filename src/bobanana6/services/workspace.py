@@ -11,7 +11,7 @@
 ① 路径边界   一切路径都是【工作区相对】；绝对路径 / `..` / 盘符 / 符号链接逃逸一律具名拒。
 ② 写区边界   块只能写它 partition 声明的那几个路径（`write_region`）；
               写区为空 = 没有工作区权限，不是"随便写"。
-③ 执行边界   `shell.run` / `code.run` 的 cwd 一定在工作区内；后台任务在块结束时收尸。
+③ 执行边界   `shell.run` 的 cwd 一定在工作区内；后台任务在块结束时收尸。
 ```
 
 **为什么要有 `WorkspaceLedger`**：写和执行的产物不能"写完就算"——壳要在块结束时
@@ -27,7 +27,6 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -57,26 +56,9 @@ _WORKSPACE_WRITE_BUDGET_BYTES = 64 * 1024 * 1024
 #: 一条命令默认/最长跑多久（秒）。超时是**具名**结果，不是静默截断。
 DEFAULT_TIMEOUT_S = 60.0
 MAX_TIMEOUT_S = 600.0
-#: ★★ 方案 B：`code.run` 每次执行前，把那段代码**原样**落盘到工作区里的这个目录。
-#:
-#: 为什么必须是**工作区里的相对目录**（而不是 `/tmp`）：落盘的全部意义就是让那段代码
-#: 变成**磁盘上可被 `files.patch` 按原文精确修改的对象**（"行号会漂，文本不会漂"）。
-#: 模型此前把代码塞在 tool-call 参数里 ⇒ 想改一行只能重贴一整段 ⇒ `files.patch` 永远够不着。
-CODE_DIR = "_code"
-#: ★ 输出"换页"的两个上限（照 flash §2.4）：正文只留**末尾** N 行 / M 字节，先到者为准。
-#: 保留末尾而不是开头：**报错与结果总在最后**，开头多是 import 与噪音。
-#: 完整输出落盘，路径在返回的 `full_output_path` 里 —— 截断不丢信息。
-CODE_OUTPUT_MAX_LINES = 2000
-CODE_OUTPUT_MAX_BYTES = 50 * 1024
-#: ★ 全量输出文件（`step-NNNN.out`）自己的上限（8 MiB）。它写的是**全量 stdout**，
-#: 不设闸就是一个新的磁盘外泄面；绑到上限时**如实标** `full_output_truncated`，不假装"全量"。
-CODE_OUTPUT_FULL_MAX_BYTES = 8 * 1024 * 1024
 #: 扫描工作区时忽略的目录名：编译/测试缓存的副产品不是产物，也不是越权写。
-#: ★★ `CODE_DIR` 也在这里：`code.run` 落盘的是**壳自己的草稿纸**，不是块交出来的产物 ——
-#:    `_digests` 看不见它 ⇒ ledger 的 `changed()` 不含它 ⇒ 通道 2 的对账
-#:    （`_reconcile_workspace`）不会把它收成候选产物。**这是唯一的排除点**（单点收口）。
 IGNORED_PARTS = frozenset(
-    {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git", CODE_DIR}
+    {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git"}
 )
 IGNORED_SUFFIXES = (".pyc", ".pyo")
 
@@ -240,21 +222,8 @@ class BoundWorkspace:
     #: ★ 本块的总写入字节闸（见 `WriteBudget`）。默认一块一份；`runtime` 会把这个对象
     #: 同时交给答案 `files` 通道，于是"写工具写的 + 答案写写的"在同一本账上累加。
     write_budget: WriteBudget = field(default_factory=WriteBudget)
-    #: ★★ 方案 B：这一块草稿纸的**归属** —— 落盘路径里的那个子目录名（`_code/<block>/…`）。
-    #: 同一个 run 里所有块共用同一个工作区，而每个块的 `BoundWorkspace` 都是新的、序号从 1
-    #: 开始 —— 不打这块牌子，**每个块的第一条 `code.run` 都会覆盖上一个块的存底**，
-    #: 返回给模型的 `code_path` 就指向了别人的代码。由
-    #: `services/registry.py::build_registry` 从 `toolset.subtask` 上号（那里同时拿得到两者）。
-    block: str = ""  # blame: fail-closed — 省略即落到 `_code/unscoped/`（不冒充任何块），不会覆盖别块
-    #: Long-lived helpers owned by this block (the code session, background jobs).
-    _code_session: Any = None
+    #: Long-lived helpers owned by this block (background jobs).
     _background: list[subprocess.Popen[bytes]] = field(default_factory=list)
-    #: ★★ 方案 B：这一块调过多少次 `code.run` —— 它就是落盘文件名的**确定性序号**
-    #:（`_code/step-0001.py`）。不用时间戳：同一段代码重跑要得到同一个名字，否则不可复现。
-    #: `reset` **不重置它**（reset 清的是 Python 命名空间，不是"代码存底"）。
-    _code_calls: int = 0  # blame: fail-closed — 省略即从 0 开始编号，最保守（不覆盖已存在的存底）
-    #: 落盘失败过几次（**如实报**，不假装存了；见硬边界⑦：落盘是辅助不是前置门）。
-    _code_dump_failures: list[str] = field(default_factory=list)  # blame: whitelist — 只是"失败过什么"的证据清单，缺省空 = 没失败过
 
     # -- boundary helpers -------------------------------------------------- #
 
@@ -513,7 +482,7 @@ class BoundWorkspace:
         return {
             "background": False,
             "exit_code": completed.returncode,
-            # ★★ 绝对路径，不是 `"."`（实测那一条见 `_DRIVER` 上方注记）：
+            # ★★ 绝对路径，不是 `"."`（实测：模型靠它定位自身时得到的 `"."` 毫无信息）：
             #   每一轮返回都给模型一次校准机会 —— "我现在站在哪里"。不改任何判据。
             "cwd": str(cwd),
             "stdout": (completed.stdout or "")[:4000],
@@ -521,125 +490,10 @@ class BoundWorkspace:
             "truncated": len(completed.stdout or "") > 4000 or len(completed.stderr or "") > 4000,
         }
 
-    def run_code(self, code: str, *, reset: bool = False) -> Mapping[str, Any]:
-        """★★ 方案 B：**先落盘、再跑那个文件**（对模型仍然只有一个 `code` 参数）。
-
-        ```
-        ① 把这段代码**原样**写成工作区里的 `_code/step-NNNN.py`（序号 = 确定性规则）
-        ② 再把同一个字符串送进持久 Python 会话执行（送进去的那段与改前**逐字节相同**）
-        ③ 输出超上限时：正文只留**末尾**（2000 行 / 50KB，先到者为准），
-           完整输出落盘，路径在 `full_output_path` 里 —— 截断是换页，不是销毁
-        ```
-
-        ``reset=True`` 的语义**一个字没变**：清的是 Python 会话的命名空间（与解释器），
-        **不是**清文件 —— 存底的代码留着，序号接着往下走。
-
-        ★ 两条硬边界在这里落地：**不加参数**（还是 `code` + `reset`）；**落盘是辅助不是前置门**
-          （写不成就把失败如实放进返回、代码照跑）。返回**只增不减**：`ok` / `stdout` / `value`
-          / `error` / `cwd` 一个都不动。
-        """
-        if not isinstance(code, str) or not code.strip():
-            raise WorkspaceError("code must be a non-empty string")
-        self._note()
-        root = self._require_root()
-        if reset and self._code_session is not None:
-            self._code_session.close()
-            self._code_session = None
-        if self._code_session is None or not self._code_session.alive:
-            self._code_session = _CodeSession(root)
-        # ★★ ① 先落盘 —— 于是这段代码变成磁盘上一个可被 `files.patch` 按原文改的对象。
-        self._code_calls += 1
-        saved = self._save_code(self._code_calls, code)
-        answer = dict(self._code_session.execute(code))
-        # ★★ `code.run` 的返回也带上**绝对** cwd：以前它一个 `cwd` 字段都没有，
-        #   模型跑完代码看不到自己站在哪 —— 实测（`qwen4b` 第 34 轮）它正是在
-        #   连续 27 轮 `code.run` 之后自己 `mkdir -p <repo>/…/output` 猜了一个输出目录。
-        #   与 `run()` 同一个真值来源（`_require_root()` 已经 resolve 过），不改任何判据。
-        answer["cwd"] = str(root)
-        answer["code_path"] = saved
-        if not saved:
-            # ★ 硬边界⑦的"如实报"：没存成就说没存成，不假装有路径。
-            answer["code_save_error"] = self._code_dump_failures[-1]
-        # ★★ 元数据排到 `stdout` 前面（只读审计 #71）：上下文压缩按**头部**截 2000 字符，
-        #   排在几千字符 stdout 之后的 `code_path`/`full_output_path` 会被整段砍掉。
-        return _metadata_first(self._page_code_output(answer, self._code_calls))
-
-    def _code_root(self) -> str:
-        """这一块的草稿纸目录（工作区相对）：`_code/<块>/`（块未知时 `_code/unscoped/`）。"""
-        return f"{CODE_DIR}/{_slug(self.block)}"
-
-    def _save_code(self, seq: int, code: str) -> str:
-        """把这段代码**原样**写成 `_code/<块>/step-NNNN.py`，返回工作区相对路径；失败返回 `""`。
-
-        ★ 原样：不加工、不重排、不加壳 —— 模型之后要用 `files.patch` 按**原文**改它。
-          用 `write_bytes` 而不是 `write_text`：文本模式会把 `\\n` 翻成 `os.linesep`，
-          那会让"逐字节相同"在非 Linux 上不成立（只读审计 #72）。
-        ★ 路径是**工作区相对**的：与 `files.write` / `files.patch` 的路径口径**同一个**
-          （两者都以工作区为基准）⇒ 返回的 `code_path` 可以直接当 `files.patch` 的 `path` 用。
-        ★ 按**块**分子目录：见 `BoundWorkspace.block` 的注记（跨块重名会把别人的代码覆盖掉）。
-        """
-        relative = f"{self._code_root()}/step-{seq:04d}.py"
-        try:
-            target = self._require_root() / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(code.encode("utf-8"))
-        except (OSError, UnicodeError, ValueError) as exc:
-            self._code_dump_failures.append(f"{type(exc).__name__}: {exc}")
-            return ""
-        # ★ 只作**证据**记账：不过 `WriteBudget` 的闸 —— 硬边界⑦说落盘不许把块拦下来。
-        self.write_budget.note_bytes(len(code.encode("utf-8")))
-        return relative
-
-    def _page_code_output(self, answer: dict[str, Any], seq: int) -> dict[str, Any]:
-        """★ 截断 = 换页：正文只留末尾，完整输出落盘并给出路径（不销毁任何东西）。"""
-        text = str(answer.get("stdout") or "")
-        paged = _tail_page(text, CODE_OUTPUT_MAX_LINES, CODE_OUTPUT_MAX_BYTES)
-        if paged == text:
-            answer["truncated"] = False
-            return answer
-        relative = f"{self._code_root()}/step-{seq:04d}.out"
-        # ★ 全量那份也有上限（8 MiB）——写的是全量 stdout，不设闸就是新的磁盘外泄面。
-        body = text.encode("utf-8")
-        capped = len(body) > CODE_OUTPUT_FULL_MAX_BYTES
-        if capped:
-            body = body[-CODE_OUTPUT_FULL_MAX_BYTES:]
-        try:
-            target = self._require_root() / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(body)
-        except (OSError, UnicodeError, ValueError) as exc:
-            # ★ 换不成页就**不销毁**：宁可把全量给它，也不留一份"截了却取不回"的输出。
-            self._code_dump_failures.append(f"{type(exc).__name__}: {exc}")
-            answer["truncated"] = False
-            answer["page_error"] = f"{type(exc).__name__}: {exc}"
-            return answer
-        # ★ 截断必须**可见**，而且要说得清"丢了多少、原文多长"（否则模型会以为输出就这么短）：
-        #   正文里留一句"留了末尾哪一段、原文共多少、全文在哪"。
-        total_lines = len(text.splitlines())
-        total_bytes = len(text.encode("utf-8"))
-        answer["stdout"] = (
-            f"…[output truncated: kept the last {len(paged.splitlines())} lines / "
-            f"{len(paged.encode('utf-8'))} bytes of {total_lines} lines / {total_bytes} bytes; "
-            f"full output at {relative}]\n{paged}"
-        )
-        answer["truncated"] = True
-        answer["full_output_path"] = relative
-        # ★ 结构化读数：总量与原文规模分开给，别只留一句自然语言。
-        answer["full_output_lines"] = total_lines
-        answer["full_output_bytes"] = total_bytes
-        if capped:
-            # ★ 绑到上限就如实标：不假装那份文件是"全量"。
-            answer["full_output_truncated"] = True
-        self.write_budget.note_bytes(len(body))
-        return answer
-
     # -- lifecycle ---------------------------------------------------------- #
 
     def close(self) -> None:
-        """Kill the code session and every background job -- no orphan processes."""
-        if self._code_session is not None:
-            self._code_session.close()
-            self._code_session = None
+        """Kill every background job -- no orphan processes."""
         for process in self._background:
             if process.poll() is None:
                 process.kill()
@@ -683,58 +537,6 @@ def _nearby(original: str, old: str) -> str:
     return _clip("\n".join(original.split("\n")[:6]))
 
 
-def _tail_page(text: str, max_lines: int, max_bytes: int) -> str:
-    """把一段输出换页：留**末尾**，两个上限都满足（= 谁先到就按谁截）。
-
-    ★ 保留末尾而不是开头：报错与结果在最后，开头多是 import 与噪音。
-    ★ 返回的一定是原文的**连续后缀**（不重排、不加壳）—— 被截掉的部分去
-      `full_output_path` 里拿得回来，所以这是换页不是销毁。
-    """
-    if not text:
-        return text
-    lines = text.splitlines(keepends=True)
-    if len(lines) > max_lines:
-        lines = lines[-max_lines:]
-    page = "".join(lines)
-    encoded = page.encode("utf-8")
-    if len(encoded) > max_bytes:
-        # 按字节切到末尾；切点可能落在字符中间 ⇒ 用 `ignore` 丢掉那半个（不影响后半段的完整）。
-        page = encoded[-max_bytes:].decode("utf-8", errors="ignore")
-    return page
-
-
-def _slug(text: str) -> str:
-    """把一个块 id 变成安全的目录名（只留 `[A-Za-z0-9._-]`，其余换成 `_`）。
-
-    ★ 块 id 来自契约/切分器（今天形如 `T-01`），但**路径安全**不该赌它的形状：
-      带 `/` 或 `..` 的 id 会逃出草稿纸目录。空串落到 `unscoped`（不冒充任何块）。
-    """
-    cleaned = "".join(char if (char.isalnum() or char in "._-") else "_" for char in str(text))
-    return cleaned.strip("._") or "unscoped"
-
-
-def _metadata_first(answer: Mapping[str, Any]) -> dict[str, Any]:
-    """把**元数据键排到 `stdout` 前面**（键序 = JSON 里的字面顺序）。
-
-    ★★ 实测（只读审计 #71）：上下文压缩按**头部**截 2000 字符（`compress.tool_result_char_cap`），
-      而 `code_path` / `full_output_path` 排在几千字符的 stdout **之后** ⇒ 两键被整段砍掉，
-      "被截的内容去 `full_output_path` 拿"这句话在长会话里**等于没有**。放前面就是修法。
-    ★ 只重排、不增不减：未知键原样留在后面。
-    """
-    priority = (
-        "ok",
-        "code_path",
-        "full_output_path",
-        "truncated",
-        "full_output_truncated",
-        "code_save_error",
-        "page_error",
-        "error",
-    )
-    head = {key: answer[key] for key in priority if key in answer}
-    return {**head, **{key: value for key, value in answer.items() if key not in head}}
-
-
 def _written(root: Path, path: Path) -> dict[str, Any]:
     data = path.read_bytes()
     return {
@@ -754,11 +556,10 @@ def _written(root: Path, path: Path) -> dict[str, Any]:
 class WorkspaceLedger:
     """Records what this block changed in the workspace, by observing it.
 
-    ★ Why observe instead of trusting each tool: `shell.run` and `code.run` can
-    create files the shell never sees an argument for (`> out.csv`,
-    `open(...).write(...)`). A ledger that only knew about `files.write` would
-    leave a hole exactly where "run some code" was added -- and the judge must
-    see everything the block put on disk.
+    ★ Why observe instead of trusting each tool: `shell.run` can create files the
+    shell never sees an argument for (`> out.csv`, `cmd && mv ...`). A ledger
+    that only knew about `files.write` would leave a hole exactly where "run a
+    command" was added -- and the judge must see everything the block put on disk.
     """
 
     root: Path | None
@@ -811,120 +612,3 @@ def _digests(root: Path | None) -> dict[str, str]:
         except OSError:  # a file that vanished mid-scan is not a change we can claim
             continue
     return found
-
-
-# --------------------------------------------------------------------------- #
-# The persistent code session
-# --------------------------------------------------------------------------- #
-
-#: The driver runs inside the workspace and speaks one JSON line per request.
-#: It is deliberately tiny: read a line, exec it in a namespace, answer a line.
-#: Everything the code prints is captured into the answer, never onto our pipe.
-_DRIVER = r"""
-import ast, contextlib, io, json, sys, traceback
-
-namespace = {"__name__": "__worker__"}
-
-def _run(code):
-    source = io.StringIO()
-    value = None
-    try:
-        module = ast.parse(code, mode="exec")
-        last = module.body[-1] if module.body else None
-        tail = ast.Expression(last.value) if isinstance(last, ast.Expr) else None
-        with contextlib.redirect_stdout(source), contextlib.redirect_stderr(source):
-            if tail is not None and len(module.body) == 1:
-                value = eval(compile(tail, "<worker>", "eval"), namespace)
-            else:
-                exec(compile(module, "<worker>", "exec"), namespace)
-                if tail is not None:
-                    value = eval(compile(tail, "<worker>", "eval"), namespace)
-        return {"ok": True, "stdout": source.getvalue(), "value": None if value is None else repr(value)}
-    except BaseException as exc:
-        return {"ok": False, "stdout": source.getvalue(),
-                "error": "".join(traceback.format_exception_only(type(exc), exc)).strip()}
-
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        request = json.loads(line)
-    except Exception:
-        continue
-    if request.get("op") == "exit":
-        break
-    answer = _run(str(request.get("code", "")))
-    sys.stdout.write(json.dumps(answer) + "\n")
-    sys.stdout.flush()
-"""
-
-
-class _CodeSession:
-    """A `python3` child that keeps one namespace alive between snippets.
-
-    Restarted transparently if the snippet killed it (`sys.exit`, a hard crash):
-    a dead session is a fact to report, not a reason to stop answering.
-    """
-
-    def __init__(self, cwd: Path) -> None:
-        self._cwd = cwd
-        self._process: subprocess.Popen[str] | None = None
-        self._open()
-
-    def _open(self) -> None:
-        try:
-            self._process = subprocess.Popen(
-                [sys.executable, "-u", "-c", _DRIVER],
-                cwd=str(self._cwd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-        except OSError as exc:
-            raise WorkspaceUnavailable(f"cannot start a code session: {exc}") from exc
-
-    @property
-    def alive(self) -> bool:
-        return self._process is not None and self._process.poll() is None
-
-    def execute(self, code: str) -> Mapping[str, Any]:
-        if not self.alive:
-            self._open()
-        process = self._process
-        assert process is not None and process.stdin is not None and process.stdout is not None
-        try:
-            process.stdin.write(json.dumps({"code": code}) + "\n")
-            process.stdin.flush()
-            line = process.stdout.readline()
-        except (BrokenPipeError, OSError):
-            self.close()
-            return {"ok": False, "error": "the code session died before answering; it was restarted"}
-        if not line:
-            self.close()
-            return {"ok": False, "error": "the code session produced no answer; it was restarted"}
-        try:
-            answer = json.loads(line)
-        except json.JSONDecodeError:
-            return {"ok": False, "error": f"the code session answered with non-JSON: {line[:200]!r}"}
-        if not isinstance(answer, Mapping):
-            return {"ok": False, "error": "the code session answered with a non-object"}
-        return dict(answer)
-
-    def close(self) -> None:
-        process = self._process
-        self._process = None
-        if process is None:
-            return
-        try:
-            if process.stdin is not None and process.poll() is None:
-                process.stdin.close()
-        except OSError:
-            pass
-        if process.poll() is None:
-            process.kill()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:  # pragma: no cover - kill is best effort
-            pass

@@ -83,7 +83,6 @@ TOOL_NAMES: tuple[str, ...] = (
     "files.write",
     "files.patch",
     "shell.run",
-    "code.run",
     # ★ 过程检索（ARTEX 机制 ②）：先 search 再 read —— 两段式是**预算**，不是风格。
     "traces.search",
     "traces.read",
@@ -427,15 +426,6 @@ def build_registry(
     anything.
     """
 
-    # ★★ 方案 B：给这一块的工作区**上块号** —— `code.run` 的草稿纸按块分子目录
-    #   （`_code/<块>/step-NNNN.py`）。理由：同一个 run 里所有块共用同一个工作区，
-    #   而每个块的 `BoundWorkspace` 都是新的、序号从 1 开始 ⇒ 不打块号的话，
-    #   每个块的第一条 `code.run` 都会覆盖上一个块的存底（只读审计 #65）。
-    #   块的 id 只有这里**同时**拿得到（`toolset.subtask` + `toolset.workspace`），所以在这里上号。
-    _bound_workspace = getattr(toolset, "workspace", None)
-    if _bound_workspace is not None and hasattr(_bound_workspace, "block") and not _bound_workspace.block:
-        _bound_workspace.block = str(toolset.subtask)
-
     def payload(value: object) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
 
@@ -627,16 +617,6 @@ def build_registry(
             )
         )
 
-    def code_run(args: Mapping[str, Any]) -> str:
-        return payload(
-            dict(
-                _workspace().run_code(
-                    str(args.get("code", "")),
-                    reset=str(args.get("reset", "")).strip().lower() in ("true", "1", "yes"),
-                )
-            )
-        )
-
     def _traces() -> Any:
         """★ 与 `_workspace()` 同一条规则：**不广告就不该被调用**（拿不到的能力不硬撑）。"""
         traces = getattr(toolset, "traces", None)
@@ -676,7 +656,6 @@ def build_registry(
         "files.write": (files_write, "write", ("path",)),
         "files.patch": (files_patch, "write", ("path",)),
         "shell.run": (shell_run, "write", ()),
-        "code.run": (code_run, "write", ()),
         # ★ 只读：检索别人的过程不改任何东西，也不该被当成写屏障。
         "traces.search": (traces_search, "read", ()),
         "traces.read": (traces_read, "read", ()),

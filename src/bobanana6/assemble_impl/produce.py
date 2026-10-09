@@ -141,7 +141,7 @@ BLOCK_COMPLETION_GUIDANCE = (
     "★ 第一步永远是【先把数据取到手】："
     "你被授权读的来源就在 brief 的 `authorized_sources` 里，用 `sources.*` 去读它们。"
     "没有数据就先取数，不要先写答案。\n"
-    "★ 大表不要手写：你有 `code.run` / `shell.run` / `files.write`，"
+    "★ 大表不要手写：你有 `shell.run` / `files.write`，"
     "算得出来的东西让程序去算、去写。\n"
     "★ 取不到就说取不到 —— 但**先说，再换办法**：\n"
     "「这条来源读不出来」是合格的报告，不是终点。\n"
@@ -211,7 +211,7 @@ EXECUTION_DISCIPLINE = (
     "还没看到任何数据就开始写答案，等于交白卷。\n"
     "★ 顺序是：读来源 → 看懂了 → 再算、再写。别跳。\n"
     "## 数字必须真的算过\n"
-    "合计、比例、计数、排序 —— 用 `code.run` 让程序算。\n"
+    "合计、比例、计数、排序 —— 用 `shell.run` 让程序算。\n"
     "★ 「看起来应该是……」不是数据。凭印象写的数字会被判错。\n"
     "## 不确定就先查，别猜\n"
     "不知道一个词的确切口径 → `semantics.lookup`。\n"
@@ -229,7 +229,7 @@ EXECUTION_DISCIPLINE = (
     "★ `check.local` 是辅助（它能告诉你哪条不过），不是判据：\n"
     "  它过了不等于你做对了，它只说这一块现在没被拒。\n"
     "## 写在文件里的，要回读确认\n"
-    "用 `files.write` / `code.run` 写出来的东西，回读一次，确认真的写进去了。\n"
+    "用 `files.write` / `shell.run` 写出来的东西，回读一次，确认真的写进去了。\n"
     "★ 「我以为写好了」和「它真的在磁盘上」是两件事。"
 )
 
@@ -1788,9 +1788,9 @@ class LoopIOImpl(LoopIO):
 
     #: ★ 判据**不看工具名**：transcript 里是**线格式**的名字（`shell_run`），而内部名是
     #: `shell.run` —— 按名字匹配会在适配器边界上悄悄失配（实测踩到过：`cleanliness` 全成了
-    #: `clean`）。改成认**参数形状**：参数里带 `command` / `code` 的调用就是**执行类**调用，
+    #: `clean`）。改成认**参数形状**：参数里带 `command` 的调用就是**执行类**调用，
     #: 而执行类调用里的路径就是可读路径。这条与工具叫什么名字无关。
-    _EXECUTION_ARGUMENTS = ("command", "code")
+    _EXECUTION_ARGUMENTS = ("command",)
     #: 路径样子的 token：带 `/` 或带常见后缀，且长度合理（不许把 "a" 当成路径）。
     _PATH_SUFFIXES = (
         ".py", ".tsv", ".csv", ".json", ".txt", ".md", ".yaml", ".yml", ".jsonl", ".log", ".sql",
@@ -1804,7 +1804,7 @@ class LoopIOImpl(LoopIO):
         契约已经声明了来源地址 ⇒ 读授权本来就该同时管【工具】与【文件在不在】。
 
         纪律（高精度低召回 / 不扩散）：
-          · 只认**读**类调用（`shell.run` / `code.run` 的参数），写类交给既有写区守卫
+          · 只认**读**类调用（`shell.run` 的参数），写类交给既有写区守卫
           · 拿不准就不标：token 必须是**工作区里真实存在**的文件才算数
           · ★ 读自己在写区里的产物【不算】污染（那是它自己的东西）
           · ★ 它**只影响读数的可信度标记**，不参与判定、不让块失败
@@ -2078,8 +2078,8 @@ class LoopIOImpl(LoopIO):
 
         这是本块最关键的一处设计取舍（`#47` 报告 §2②）：
 
-        * **为什么观察而不是相信每个工具**：`shell.run` / `code.run` 能创建壳看不到参数的
-          文件（`> out.csv`、`open(...).write(...)`）。只登记 `files.write` 会在"能执行代码"
+        * **为什么观察而不是相信每个工具**：`shell.run` 能创建壳看不到参数的
+          文件（`> out.csv`、`python gen.py`）。只登记 `files.write` 会在"能执行命令"
           这一加入口上留一个洞。ledger 在**第一次**动工作区前拍了"之前"，这里 diff 出
           "新增/改动的文件"——两条路径（写工具 / 执行副作用）走同一条记录。
         * **通道 1 一字不改**：答案 JSON 的 `files` 仍然走 `_persist_files` 与行级溯源；
@@ -2126,7 +2126,7 @@ class LoopIOImpl(LoopIO):
             reject_on_delimiter(
                 name, target.read_text(encoding="utf-8", errors="replace"), _raise
             )
-        # ★ 总字节闸（**净占用**）：命令副作用（`shell.run` / `code.run`）落下的文件在这里
+        # ★ 总字节闸（**净占用**）：命令副作用（`shell.run`）落下的文件在这里
         #   记进本块账上，然后按"这些路径现在在磁盘上的字节和"判定 —— 写过的又删了 = 0，
         #   反复覆写同一个大文件不会被累计误伤（见 `services/workspace.py::WriteBudget`）。
         for name in changed:
@@ -2286,7 +2286,7 @@ class LoopIOImpl(LoopIO):
         两者都要求它稳定），而模型需要的是**可解**。只给名字的实测后果（13f 五轮）：
         块分不清"来源清单"和"来源内容" —— 它调 `task.contract` 拿到的是一模一样的
         那串名字，于是以为看清单就是看来源。而载体其实**就在它的工作区里**
-        （`code.run` 的 cwd 就是那儿），只是从来没人告诉过它。
+        （`shell.run` 的 cwd 就是那儿），只是从来没人告诉过它。
 
         ★ `SourcePort.locator` 的 docstring 本来就写着它是 "a hint for the payload"
         —— 这句话到今天才第一次真的成立。给地址**不增加任何能力**（文件本来就在
@@ -2545,7 +2545,7 @@ class LoopIOImpl(LoopIO):
                 + outside
                 + "★ 你的**产物必须落在 `you_may_write` 里** —— 不要写到工作目录【之外】："
                 "判定器只读工作目录，写到别处等于没交。"
-                "`code.run` / `shell.run` 能写到任何地方：用它们时一律用相对路径，"
+                "`shell.run` 能写到任何地方：用它时一律用相对路径，"
                 "或用 system 里那个前缀拼出来的绝对路径。"
                 + (empty if not allowed else "")
             ),
@@ -2564,7 +2564,7 @@ class LoopIOImpl(LoopIO):
     def _workspace_line(self) -> str:
         """抄 Hermes 子代理骨架里那句 `WORKSPACE PATH:`（bb6 一直没实现）。
 
-        没有它，块手上有 `code.run` / `shell.run` 却不知道 cwd 在哪、素材就在脚下。
+        没有它，块手上有 `shell.run` 却不知道 cwd 在哪、素材就在脚下。
         有了它，两条路各干各的：**地址用来导航与取数，名字用来溯源**。
 
         ★★ 实测追加（`qwen4b` 第 34 轮：43 次调用、零产物）：**只丢一个路径字符串不够。**
@@ -2591,7 +2591,7 @@ class LoopIOImpl(LoopIO):
             "★ 不许自己推断或猜测绝对路径：需要绝对路径时，一律拿上面这个前缀去拼。"
             "题面或说明里出现的其它绝对路径（例如 `/app/...`）属于原环境，在这里不成立。\n"
             "Your tools run inside this directory. The task's own material is already "
-            "here -- look under `input/` (use `code.run` / `shell.run` to list and read it); "
+            "here -- look under `input/` (use `shell.run` to list and read it); "
             "`output/` is where deliverables land.\n"
             "Look around before concluding that anything is missing.\n"
             "★ 引值时仍要写它出自哪个来源（`ref`）：地址是用来【看】的，名字是用来【溯源】的。\n"
@@ -2795,7 +2795,7 @@ class LoopIOImpl(LoopIO):
         ② 向上逃逸（token 里带 `..`）
         ③ 相对路径 + 通配/命令替换（`sub/*.py` / `$(pwd)/x`）—— 解析不出它最终指哪
         ```
-        ★ 只扫执行类调用（args 里带 `command` / `code`）：`sources.*` 读的是**声明的来源**，
+        ★ 只扫执行类调用（args 里带 `command`）：`sources.*` 读的是**声明的来源**，
           它已经在工作区里，不需要遮。
         """
         workspace = Path(self.workspace).resolve() if self.workspace is not None else None

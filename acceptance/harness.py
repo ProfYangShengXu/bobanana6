@@ -319,10 +319,10 @@ def run_task(
         _WORKSPACE_SEEDED[workspace_dir] = workspace_seeded
         # ★★ 工作区必须**能完成这道题**：契约声明的产物目录要先存在。
         #   实测（13f）：deliverables 是 `output/*.csv`，而块要生成一份 1681 行的
-        #   CSV 只能靠 `code.run`（手写不了），于是 Python 里
+        #   CSV 只能靠 `shell.run` 跑个脚本（手写不了），于是 Python 里
         #   `df.to_csv('output/x.csv')` 直接
         #     `OSError: Cannot save file into a non-existent directory: 'output'`
-        #   —— `files.write` 会自建父目录，`code.run` / `shell.run` **不会**。
+        #   —— `files.write` 会自建父目录，`shell.run` **不会**。
         #   ⇒「块自己算、再落盘」这条路在**环境层面**就是断的；
         #     那是壳的账，不是模型的账（模型再怎么听话也写不出来）。
         #   ★ 按**契约自己声明的**交付物建目录，不特判任何题目。
