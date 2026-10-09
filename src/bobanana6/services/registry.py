@@ -427,6 +427,15 @@ def build_registry(
     anything.
     """
 
+    # ★★ 方案 B：给这一块的工作区**上块号** —— `code.run` 的草稿纸按块分子目录
+    #   （`_code/<块>/step-NNNN.py`）。理由：同一个 run 里所有块共用同一个工作区，
+    #   而每个块的 `BoundWorkspace` 都是新的、序号从 1 开始 ⇒ 不打块号的话，
+    #   每个块的第一条 `code.run` 都会覆盖上一个块的存底（只读审计 #65）。
+    #   块的 id 只有这里**同时**拿得到（`toolset.subtask` + `toolset.workspace`），所以在这里上号。
+    _bound_workspace = getattr(toolset, "workspace", None)
+    if _bound_workspace is not None and hasattr(_bound_workspace, "block") and not _bound_workspace.block:
+        _bound_workspace.block = str(toolset.subtask)
+
     def payload(value: object) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
 

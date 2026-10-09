@@ -361,6 +361,9 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "何时用：★ 数据要【算】（过滤、聚合、连接、格式转换），"
         "或产物大到写不完、必须由程序生成时。让程序算，不要手写大表。"
         "输入：code = 一段 Python；reset = 清空会话（否则变量在多次调用间保留）。"
+        "★ 每次调用会把这段代码**原样存成工作区里的一个文件**，路径在返回的 `code_path` 里；"
+        "所以【改哪一行就去改那个文件】（`files.patch` 按原文改），不必重贴整段。"
+        "★ 输出太长时正文只留末尾，完整输出在返回的 `full_output_path` 里，取回得回来。"
         "何时不用：只跑一条 shell 命令时用 shell.run；只写一份短文件用 files.write。"
     ),
     "shell.run": (
@@ -522,7 +525,8 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "code.run",
         ("code",),
-        "run a code snippet in the workspace (persistent between calls)",
+        "run a code snippet in the workspace (persistent between calls; the code is saved to code_path, "
+        "a truncated stdout is paged to full_output_path)",
         "workspace cwd",
         optional=("reset",),
         group="exec",

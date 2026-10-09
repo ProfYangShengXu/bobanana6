@@ -57,8 +57,27 @@ _WORKSPACE_WRITE_BUDGET_BYTES = 64 * 1024 * 1024
 #: 一条命令默认/最长跑多久（秒）。超时是**具名**结果，不是静默截断。
 DEFAULT_TIMEOUT_S = 60.0
 MAX_TIMEOUT_S = 600.0
+#: ★★ 方案 B：`code.run` 每次执行前，把那段代码**原样**落盘到工作区里的这个目录。
+#:
+#: 为什么必须是**工作区里的相对目录**（而不是 `/tmp`）：落盘的全部意义就是让那段代码
+#: 变成**磁盘上可被 `files.patch` 按原文精确修改的对象**（"行号会漂，文本不会漂"）。
+#: 模型此前把代码塞在 tool-call 参数里 ⇒ 想改一行只能重贴一整段 ⇒ `files.patch` 永远够不着。
+CODE_DIR = "_code"
+#: ★ 输出"换页"的两个上限（照 flash §2.4）：正文只留**末尾** N 行 / M 字节，先到者为准。
+#: 保留末尾而不是开头：**报错与结果总在最后**，开头多是 import 与噪音。
+#: 完整输出落盘，路径在返回的 `full_output_path` 里 —— 截断不丢信息。
+CODE_OUTPUT_MAX_LINES = 2000
+CODE_OUTPUT_MAX_BYTES = 50 * 1024
+#: ★ 全量输出文件（`step-NNNN.out`）自己的上限（8 MiB）。它写的是**全量 stdout**，
+#: 不设闸就是一个新的磁盘外泄面；绑到上限时**如实标** `full_output_truncated`，不假装"全量"。
+CODE_OUTPUT_FULL_MAX_BYTES = 8 * 1024 * 1024
 #: 扫描工作区时忽略的目录名：编译/测试缓存的副产品不是产物，也不是越权写。
-IGNORED_PARTS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git"})
+#: ★★ `CODE_DIR` 也在这里：`code.run` 落盘的是**壳自己的草稿纸**，不是块交出来的产物 ——
+#:    `_digests` 看不见它 ⇒ ledger 的 `changed()` 不含它 ⇒ 通道 2 的对账
+#:    （`_reconcile_workspace`）不会把它收成候选产物。**这是唯一的排除点**（单点收口）。
+IGNORED_PARTS = frozenset(
+    {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git", CODE_DIR}
+)
 IGNORED_SUFFIXES = (".pyc", ".pyo")
 
 
@@ -221,9 +240,21 @@ class BoundWorkspace:
     #: ★ 本块的总写入字节闸（见 `WriteBudget`）。默认一块一份；`runtime` 会把这个对象
     #: 同时交给答案 `files` 通道，于是"写工具写的 + 答案写写的"在同一本账上累加。
     write_budget: WriteBudget = field(default_factory=WriteBudget)
+    #: ★★ 方案 B：这一块草稿纸的**归属** —— 落盘路径里的那个子目录名（`_code/<block>/…`）。
+    #: 同一个 run 里所有块共用同一个工作区，而每个块的 `BoundWorkspace` 都是新的、序号从 1
+    #: 开始 —— 不打这块牌子，**每个块的第一条 `code.run` 都会覆盖上一个块的存底**，
+    #: 返回给模型的 `code_path` 就指向了别人的代码。由
+    #: `services/registry.py::build_registry` 从 `toolset.subtask` 上号（那里同时拿得到两者）。
+    block: str = ""  # blame: fail-closed — 省略即落到 `_code/unscoped/`（不冒充任何块），不会覆盖别块
     #: Long-lived helpers owned by this block (the code session, background jobs).
     _code_session: Any = None
     _background: list[subprocess.Popen[bytes]] = field(default_factory=list)
+    #: ★★ 方案 B：这一块调过多少次 `code.run` —— 它就是落盘文件名的**确定性序号**
+    #:（`_code/step-0001.py`）。不用时间戳：同一段代码重跑要得到同一个名字，否则不可复现。
+    #: `reset` **不重置它**（reset 清的是 Python 命名空间，不是"代码存底"）。
+    _code_calls: int = 0  # blame: fail-closed — 省略即从 0 开始编号，最保守（不覆盖已存在的存底）
+    #: 落盘失败过几次（**如实报**，不假装存了；见硬边界⑦：落盘是辅助不是前置门）。
+    _code_dump_failures: list[str] = field(default_factory=list)  # blame: whitelist — 只是"失败过什么"的证据清单，缺省空 = 没失败过
 
     # -- boundary helpers -------------------------------------------------- #
 
@@ -491,11 +522,21 @@ class BoundWorkspace:
         }
 
     def run_code(self, code: str, *, reset: bool = False) -> Mapping[str, Any]:
-        """Run a snippet in the workspace, in a session that persists between calls.
+        """★★ 方案 B：**先落盘、再跑那个文件**（对模型仍然只有一个 `code` 参数）。
 
-        ``reset=True`` drops the session (fresh namespace, fresh interpreter) --
-        that is the whole content of Hermes' `execute_code(reset=...)` contract
-        once the orchestration around it is left behind.
+        ```
+        ① 把这段代码**原样**写成工作区里的 `_code/step-NNNN.py`（序号 = 确定性规则）
+        ② 再把同一个字符串送进持久 Python 会话执行（送进去的那段与改前**逐字节相同**）
+        ③ 输出超上限时：正文只留**末尾**（2000 行 / 50KB，先到者为准），
+           完整输出落盘，路径在 `full_output_path` 里 —— 截断是换页，不是销毁
+        ```
+
+        ``reset=True`` 的语义**一个字没变**：清的是 Python 会话的命名空间（与解释器），
+        **不是**清文件 —— 存底的代码留着，序号接着往下走。
+
+        ★ 两条硬边界在这里落地：**不加参数**（还是 `code` + `reset`）；**落盘是辅助不是前置门**
+          （写不成就把失败如实放进返回、代码照跑）。返回**只增不减**：`ok` / `stdout` / `value`
+          / `error` / `cwd` 一个都不动。
         """
         if not isinstance(code, str) or not code.strip():
             raise WorkspaceError("code must be a non-empty string")
@@ -506,12 +547,90 @@ class BoundWorkspace:
             self._code_session = None
         if self._code_session is None or not self._code_session.alive:
             self._code_session = _CodeSession(root)
+        # ★★ ① 先落盘 —— 于是这段代码变成磁盘上一个可被 `files.patch` 按原文改的对象。
+        self._code_calls += 1
+        saved = self._save_code(self._code_calls, code)
+        answer = dict(self._code_session.execute(code))
         # ★★ `code.run` 的返回也带上**绝对** cwd：以前它一个 `cwd` 字段都没有，
         #   模型跑完代码看不到自己站在哪 —— 实测（`qwen4b` 第 34 轮）它正是在
         #   连续 27 轮 `code.run` 之后自己 `mkdir -p <repo>/…/output` 猜了一个输出目录。
         #   与 `run()` 同一个真值来源（`_require_root()` 已经 resolve 过），不改任何判据。
-        answer = dict(self._code_session.execute(code))
         answer["cwd"] = str(root)
+        answer["code_path"] = saved
+        if not saved:
+            # ★ 硬边界⑦的"如实报"：没存成就说没存成，不假装有路径。
+            answer["code_save_error"] = self._code_dump_failures[-1]
+        # ★★ 元数据排到 `stdout` 前面（只读审计 #71）：上下文压缩按**头部**截 2000 字符，
+        #   排在几千字符 stdout 之后的 `code_path`/`full_output_path` 会被整段砍掉。
+        return _metadata_first(self._page_code_output(answer, self._code_calls))
+
+    def _code_root(self) -> str:
+        """这一块的草稿纸目录（工作区相对）：`_code/<块>/`（块未知时 `_code/unscoped/`）。"""
+        return f"{CODE_DIR}/{_slug(self.block)}"
+
+    def _save_code(self, seq: int, code: str) -> str:
+        """把这段代码**原样**写成 `_code/<块>/step-NNNN.py`，返回工作区相对路径；失败返回 `""`。
+
+        ★ 原样：不加工、不重排、不加壳 —— 模型之后要用 `files.patch` 按**原文**改它。
+          用 `write_bytes` 而不是 `write_text`：文本模式会把 `\\n` 翻成 `os.linesep`，
+          那会让"逐字节相同"在非 Linux 上不成立（只读审计 #72）。
+        ★ 路径是**工作区相对**的：与 `files.write` / `files.patch` 的路径口径**同一个**
+          （两者都以工作区为基准）⇒ 返回的 `code_path` 可以直接当 `files.patch` 的 `path` 用。
+        ★ 按**块**分子目录：见 `BoundWorkspace.block` 的注记（跨块重名会把别人的代码覆盖掉）。
+        """
+        relative = f"{self._code_root()}/step-{seq:04d}.py"
+        try:
+            target = self._require_root() / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(code.encode("utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._code_dump_failures.append(f"{type(exc).__name__}: {exc}")
+            return ""
+        # ★ 只作**证据**记账：不过 `WriteBudget` 的闸 —— 硬边界⑦说落盘不许把块拦下来。
+        self.write_budget.note_bytes(len(code.encode("utf-8")))
+        return relative
+
+    def _page_code_output(self, answer: dict[str, Any], seq: int) -> dict[str, Any]:
+        """★ 截断 = 换页：正文只留末尾，完整输出落盘并给出路径（不销毁任何东西）。"""
+        text = str(answer.get("stdout") or "")
+        paged = _tail_page(text, CODE_OUTPUT_MAX_LINES, CODE_OUTPUT_MAX_BYTES)
+        if paged == text:
+            answer["truncated"] = False
+            return answer
+        relative = f"{self._code_root()}/step-{seq:04d}.out"
+        # ★ 全量那份也有上限（8 MiB）——写的是全量 stdout，不设闸就是新的磁盘外泄面。
+        body = text.encode("utf-8")
+        capped = len(body) > CODE_OUTPUT_FULL_MAX_BYTES
+        if capped:
+            body = body[-CODE_OUTPUT_FULL_MAX_BYTES:]
+        try:
+            target = self._require_root() / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(body)
+        except (OSError, UnicodeError, ValueError) as exc:
+            # ★ 换不成页就**不销毁**：宁可把全量给它，也不留一份"截了却取不回"的输出。
+            self._code_dump_failures.append(f"{type(exc).__name__}: {exc}")
+            answer["truncated"] = False
+            answer["page_error"] = f"{type(exc).__name__}: {exc}"
+            return answer
+        # ★ 截断必须**可见**，而且要说得清"丢了多少、原文多长"（否则模型会以为输出就这么短）：
+        #   正文里留一句"留了末尾哪一段、原文共多少、全文在哪"。
+        total_lines = len(text.splitlines())
+        total_bytes = len(text.encode("utf-8"))
+        answer["stdout"] = (
+            f"…[output truncated: kept the last {len(paged.splitlines())} lines / "
+            f"{len(paged.encode('utf-8'))} bytes of {total_lines} lines / {total_bytes} bytes; "
+            f"full output at {relative}]\n{paged}"
+        )
+        answer["truncated"] = True
+        answer["full_output_path"] = relative
+        # ★ 结构化读数：总量与原文规模分开给，别只留一句自然语言。
+        answer["full_output_lines"] = total_lines
+        answer["full_output_bytes"] = total_bytes
+        if capped:
+            # ★ 绑到上限就如实标：不假装那份文件是"全量"。
+            answer["full_output_truncated"] = True
+        self.write_budget.note_bytes(len(body))
         return answer
 
     # -- lifecycle ---------------------------------------------------------- #
@@ -562,6 +681,58 @@ def _nearby(original: str, old: str) -> str:
         index = original.index(head)
         return _clip(original[max(0, index - 120) : index + 300])
     return _clip("\n".join(original.split("\n")[:6]))
+
+
+def _tail_page(text: str, max_lines: int, max_bytes: int) -> str:
+    """把一段输出换页：留**末尾**，两个上限都满足（= 谁先到就按谁截）。
+
+    ★ 保留末尾而不是开头：报错与结果在最后，开头多是 import 与噪音。
+    ★ 返回的一定是原文的**连续后缀**（不重排、不加壳）—— 被截掉的部分去
+      `full_output_path` 里拿得回来，所以这是换页不是销毁。
+    """
+    if not text:
+        return text
+    lines = text.splitlines(keepends=True)
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    page = "".join(lines)
+    encoded = page.encode("utf-8")
+    if len(encoded) > max_bytes:
+        # 按字节切到末尾；切点可能落在字符中间 ⇒ 用 `ignore` 丢掉那半个（不影响后半段的完整）。
+        page = encoded[-max_bytes:].decode("utf-8", errors="ignore")
+    return page
+
+
+def _slug(text: str) -> str:
+    """把一个块 id 变成安全的目录名（只留 `[A-Za-z0-9._-]`，其余换成 `_`）。
+
+    ★ 块 id 来自契约/切分器（今天形如 `T-01`），但**路径安全**不该赌它的形状：
+      带 `/` 或 `..` 的 id 会逃出草稿纸目录。空串落到 `unscoped`（不冒充任何块）。
+    """
+    cleaned = "".join(char if (char.isalnum() or char in "._-") else "_" for char in str(text))
+    return cleaned.strip("._") or "unscoped"
+
+
+def _metadata_first(answer: Mapping[str, Any]) -> dict[str, Any]:
+    """把**元数据键排到 `stdout` 前面**（键序 = JSON 里的字面顺序）。
+
+    ★★ 实测（只读审计 #71）：上下文压缩按**头部**截 2000 字符（`compress.tool_result_char_cap`），
+      而 `code_path` / `full_output_path` 排在几千字符的 stdout **之后** ⇒ 两键被整段砍掉，
+      "被截的内容去 `full_output_path` 拿"这句话在长会话里**等于没有**。放前面就是修法。
+    ★ 只重排、不增不减：未知键原样留在后面。
+    """
+    priority = (
+        "ok",
+        "code_path",
+        "full_output_path",
+        "truncated",
+        "full_output_truncated",
+        "code_save_error",
+        "page_error",
+        "error",
+    )
+    head = {key: answer[key] for key in priority if key in answer}
+    return {**head, **{key: value for key, value in answer.items() if key not in head}}
 
 
 def _written(root: Path, path: Path) -> dict[str, Any]:
