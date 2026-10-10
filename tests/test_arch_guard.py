@@ -1000,3 +1000,40 @@ def test_the_default_scanner_is_pure_ast() -> None:
     assert offenders == [], f"the scanner imports the modules it scans: {offenders}"
     # 反向：它确实 import 了 ast（不然"纯 ast"是空话）
     assert "ast" in resolved_imports("tools.default_audit", source)
+
+
+# --------------------------------------------------------------------------- #
+# 工具返回换页：单点收口（AGENTS §7③）
+# --------------------------------------------------------------------------- #
+
+SRC_ROOT = REPO / "src" / "bobanana6"
+
+
+def source_files_containing(needle: str) -> dict[str, int]:
+    """Every source file under ``src/`` that contains ``needle``, with its count."""
+    found: dict[str, int] = {}
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        count = path.read_text(encoding="utf-8").count(needle)
+        if count:
+            found[path.relative_to(REPO).as_posix()] = count
+    return found
+
+
+def test_the_tool_output_page_rule_has_exactly_one_gate() -> None:
+    """★ 一条规则、一个调用点：换页只在 ``loop._tool_round`` 发生。
+
+    每条 ``tool`` 行（执行出来的、guardrail 拦下的、参数不可解析而合成的）都在那
+    一处建成，所以放那里就是"覆盖全部工具的一份实现"。多一个调用点就是多一份实现，
+    而两份实现必然漂移 —— 这座仓库已经有 9 组这种病。
+    """
+    call_sites = source_files_containing("page_tool_output(")
+    call_sites.pop("src/bobanana6/agentloop/tool_output.py", None)  # the definition
+    assert call_sites == {"src/bobanana6/agentloop/loop.py": 1}, call_sites
+
+
+def test_the_tool_output_policy_is_read_from_env_at_one_place() -> None:
+    """阈值只有一个来源：装配点从 env 读一次，loop 不读 env（单测才可确定性）。"""
+    hits = source_files_containing("ToolOutputPolicy.from_env(")
+    assert hits == {"src/bobanana6/assemble_impl/runtime.py": 1}, hits

@@ -68,6 +68,8 @@ SHELL_OUTPUT_TAIL_BYTES = 8 * 1024
 #: ★ 完整输出（stdout+stderr）在被截时落盘的目录（工作区相对）。
 #: ★★ 它**不是产物**：进了 `IGNORED_PARTS` ⇒ `_digests` 看不见它 ⇒ ledger 的 `changed()`
 #:   不含它 ⇒ 通道 2 的对账（`_reconcile_workspace`）不会把它收成候选 —— 照 `_code/` 的先例。
+#: ★★ 这条排除规则现在同时覆盖 `shell.run` 的全量输出与**工具返回换页**的全量落盘
+#:   （`BoundWorkspace.spill_tool_output`）：两者的"不是产物"只有一个定义处。
 SHELL_OUTPUT_DIR = "_shell"
 #: 落盘文件里 stdout 与 stderr 的分界：两股流各存各的，合到一份文件里要能分清。
 SHELL_OUTPUT_STDERR_DIVIDER = "\n----- stderr -----\n"
@@ -78,6 +80,9 @@ _SHELL_OUTPUT_SEQ = count(1)
 #: 两次 run 可能拿到同一个 pid ⇒ 只靠 `<pid>-<seq>` 会让后一次覆盖前一次，旧 `full_output_path`
 #: 就指向了新内容（审计 #111）。
 _SHELL_OUTPUT_RUN = f"{os.getpid()}-{os.urandom(3).hex()}"
+#: ★ 工具返回换页落盘的**进程内**序号（与 `_SHELL_OUTPUT_SEQ` 同一条纪律，
+#:   但两股落盘各自编号，任一方的编号都不依赖另一方是否被用过）。
+_TOOL_OUTPUT_SEQ = count(1)
 #: 扫描工作区时忽略的目录名：编译/测试缓存的副产品不是产物，也不是越权写。
 IGNORED_PARTS = frozenset(
     {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git", SHELL_OUTPUT_DIR}
@@ -580,6 +585,31 @@ class BoundWorkspace:
             return ""
         # ★ 只作**证据**记账，不过 `WriteBudget` 的闸 —— 落盘不许把命令拦下来。
         self.write_budget.note_bytes(len(full.encode("utf-8")))
+        return relative
+
+    def spill_tool_output(self, call_id: str, text: str) -> str:
+        """把一条超阈值的工具返回**原样**落盘，返回工作区相对路径；失败返回 `""`。
+
+        与 `_spill_shell_output` 同一个忽略区（`SHELL_OUTPUT_DIR` ∈ `IGNORED_PARTS`）
+        ⇒ 落盘文件**不是产物**：`_digests` 看不见它 ⇒ ledger 的 `changed()` 不含它
+        ⇒ 通道 2 的对账（`_reconcile_workspace`）不会把它收成候选，也不会在
+        `frozen_paths=None` 的部署里被判 `write_outside_region`。
+
+        ★ 文件名同时带 `call_id`（给人看的定位）、`_SHELL_OUTPUT_RUN`（进程内唯一，
+          防跨 run 覆盖）与全局单调序号（防同 run 内跨块/跨轮覆盖 —— `call_id` 只保证
+          响应内唯一，多块共工作区时会重复）。
+        ★ 落盘失败**不抛**：调用方（`agentloop/tool_output.py`）据 `""` 决定"宁可不换页"。
+        """
+        stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in call_id)[:24] or "out"
+        relative = f"{SHELL_OUTPUT_DIR}/tool-{stem}-{_SHELL_OUTPUT_RUN}-{next(_TOOL_OUTPUT_SEQ):04d}.txt"
+        try:
+            target = self._require_root() / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        except (OSError, UnicodeError, ValueError):
+            return ""
+        # ★ 与 shell 落盘同一条：只作**证据**记账，不过 `WriteBudget` 的闸。
+        self.write_budget.note_bytes(len(text.encode("utf-8")))
         return relative
 
     # -- lifecycle ---------------------------------------------------------- #

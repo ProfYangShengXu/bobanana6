@@ -47,6 +47,7 @@ from .recovery import (
     reformat_message,
 )
 from .state import CheckpointStore, messages_digest, save_turn
+from .tool_output import ToolOutputPolicy, page_tool_output
 from .tools import (
     ToolCall,
     ToolCallGuardrailController,
@@ -477,6 +478,8 @@ class WorkerLoop:
         summarize: Callable[[tuple[Mapping[str, Any], ...]], str] | None = None,
         guardrails: ToolCallGuardrailController | None = None,
         classify: Callable[[BaseException], ClassifiedError] = classify_error,
+        tool_output: ToolOutputPolicy | None = None,  # blame: fail-closed — 省略即用出厂策略（4000/800/800）；生产装配点显式从 env 读
+        spill_tool_output: Callable[[str, str], str] | None = None,  # blame: fail-open — 省略即"没有落盘点 ⇒ 不换页"，把全文交给模型（数据不丢、上下文可能变大）
     ) -> None:
         self._io = io
         self._config = config or LoopConfig()
@@ -492,6 +495,18 @@ class WorkerLoop:
         self._summarize = summarize
         self._guardrails = guardrails or ToolCallGuardrailController()
         self._classify = classify
+        # ★ The tool-result page rule: the policy (threshold/head/tail) is a
+        #   parameter with a plain default here -- the *production* wiring reads it
+        #   from the environment (``ToolOutputPolicy`` ``from_env``, called once in
+        #   ``assemble_impl/runtime.py``). Reading env inside the loop would make
+        #   unit tests depend on ambient state.
+        self._tool_output = tool_output or ToolOutputPolicy()
+        # ★ Where an over-threshold return's full text goes. ``None`` = this
+        #   deployment has nowhere to put it, and a page that cannot be read back
+        #   is destruction, not paging -- so nothing is paged (see
+        #   ``agentloop/tool_output.py``). ``(call_id, full_text) -> workspace-relative
+        #   path``, or ``""`` when the write failed.
+        self._spill_tool_output = spill_tool_output
 
     @property
     def config(self) -> LoopConfig:
@@ -736,6 +751,71 @@ class WorkerLoop:
             return PhaseResult.stop("restart_cap")
         return PhaseResult.fallthrough()
 
+    def _page_tool_result(self, turn: _Turn, result: ToolResult, tool: str) -> str:
+        """★ The single door: cap one tool result on its way into the transcript.
+
+        Under the threshold the content is returned byte-for-byte -- no spill, no
+        extra text, no event. Over it, the full text is written out first and a
+        head + tail page (with the omitted size and the location named) is
+        returned. If the full text cannot be written, the content is returned
+        whole: paging must never destroy what it cannot page back.
+        """
+        text = result.content
+        if not self._tool_output.pages(len(text)):
+            return text
+        where = ""
+        failure = ""
+        if self._spill_tool_output is not None:
+            try:
+                where = self._spill_tool_output(result.call_id, text)
+            except Exception as exc:  # noqa: BLE001 - a failed spill must not fail the turn
+                # ★ 落盘是辅助，不是前置门（与 `shell.run` 的同一条守卫一致）：
+                #   它坏掉时"不换页"，绝不把 turn 带走，也绝不留下取不回的指针。
+                failure = f"{type(exc).__name__}: {exc}"
+        if not where:
+            self._note_truncate(
+                turn,
+                tool,
+                ok=False,
+                detail={
+                    "chars": len(text),
+                    "reason": failure or "the full text could not be written, so nothing was dropped",
+                },
+            )
+            return text
+        page = page_tool_output(text, self._tool_output, full_path=where)
+        self._note_truncate(
+            turn,
+            tool,
+            ok=True,
+            detail={
+                "full_path": where,
+                "total_chars": page.total_chars,
+                "total_lines": page.total_lines,
+                "head_chars": page.head_chars,
+                "tail_chars": page.tail_chars,
+                "omitted_chars": page.omitted_chars,
+            },
+        )
+        return page.body
+
+    def _note_truncate(self, turn: _Turn, tool: str, *, ok: bool, detail: dict[str, Any]) -> None:
+        """The event that answers "was it paged, and where is the original".
+
+        ``truncate`` was in the vocabulary with no producer; this is its producer.
+        A failed spill is recorded too (``ok=False``) instead of staying silent.
+        """
+        if self._log is None:
+            return
+        self._log.record(
+            kind="truncate",
+            task_id=turn.task_id,
+            worker_id=turn.worker_id,
+            at=float(turn.state.turn),
+            ok=ok,
+            detail={"tool": tool, **detail},
+        )
+
     def _tool_round(self, turn: _Turn) -> PhaseResult:
         proposal = turn.proposal
         if proposal is None or not proposal.tool_calls:
@@ -795,13 +875,19 @@ class WorkerLoop:
         #   没有出处的 JSON 块。
         #   id 一律取自 `proposal.tool_calls`（注册表归一化过、缺 id 时会补 `call-<n>`），
         #   所以 assistant 声明的 id 与下面每一条 tool 的 `tool_call_id` **必然**对得上。
-        appended = (
-            assistant_tool_row(proposal),
-            *(
-                {"role": "tool", "tool_call_id": result.call_id, "content": result.content}
-                for result in turn.results
-            ),
+        # ★★ 工具返回进上下文之前的那【唯一】一道门就是这里：执行出来的、被 guardrail
+        #   拦下的、参数不可解析而合成的 tool 行全部经过这一处 ⇒ 「超阈值 ⇒ 头尾 + 指针」
+        #   只写一遍（`agentloop/tool_output.py`）。放回各工具里就是每个工具一份，必然漂移。
+        names = {call.call_id: call.name for call in proposal.tool_calls}
+        tool_rows = tuple(
+            {
+                "role": "tool",
+                "tool_call_id": result.call_id,
+                "content": self._page_tool_result(turn, result, names.get(result.call_id, "")),
+            }
+            for result in turn.results
         )
+        appended = (assistant_tool_row(proposal), *tool_rows)
         turn.state = replace(turn.state, messages=(*turn.state.messages, *appended), tainted=self._taint.tainted())
         turn.exit_reason = "tool_round"
         return PhaseResult.cont("tool_round")

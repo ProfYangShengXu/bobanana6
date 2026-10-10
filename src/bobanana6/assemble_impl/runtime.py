@@ -32,6 +32,7 @@ from ..agentloop.events import EventLog
 from ..agentloop.loop import LoopConfig, WorkerLoop
 from ..agentloop.recovery import TaintTracker
 from ..agentloop.state import Checkpoint
+from ..agentloop.tool_output import ToolOutputPolicy
 from ..core.checkers.base import CheckContext
 from ..core.model import (
     Budget,
@@ -356,6 +357,11 @@ class BlockRuntime:
             taint=TaintTracker(),
             compression=self.compression,
             summarize=self.summarize,
+            # ★ 工具返回进上下文的那道门：阈值/头/尾从 env 读（默认 4000/800/800），
+            #   全文落进工作区的忽略区 `_shell/`（不是产物）。都从这里注入，loop 自己
+            #   不读 env、不碰磁盘、不认识 `services/`（依赖方向不反）。
+            tool_output=ToolOutputPolicy.from_env(),
+            spill_tool_output=workspace.spill_tool_output,
         )
         try:
             result = loop.run(task_id=self.contract.task_id, worker_id=subtask.id, messages=(), route_key=subtask.axis)

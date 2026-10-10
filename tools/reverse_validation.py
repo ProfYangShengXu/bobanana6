@@ -2185,8 +2185,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "X48-assistant-row-forgotten",
         "agentloop/loop.py",
-        "        appended = (\n            assistant_tool_row(proposal),\n            *(\n",
-        "        appended = (\n            *(\n",
+        "        appended = (assistant_tool_row(proposal), *tool_rows)\n",
+        "        appended = (*tool_rows)  # mutation: the declaring assistant row is forgotten\n",
         "tests/test_agentloop_loop.py::test_the_tool_round_appends_the_assistant_row_before_its_results",
         "tool results go back to having no declaring assistant row（那条 400 的形状）",
     ),
@@ -2254,6 +2254,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         "            return candidate\n",
         "tests/test_acceptance.py::test_a_block_that_writes_its_deliverable_directly_is_judged_and_assembled",
         "channel-2 products go back to being invisible to the judge and the assembly",
+    ),
+    Mutation(
+        "single-door-tool-output-not-paged",
+        "agentloop/loop.py",
+        '                "content": self._page_tool_result(turn, result, names.get(result.call_id, "")),\n',
+        '                "content": result.content,  # mutation: the single door does not page\n',
+        "tests/test_tool_output.py::test_over_threshold_return_is_paged_with_a_readable_pointer",
+        "over-threshold tool returns go into the transcript whole again",
     ),
 )
 
