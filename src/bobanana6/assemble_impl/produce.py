@@ -24,6 +24,8 @@ say anything at all when a service ignores layers 1-2.
 from __future__ import annotations
 
 import contextlib
+import csv
+import io
 import json
 import time
 from collections import Counter
@@ -433,8 +435,23 @@ Reject = Callable[[str, str], "NoReturn"]
 
 
 def _columns(raw: Any, rows: Sequence[Mapping[str, Any]], reject: Reject) -> tuple[Column, ...]:
+    # ★ 空列名不是列名：core 的 `Column` 会拒收它（`__post_init__` 的 `_require_non_empty`），
+    #   直接构造会让 `ValueError` 冒泡出解析边界 —— 与 `artifact_from_disk` 同一个病根。
+    #   这里**具名拒收**（答案信封的形状问题），让模型拿到可照着改的反馈，而不是收到一个异常。
+    def named(name: Any) -> str:
+        text = str(name)
+        if not text:
+            # guard: parse
+            reject(
+                "column_name_empty",
+                "'columns' names a column with an empty name; every column must be named",
+            )
+        return text
+
     if raw is None:
         names = sorted({key for row in rows for key in row})
+        for name in names:
+            named(name)
         return tuple(Column(name=name, dtype="str") for name in names)
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         # guard: parse
@@ -442,11 +459,11 @@ def _columns(raw: Any, rows: Sequence[Mapping[str, Any]], reject: Reject) -> tup
     columns: list[Column] = []
     for item in raw:
         if isinstance(item, str):
-            columns.append(Column(name=item, dtype="str"))
+            columns.append(Column(name=named(item), dtype="str"))
         elif isinstance(item, Mapping) and isinstance(item.get("name"), str):
             columns.append(
                 Column(
-                    name=str(item["name"]),
+                    name=named(item["name"]),
                     dtype=str(item.get("dtype") or "str"),
                     nullable=bool(item.get("nullable", True)),
                     # ★ A10: a block that knows the unit of what it produced says so
@@ -1416,6 +1433,21 @@ def _input_index(parts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     return index
 
 
+#: ★ 读盘 CSV 的单字段上限（字符数）。
+#:
+#: `csv` 模块默认是 131072（`_csv.c` 的 `128 * 1024`），本意是护栏：引号不闭合时别把
+#: 整份文件当一个字段读进内存。实测（13f 炸点 ②）小模型写出一行远超 128KB 的数据
+#: （`a,b\n` + `x`×500000）⇒ 默认上限直接抛 `_csv.Error`，把一个坏产物变成整跑崩溃。
+#:
+#: 为什么是 64 MiB：壳给每块的**工作区写预算**就是 64 MiB（`services/workspace.py` 的
+#: `_WORKSPACE_WRITE_BUDGET_BYTES`）—— 本壳允许写出的任何一份产物，都不可能有一个比
+#: 它整份还大的字段。所以这个上限对合法产物**永不触顶**，又远小于 `2**31-1`（≈2 GiB）：
+#: 后者等于拆掉护栏，畸形/恶意输入能把解析器逼进 OOM。超限不抛 —— `_artifact_from_disk`
+#: 捕获 `csv.Error` 后退回只填 `text`（判定器照常具名失败）。
+MAX_CSV_FIELD_CHARS = 64 * 1024 * 1024
+csv.field_size_limit(MAX_CSV_FIELD_CHARS)
+
+
 def _artifact_from_disk(artifact: Artifact, path: Path, content: str) -> Artifact:
     """★ 通道 2 的**判定载荷**：把磁盘上的产物文件解析成行列。
 
@@ -1433,19 +1465,29 @@ def _artifact_from_disk(artifact: Artifact, path: Path, content: str) -> Artifac
       · 空格子**不写键**（`rows` 的约定：缺键 = 缺失，不是 `""`／`null`）。
       · 不是分隔文本 / 空文件 ⇒ 退回只填 `text`，**不抛**。判定器会照常具名失败，
         不该在 loader 这里炸掉整块。
+      · ★ 表头里有**空列名** ⇒ 同样退回只填 `text`，**不抛**。`.csv` 的 csv 模块会拒收
+        `Column(name="")`（core 的 `__post_init__`），异常冒泡会把整跑弄死（13f 实测）。
+        ★ 也**不能把空列名过滤掉**：过滤会让后面的数据列整体左移（第 3 列的值跑到第 2 列），
+        那是静默错数据，比崩更糟。
+      · ★ 字段超过 `MAX_CSV_FIELD_CHARS`（畸形/恶意输入）⇒ csv 抛 `csv.Error`，捕获后退回
+        只填 `text`，**不抛**。
 
     ★ 这只是**换判定载荷的来源**，不是换判定语义 —— `core/` 一行未改。
     """
-    import csv
-    import io
-
     delimiter = {".tsv": "\t", ".csv": ","}.get(path.suffix.lower())
     if delimiter is None:
         return replace(artifact, text=content)
-    table = [row for row in csv.reader(io.StringIO(content), delimiter=delimiter) if row]
+    try:
+        table = [row for row in csv.reader(io.StringIO(content), delimiter=delimiter) if row]
+    except csv.Error:
+        # 字段超限 / 其他 csv 结构错：与"不可解析"同一条出口 —— 退回只填 text，绝不抛。
+        return replace(artifact, text=content)
     if not table:
         return replace(artifact, text=content)
     header = [cell.strip() for cell in table[0]]
+    # ★ 空列名不是列名，退回 text（见 docstring 的边界）—— core 会拒收空 `Column.name`。
+    if any(not name for name in header):
+        return replace(artifact, text=content)
     declared = {column.name: column for column in artifact.columns}
     columns = tuple(declared.get(name, Column(name=name, dtype="str")) for name in header)
     rows = tuple(
@@ -2217,7 +2259,10 @@ class LoopIOImpl(LoopIO):
         output = self.subtask.output
         if output in changed:
             # ★ 交付物被直接写过 ⇒ 判定的那一份内容以**磁盘为准**，答案里那句话不算数。
-            content = (root / output).read_text(encoding="utf-8")
+            #   ★ `errors="replace"`：与 `artifact_from_disk` 同一条解码策略。严格 utf-8 会在
+            #   `shell.run` 写出非 UTF-8 交付物（GBK/二进制）时抛 `UnicodeDecodeError` ——
+            #   那会让一个**本可判定**的候选被当成异常丢掉，而不是照常具名失败。
+            content = (root / output).read_text(encoding="utf-8", errors="replace")
             # ★★ 光填 `text` 不够：16 个 checker 读的是 `rows` / `column()` / `row_count`，
             #   只有 `provenance` 读 `text`。所以磁盘上的 CSV 必须**解析成行列**，
             #   否则块真把表写进了磁盘，判定器照样读答案 JSON 里那份（空的）rows ——

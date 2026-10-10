@@ -22,6 +22,7 @@ Nothing in this module decides whether a block is good -- it calls
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -642,7 +643,10 @@ class Runner:
         for ref, snapshot in sorted(snapshots.items()):
             try:
                 bodies[ref] = self.reader.body(snapshot)
-            except (SourceError, OSError, ValueError, TypeError) as exc:
+            except (SourceError, OSError, ValueError, TypeError, csv.Error) as exc:
+                # ★ `csv.Error` 也在列：载体里有一个超过 `MAX_CSV_FIELD_CHARS` 的字段时
+                #   `csv.reader` 抛的是它（不是 ValueError）。不接住它，源载体的读回失败
+                #   就不是具名的 sources 门，而是一路冒到顶层的未捕获异常。
                 raise RunRefused(
                     "sources",
                     f"the frozen carrier for {ref!r} cannot be read back "
@@ -777,7 +781,14 @@ class Runner:
         path = Path(self.workspace) / subtask.output
         if not path.is_file():
             return None
-        artifact = artifact_from_disk(subtask.output, path)
+        try:
+            artifact = artifact_from_disk(subtask.output, path)
+        except (OSError, ValueError):
+            # ★ 这一步在调用方的 `except BlockDeclined / BlockRuntimeError` 处理器里跑：
+            #   它一抛，杀掉的不是这一块而是整个 run（13f 就是这么死的）。已堵的病根之外
+            #   还有残余 IO 风险（`is_file()` 与 `read_text()` 之间文件被删/权限变化）。
+            #   读不回 ≠ 不存在：退到"下游拿不到这份件"，块照旧记 failed，run 继续。
+            return None
         pieces[subtask.output] = artifact
         # ★ 产物落进 git：即使这个块判定失败，它写过的文件也留一个 commit（痕迹）。
         record = self._commit_block(subtask, verdict=verdict, paths=[subtask.output], summary=summary)

@@ -1359,3 +1359,33 @@ def test_a_layered_plan_delivers_upstream_products_to_the_next_block(tmp_path: P
     assert "seen-by-T-01" in downstream
     # 同层零依赖：T-01 的提示里没有任何上游输入
     assert "delivered_inputs" not in client.prompts["T-01"][0]
+
+
+def test_a_failed_blocks_unreadable_artifact_does_not_kill_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ `_publish_disk_artifact` 在 `except BlockDeclined/BlockRuntimeError` 里跑：
+    产物读不回只退成"下游拿不到这份件"，**绝不再抛** —— 抛一次杀掉的是整个 run（13f 的形态）。"""
+    from bobanana6.assemble_impl import runner as runner_module
+
+    source = _csv(tmp_path, "panel.csv", "obligor,pd\nA-1,0.01\n")
+    runner = _runner(tmp_path, ONE_SOURCE.replace("SOURCE_CSV", str(source)), EchoToolResultClient())
+    runner.workspace = tmp_path / "ws"
+    runner.workspace.mkdir()
+    (runner.workspace / "out.csv").write_text("obligor\nA-1\n", encoding="utf-8")
+    subtask = Subtask(
+        id="T-01", goal="g", inputs=(), output="out.csv", contract_ref="t", axis="source", mode="write"
+    )
+    pieces: dict[str, object] = {}
+    handoffs: dict[str, dict[str, object]] = {}
+
+    def unreadable(name: str, path: Path) -> object:
+        raise OSError("simulated failure between is_file() and read_text()")
+
+    monkeypatch.setattr(runner_module, "artifact_from_disk", unreadable)
+
+    published = runner._publish_disk_artifact(subtask, pieces, handoffs, commits={}, verdict="failed")
+
+    assert published is None  # 不抛
+    assert pieces == {}  # 也不会塞一份半成品给下游
+    assert handoffs == {}
