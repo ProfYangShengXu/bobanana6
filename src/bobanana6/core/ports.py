@@ -358,7 +358,10 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     "shell.run": (
         "何时用：你要跑一条 shell 命令 —— 看目录、查文件、跑一个已有的脚本"
         "（数据要【算】就写成 `*.py` 再 `python x.py`，产物大到写不完时尤其如此）。"
-        "输入：command = 命令；workdir = 工作目录；timeout = 秒；background = 后台跑。"
+        "输入：command = 命令；workdir = 工作目录；"
+        "timeout = 秒（★ 默认 60、上限 600，不够要显式给）；background = 后台跑。"
+        "★ 输出太长时正文只留【头 + 尾】两段，中间省掉多少会说清；被截时完整输出落盘，"
+        "路径在返回的 `full_output_path` 里。"
         "何时不用：产物是一份短文件时用 files.write。"
         "★ 产出的文件与 files.write 同等记账。"
     ),

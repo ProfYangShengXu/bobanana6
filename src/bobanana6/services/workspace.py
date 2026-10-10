@@ -26,10 +26,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from itertools import pairwise
+from itertools import count, pairwise
 from pathlib import Path
 from typing import Any
 
@@ -54,11 +55,32 @@ MAX_WRITE_BYTES = 200_000
 #: 上限通过 `WriteBudget(limit=...)` 从外部传（测试给一个小上限不必改函数体）。
 _WORKSPACE_WRITE_BUDGET_BYTES = 64 * 1024 * 1024
 #: 一条命令默认/最长跑多久（秒）。超时是**具名**结果，不是静默截断。
+#: ★ 这两个数**同时写进 `core/ports.py` 的 `shell.run` 描述**（模型必须知道默认只有 60s）。
 DEFAULT_TIMEOUT_S = 60.0
 MAX_TIMEOUT_S = 600.0
+#: ★★ 输出"换页"预算（`shell.run`）：被截时**头尾各留一段**，中间省略并明说省了多少。
+#: 头看命令回显 / 表头 / 前几行数据，尾看报错 / 最终值 / traceback —— 两头都有人要。
+#: 行数与字节数各一组上限，"先到者为准"。★ 只留头会看不见报错，只留尾会看不见表结构。
+SHELL_OUTPUT_HEAD_LINES = 40
+SHELL_OUTPUT_HEAD_BYTES = 4 * 1024
+SHELL_OUTPUT_TAIL_LINES = 200
+SHELL_OUTPUT_TAIL_BYTES = 8 * 1024
+#: ★ 完整输出（stdout+stderr）在被截时落盘的目录（工作区相对）。
+#: ★★ 它**不是产物**：进了 `IGNORED_PARTS` ⇒ `_digests` 看不见它 ⇒ ledger 的 `changed()`
+#:   不含它 ⇒ 通道 2 的对账（`_reconcile_workspace`）不会把它收成候选 —— 照 `_code/` 的先例。
+SHELL_OUTPUT_DIR = "_shell"
+#: 落盘文件里 stdout 与 stderr 的分界：两股流各存各的，合到一份文件里要能分清。
+SHELL_OUTPUT_STDERR_DIVIDER = "\n----- stderr -----\n"
+#: ★ 落盘文件名里的**进程内**序号。同一个 run 里所有块共用一个工作区，序号必须全局单调，
+#: 否则两个块各自从 1 开始，后落的那份会盖掉前一份（只读审计 #65 的同一形态）。
+_SHELL_OUTPUT_SEQ = count(1)
+#: ★ 再加一段**每次进程启动**都不同的随机尾巴：工作区跨 run 是持久目录，容器 PID 命名空间里
+#: 两次 run 可能拿到同一个 pid ⇒ 只靠 `<pid>-<seq>` 会让后一次覆盖前一次，旧 `full_output_path`
+#: 就指向了新内容（审计 #111）。
+_SHELL_OUTPUT_RUN = f"{os.getpid()}-{os.urandom(3).hex()}"
 #: 扫描工作区时忽略的目录名：编译/测试缓存的副产品不是产物，也不是越权写。
 IGNORED_PARTS = frozenset(
-    {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git"}
+    {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git", SHELL_OUTPUT_DIR}
 )
 IGNORED_SUFFIXES = (".pyc", ".pyo")
 
@@ -224,6 +246,8 @@ class BoundWorkspace:
     write_budget: WriteBudget = field(default_factory=WriteBudget)
     #: Long-lived helpers owned by this block (background jobs).
     _background: list[subprocess.Popen[bytes]] = field(default_factory=list)
+    #: 完整输出落盘失败过几次（**如实报**，不假装存了；见硬边界⑦：落盘是辅助不是前置门）。
+    _shell_spill_failures: list[str] = field(default_factory=list)  # blame: whitelist — 只是"失败过什么"的证据清单，缺省空 = 没失败过
 
     # -- boundary helpers -------------------------------------------------- #
 
@@ -455,7 +479,14 @@ class BoundWorkspace:
         timeout: float | str | None = None,
         workdir: str = "",
     ) -> Mapping[str, Any]:
-        """Run a shell command with its cwd **inside** the workspace (Hermes `terminal`)."""
+        """Run a shell command with its cwd **inside** the workspace (Hermes `terminal`).
+
+        ★ Output over budget is **paged, not destroyed**: the body keeps a head + tail
+        preview that says how many lines/bytes were dropped, and the full stdout+stderr
+        is spilled to `full_output_path` (workspace-relative, excluded from deliverables).
+        ★ A timeout kills the **whole process tree**, not just the shell (`start_new_session`
+        + `killpg`) -- the shell's grandchildren are what otherwise survive.
+        """
         if not isinstance(command, str) or not command.strip():
             raise WorkspaceError("command must be a non-empty string")
         self._note()
@@ -470,25 +501,86 @@ class BoundWorkspace:
             )
             self._background.append(process)
             return {"background": True, "pid": process.pid, "cwd": str(cwd), "command": command}
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             shell=True,
             cwd=str(cwd),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=seconds,
-            check=False,
+            # ★ 自成进程组（组长 = 这个 shell）：超时才好 `killpg` 收整棵树（审计 #32）。
+            start_new_session=True,
         )
-        return {
+        try:
+            stdout, stderr = process.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            _kill_tree(process)
+            _reap(process)  # 收尸：不留僵尸，也**绝不**等逃逸出进程组的后代
+            raise
+        stdout = stdout or ""
+        stderr = stderr or ""
+        out_head, out_omitted, out_tail = _head_tail_page(stdout)
+        err_head, err_omitted, err_tail = _head_tail_page(stderr)
+        truncated = out_omitted is not None or err_omitted is not None
+        if not truncated:
+            # ★ 反向：没超预算 ⇒ **逐字原样**，连键序都与改前一致（值一个不动、不落盘）。
+            return {
+                "background": False,
+                "exit_code": process.returncode,
+                "cwd": str(cwd),
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": False,
+            }
+        # ★★ 截断时元数据键排在正文**之前**：上下文压缩按**头部**截 2000 字符
+        #   （`agentloop/compress.py::truncate_tool_results`），排在几 KB 预览之后的
+        #   `full_output_path` 会被整段砍掉（上一轮 #71 的同一形态）。键序 = JSON 字面顺序。
+        full = _full_shell_output(stdout, stderr)
+        where = self._spill_shell_output(full)
+        if not where:
+            # ★★ 落盘失败就**不销毁**：宁可把全量正文给它，也不留一份"截了却取不回"的输出
+            #    （照上一个回合删掉的那个"先落盘再跑"工具的同一守卫）。如实报错，命令照跑（硬边界⑦）。
+            return {
+                "background": False,
+                "exit_code": process.returncode,
+                "cwd": str(cwd),
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": False,
+                "full_output_error": self._shell_spill_failures[-1],
+            }
+        answer: dict[str, Any] = {
             "background": False,
-            "exit_code": completed.returncode,
+            "exit_code": process.returncode,
             # ★★ 绝对路径，不是 `"."`（实测：模型靠它定位自身时得到的 `"."` 毫无信息）：
             #   每一轮返回都给模型一次校准机会 —— "我现在站在哪里"。不改任何判据。
             "cwd": str(cwd),
-            "stdout": (completed.stdout or "")[:4000],
-            "stderr": (completed.stderr or "")[:4000],
-            "truncated": len(completed.stdout or "") > 4000 or len(completed.stderr or "") > 4000,
+            "truncated": True,
+            "full_output_path": where,
+            "full_output_lines": len(full.splitlines()),
+            "full_output_bytes": len(full.encode("utf-8")),
         }
+        answer["stdout"] = _render_page(out_head, out_omitted, out_tail, where)
+        answer["stderr"] = _render_page(err_head, err_omitted, err_tail, where)
+        return answer
+
+    def _spill_shell_output(self, full: str) -> str:
+        """把完整 stdout+stderr **原样**写到 `_shell/`，返回工作区相对路径；失败返回 `""`。
+
+        `SHELL_OUTPUT_DIR` 在 `IGNORED_PARTS` 里 ⇒ `_digests` 看不见它 ⇒ ledger 的
+        `changed()` 不含它 ⇒ 通道 2 的对账不会把它收成候选产物（照 `_code/` 的先例）。
+        """
+        relative = f"{SHELL_OUTPUT_DIR}/out-{_SHELL_OUTPUT_RUN}-{next(_SHELL_OUTPUT_SEQ):04d}.log"
+        try:
+            target = self._require_root() / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(full.encode("utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._shell_spill_failures.append(f"{type(exc).__name__}: {exc}")
+            return ""
+        # ★ 只作**证据**记账，不过 `WriteBudget` 的闸 —— 落盘不许把命令拦下来。
+        self.write_budget.note_bytes(len(full.encode("utf-8")))
+        return relative
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -513,6 +605,115 @@ def _timeout(raw: float | str | None) -> float:
     if value > MAX_TIMEOUT_S:
         raise WorkspaceError(f"timeout must be <= {MAX_TIMEOUT_S}s, got {value}")
     return value
+
+
+def _full_shell_output(stdout: str, stderr: str) -> str:
+    """stdout + stderr 合成一份落盘文本；两股流之间给一条显式分界（合到一份要能分清）。
+
+    ★ 只有一股流时**原样**返回它（不加分界）：`full_output_lines` 是给模型看的规模读数，
+      给 stderr-only 的输出凭空加一行分界会把 5000 行报成 5002（只读审计 #114）。
+    """
+    if not stderr:
+        return stdout
+    if not stdout:
+        return stderr
+    return f"{stdout}{SHELL_OUTPUT_STDERR_DIVIDER}{stderr}"
+
+
+def _kill_tree(process: subprocess.Popen[str]) -> None:
+    """超时收**整棵进程树**（照 flash `_kill_tree` 的形）。
+
+    Popen 带 `start_new_session=True` ⇒ 子进程自己就是组长；`killpg` 一次收掉 shell 与
+    它的孙进程。进程组已经不在了（`ProcessLookupError`）或没权限（`PermissionError`）时，
+    退回杀单进程；两次都落空也只是"它已经没了"，绝不能因此盖掉 TimeoutExpired。
+    `os.killpg` 在 Windows 上不存在（`AttributeError`），同样走退回路径。
+    """
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        return
+    except (OSError, AttributeError):
+        pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
+def _reap(process: subprocess.Popen[str]) -> None:
+    """超时后收尸，但**绝不阻塞在逃逸出进程组的后代身上**（只读审计 #105）。
+
+    `setsid` / daemonize 的孙进程脱离了我们的进程组，`killpg` 收不到它；而它还握着
+    stdout/stderr 的写端 ⇒ 裸 `communicate()` 会一直等 EOF，把整块**挂死**（连
+    `TimeoutExpired` 都来不及抛）。`wait` 只盯**直接子进程**，收完就把管道这一端关掉，
+    从此不再等那个逃逸的写者。
+    """
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    for stream in (process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _fit_head(text: str, max_lines: int, max_bytes: int) -> str:
+    """从 `text` 的**开头**取一段（字节、行数两个上限，先到者为准）。"""
+    raw = text.encode("utf-8")
+    head = raw[:max_bytes].decode("utf-8", errors="ignore") if len(raw) > max_bytes else text
+    lines = head.splitlines(keepends=True)
+    return "".join(lines[:max_lines]) if len(lines) > max_lines else head
+
+
+def _fit_tail(text: str, max_lines: int, max_bytes: int) -> str:
+    """从 `text` 的**末尾**取一段（字节、行数两个上限，先到者为准）。"""
+    raw = text.encode("utf-8")
+    tail = raw[-max_bytes:].decode("utf-8", errors="ignore") if len(raw) > max_bytes else text
+    lines = tail.splitlines(keepends=True)
+    return "".join(lines[-max_lines:]) if len(lines) > max_lines else tail
+
+
+def _head_tail_page(text: str) -> tuple[str, tuple[int, int] | None, str]:
+    """把一段输出换页成「头 + 尾」：返回 `(头, 省略读数或 None, 尾)`。
+
+    ★ 为什么头尾都留（而不是照 flash `bash` 只留尾）：bb6 的任务里"先看表头 / 前几行数据"
+      与"看末尾报错"一样常见，只留尾会让它连表结构都看不到。中间那段**可见地**省略，
+      并给出行数/字节数读数 —— 截断必须看得见（上一轮 #71 的教训）。
+    """
+    if not text:
+        return text, None, ""
+    total_bytes = len(text.encode("utf-8"))
+    total_lines = len(text.splitlines())
+    if total_lines <= SHELL_OUTPUT_HEAD_LINES + SHELL_OUTPUT_TAIL_LINES and total_bytes <= (
+        SHELL_OUTPUT_HEAD_BYTES + SHELL_OUTPUT_TAIL_BYTES
+    ):
+        return text, None, ""
+    head = _fit_head(text, SHELL_OUTPUT_HEAD_LINES, SHELL_OUTPUT_HEAD_BYTES)
+    # ★ 尾从头之后的**剩余**里取：保证两段不重叠（否则同一段会出现两次）。
+    tail = _fit_tail(text[len(head):], SHELL_OUTPUT_TAIL_LINES, SHELL_OUTPUT_TAIL_BYTES)
+    if len(head) + len(tail) >= len(text):
+        return text, None, ""
+    kept_lines = len(head.splitlines()) + len(tail.splitlines())
+    omitted_lines = max(0, total_lines - kept_lines)
+    omitted_bytes = max(0, total_bytes - len(head.encode("utf-8")) - len(tail.encode("utf-8")))
+    return head, (omitted_lines, omitted_bytes), tail
+
+
+def _render_page(head: str, omitted: tuple[int, int] | None, tail: str, where: str) -> str:
+    """把省略读数与全量路径插进头尾之间 —— 截断必须**可见**。"""
+    if omitted is None:
+        return head
+    lines, byte_count = omitted
+    marker = (
+        f"…[output truncated: omitted {lines} lines / {byte_count} bytes; "
+        f"full stdout+stderr at {where}]…"
+    )
+    before = "" if (not head or head.endswith("\n")) else "\n"
+    after = "" if (not tail or tail.startswith("\n")) else "\n"
+    return f"{head}{before}{marker}{after}{tail}"
 
 
 def _relative(root: Path, path: Path) -> str:
