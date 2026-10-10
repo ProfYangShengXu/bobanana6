@@ -34,6 +34,7 @@ from .adapters import (
     LLMSettings,
     OpenAICompatibleClient,
     ScriptedClient,
+    TokenRateLimiter,
 )
 from .agentloop.compress import CompressionPolicy
 from .agentloop.concurrency import GateConfig, RuntimeGate
@@ -80,7 +81,11 @@ def build_client(args: argparse.Namespace, env: Mapping[str, str]) -> LLMClient:
         return ScriptedClient.from_file(args.offline_script)
     if args.offline:
         return EchoToolResultClient()
-    return OpenAICompatibleClient(LLMSettings.from_env(env))
+    settings = LLMSettings.from_env(env)
+    # ★ 限速/退避只挂给**真端点**：离线替身没有额度，也不该被拖慢。
+    #   限额从 settings（= env 的 `BOBANANA6_TPM_LIMIT` / `_RPM_LIMIT`）来，不在这里写死。
+    limiter = TokenRateLimiter(tpm_limit=settings.tpm_limit, rpm_limit=settings.rpm_limit)
+    return OpenAICompatibleClient(settings, limiter=limiter)
 
 
 def build_ontology_port(args: argparse.Namespace, client: LLMClient) -> OntologyPort:

@@ -21,10 +21,19 @@ from os import environ
 from typing import Any
 
 from ..core.model import ModelResponse
+from .rate_limit import (
+    DEFAULT_MAX_429_RETRIES,
+    DEFAULT_RPM_LIMIT,
+    DEFAULT_TPM_LIMIT,
+    TokenRateLimiter,
+)
 from .tool_names import ToolNameMap
 
 __all__ = [
+    "DEFAULT_MAX_429_RETRIES",
+    "DEFAULT_RPM_LIMIT",
     "DEFAULT_TIMEOUT_S",
+    "DEFAULT_TPM_LIMIT",
     "PROTECTED_PAYLOAD_KEYS",
     "LLMConfigError",
     "LLMConnectionError",
@@ -105,6 +114,13 @@ class LLMSettings:
     #: not a per-vendor branch. It is merged last, so it also wins over
     #: ``max_tokens`` for services that spell it ``max_completion_tokens``.
     extra_body: Mapping[str, Any] = field(default_factory=dict)
+    #: ★ 限速/退避的限额（§〇 的实测：滑动 60s 峰值 417,633 vs 限额 120,000）。
+    #:   **从 env 读**，不硬编码：新模型 `Xing4.0-29B` 的 TPM 是 60,000，
+    #:   换模型只该改数字，不该改代码。
+    tpm_limit: int = DEFAULT_TPM_LIMIT  # blame: whitelist — 限额是部署配置（env 可覆盖），默认值 = 实测服务端额度
+    rpm_limit: int = DEFAULT_RPM_LIMIT  # blame: whitelist — 同上
+    #: 429 的有界重试次数（0 = 立刻把 429 交给 `errors.py` 的既有 RETRY_LOCAL 路径）。
+    max_rate_limit_retries: int = DEFAULT_MAX_429_RETRIES  # blame: whitelist — 有界重试次数，env 可覆盖
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -113,6 +129,14 @@ class LLMSettings:
             raise LLMConfigError("model is required")
         if self.timeout_s <= 0:
             raise LLMConfigError(f"timeout_s must be > 0, got {self.timeout_s!r}")
+        if self.tpm_limit <= 0:
+            raise LLMConfigError(f"tpm_limit must be > 0, got {self.tpm_limit!r}")
+        if self.rpm_limit <= 0:
+            raise LLMConfigError(f"rpm_limit must be > 0, got {self.rpm_limit!r}")
+        if self.max_rate_limit_retries < 0:
+            raise LLMConfigError(
+                f"max_rate_limit_retries must be >= 0, got {self.max_rate_limit_retries!r}"
+            )
         clashes = sorted(set(self.extra_body) & set(PROTECTED_PAYLOAD_KEYS))
         if clashes:
             # ★ Refused, never silently dropped: a setting that is accepted and
@@ -139,6 +163,11 @@ class LLMSettings:
             api_key=api_key,
             timeout_s=_timeout_from_env(source),
             extra_body=_extra_body_from_env(source),
+            tpm_limit=_positive_int_from_env(source, "BOBANANA6_TPM_LIMIT", DEFAULT_TPM_LIMIT),
+            rpm_limit=_positive_int_from_env(source, "BOBANANA6_RPM_LIMIT", DEFAULT_RPM_LIMIT),
+            max_rate_limit_retries=_positive_int_from_env(
+                source, "BOBANANA6_MAX_429_RETRIES", DEFAULT_MAX_429_RETRIES, minimum=0
+            ),
         )
 
     @property
@@ -154,6 +183,22 @@ def _timeout_from_env(source: Mapping[str, str]) -> float:
         return float(raw)
     except ValueError as exc:
         raise LLMConfigError(f"BOBANANA6_TIMEOUT_S must be a number of seconds, got {raw!r}") from exc
+
+
+def _positive_int_from_env(
+    source: Mapping[str, str], name: str, default: int, *, minimum: int = 1  # blame: fail-closed — 省略即最小 1；0/负数一律拒
+) -> int:
+    """Read an integer knob from the environment; a bad value is refused, not guessed."""
+    raw = source.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError as exc:
+        raise LLMConfigError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < minimum:
+        raise LLMConfigError(f"{name} must be >= {minimum}, got {value}")
+    return value
 
 
 def _extra_body_from_env(source: Mapping[str, str]) -> Mapping[str, Any]:
@@ -192,6 +237,14 @@ def _wire_message(message: Mapping[str, Any], names: ToolNameMap) -> dict[str, A
     return entry
 
 
+def _usage_int(value: Any) -> int:
+    """A provider's usage number, or 0 -- a malformed one must not lose a good response."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _error_detail(exc: urllib.error.HTTPError, limit: int = 400) -> str:
     """The service's error body, shortened. Best effort: an unreadable body is fine."""
     try:
@@ -210,6 +263,9 @@ class OpenAICompatibleClient:
 
     settings: LLMSettings
     opener: Any = None
+    #: ★ 限速器：**显式挂上才生效**（`cli.py::build_client` / 跑测脚本）。
+    #:   没有它 = 旧行为（429 立刻抛给 `errors.py`），单测与离线路径不受影响。
+    limiter: TokenRateLimiter | None = None  # blame: whitelist — 省略 = 旧行为（离线替身/单测不挂限速）；真端点由 cli.build_client 显式挂上
 
     def complete(
         self,
@@ -253,27 +309,66 @@ class OpenAICompatibleClient:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.settings.api_key:
             headers["Authorization"] = f"Bearer {self.settings.api_key}"
-        request = urllib.request.Request(self.settings.endpoint, data=body, headers=headers, method="POST")
         opener = self.opener if self.opener is not None else urllib.request.build_opener()
-        try:
-            response = opener.open(request, timeout=self.settings.timeout_s)
-        except urllib.error.HTTPError as exc:
-            # ★ Carry the service's own words: the status alone cannot tell
-            #   "response_format is not supported" from "your key is wrong", and the
-            #   caller needs that difference to negotiate a capability instead of
-            #   failing hard. Bounded, and never required to succeed.
-            raise LLMError(
-                f"model call failed with HTTP {exc.code}{_error_detail(exc)}",
-                status_code=int(exc.code),
-            ) from exc
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise LLMConnectionError(f"model call did not reach the server: {exc}") from exc
-        with response:
-            status = int(getattr(response, "status", 200))
-            raw = response.read()
-        if status != 200:
-            raise LLMError(f"model call failed with HTTP {status}", status_code=status)
-        return self._parse(raw, names)
+        # ★ 发前限速：滑动 60s 的 token 预算。等多久由 limiter 记账（可见读数）。
+        #   每次尝试（含重试）都在 `_post` 里过这道门。
+        estimate = self.limiter.estimate_for(max_tokens) if self.limiter is not None else 0
+        raw = self._post(opener, body, headers, estimate)
+        response = self._parse(raw, names)
+        if self.limiter is not None:
+            usage = dict(response.usage or {})
+            # ★ usage 缺失/值非数字都不许污染读数、更不许把一次好响应丢掉（#124/#129）：
+            #   prompt 只在端点真的报了它时才记。
+            prompt = _usage_int(usage["prompt_tokens"]) if "prompt_tokens" in usage else None
+            completion = _usage_int(usage["completion_tokens"]) if "completion_tokens" in usage else 0
+            total = _usage_int(usage["total_tokens"]) if "total_tokens" in usage else (prompt or 0) + completion
+            self.limiter.record(total, prompt_tokens=prompt, max_tokens=max_tokens)
+        return response
+
+    def _post(self, opener: Any, body: bytes, headers: Mapping[str, str], estimate: int) -> bytes:
+        """POST the body; on a 429 wait out the window and retry the **same bytes**.
+
+        ★★ 重试**不重新组装请求体**：每次都从同一份 `body` 字节重建 `Request`。
+          这就是"冻结上下文"的可执行含义 —— 重开一次 prompt 就多烧一次额度，等于
+          往火上浇油。有界：`max_rate_limit_retries`（默认 3），超了照旧把 429 交给
+          `errors.py` 的既有路径。
+        """
+        attempts = 0
+        while True:
+            if self.limiter is not None:
+                # ★ 每次尝试（含 429 重试）都重过 token/RPM 门并记账：重试也是发出去的
+                #   请求，预算与 RPM 都该算它（只读审计 #120）。
+                self.limiter.acquire(estimate)
+            request = urllib.request.Request(
+                self.settings.endpoint, data=body, headers=dict(headers), method="POST"
+            )
+            try:
+                response = opener.open(request, timeout=self.settings.timeout_s)
+            except urllib.error.HTTPError as exc:
+                if (
+                    exc.code == 429
+                    and self.limiter is not None
+                    and attempts < self.settings.max_rate_limit_retries
+                ):
+                    attempts += 1
+                    self.limiter.backoff(attempts)
+                    continue
+                # ★ Carry the service's own words: the status alone cannot tell
+                #   "response_format is not supported" from "your key is wrong", and the
+                #   caller needs that difference to negotiate a capability instead of
+                #   failing hard. Bounded, and never required to succeed.
+                raise LLMError(
+                    f"model call failed with HTTP {exc.code}{_error_detail(exc)}",
+                    status_code=int(exc.code),
+                ) from exc
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                raise LLMConnectionError(f"model call did not reach the server: {exc}") from exc
+            with response:
+                status = int(getattr(response, "status", 200))
+                raw = response.read()
+            if status != 200:
+                raise LLMError(f"model call failed with HTTP {status}", status_code=status)
+            return raw
 
     @staticmethod
     def _parse(raw: bytes, names: ToolNameMap | None = None) -> ModelResponse:

@@ -12,16 +12,23 @@ from __future__ import annotations
 from .offline import EchoToolResultClient, ScriptedClient
 from .ontology import DraftingOntology, FileOntology, OntologyDraftError
 from .openai_compat import (
+    DEFAULT_MAX_429_RETRIES,
+    DEFAULT_RPM_LIMIT,
     DEFAULT_TIMEOUT_S,
+    DEFAULT_TPM_LIMIT,
     LLMConfigError,
     LLMConnectionError,
     LLMError,
     LLMSettings,
     OpenAICompatibleClient,
 )
+from .rate_limit import TokenRateLimiter, format_rate_limit_readings
 
 __all__ = [
+    "DEFAULT_MAX_429_RETRIES",
+    "DEFAULT_RPM_LIMIT",
     "DEFAULT_TIMEOUT_S",
+    "DEFAULT_TPM_LIMIT",
     "PROTECTED_PAYLOAD_KEYS",
     "DraftingOntology",
     "EchoToolResultClient",
@@ -33,4 +40,6 @@ __all__ = [
     "OntologyDraftError",
     "OpenAICompatibleClient",
     "ScriptedClient",
+    "TokenRateLimiter",
+    "format_rate_limit_readings",
 ]
