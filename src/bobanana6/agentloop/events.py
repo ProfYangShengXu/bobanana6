@@ -31,6 +31,9 @@ EVENT_KINDS: tuple[str, ...] = (
     #   没有生产者敢声明，归因就成了 `None`。补一格，声明由产出阶段发出
     #   （`detail["cause"] = "model"`）。
     "produce_failure",
+    # ★ 模型把工具调用写成了**正文文本**（不是 `tool_calls`）——"这次调用没发生"必须
+    #   单独记一格：并进 `no_tool_call` 就再也分不出"它没想调"和"它调了但走错通道"。
+    "text_tool_call",
 )
 
 

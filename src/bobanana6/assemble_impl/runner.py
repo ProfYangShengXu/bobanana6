@@ -37,7 +37,7 @@ from ..agentloop.attribution import (
     attribute,
 )
 from ..agentloop.events import EventLog
-from ..agentloop.metrics import tool_metrics
+from ..agentloop.metrics import text_tool_call_metrics, tool_metrics
 from ..contract import ContractDocument
 from ..core.assemble import AssemblyReport, check_assembly
 from ..core.capabilities import BlockSpec, Capability, WorkerCapabilities
@@ -1100,12 +1100,17 @@ class Runner:
 
     def _metrics(self) -> Mapping[str, Any]:
         tool = tool_metrics(self.event_log.events)
+        text = text_tool_call_metrics(self.event_log.events)
         return {
             "tool.calls": tool.calls,
             "tool.call_accuracy": tool.call_accuracy,
             "tool.argument_correctness": tool.argument_correctness,
             "tool.task_success_rate": tool.task_success_rate,
             "tool.failure_recovery_rate": tool.failure_recovery_rate,
+            # ★ 文本形式工具调用：单独一格（**不并进 `tool.calls`** —— 它不是一个动作，
+            #   也不是"没想调"）。`chars` 是烧掉的正文长度，用来量这层损耗。
+            "text.tool_calls": text.calls,
+            "text.tool_call_chars": text.chars,
             # ★ No delivery number: it needs labelled outcomes, and none were
             #   supplied. 0/0 would print as 0.0 and read as "nothing worked".
             "delivery": "not evaluated (no labelled outcomes were supplied)",

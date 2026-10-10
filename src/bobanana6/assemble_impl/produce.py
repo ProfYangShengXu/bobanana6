@@ -36,6 +36,11 @@ from ..agentloop.errors import FailoverReason
 from ..agentloop.events import EventLog
 from ..agentloop.gate import GateVerdict
 from ..agentloop.loop import LoopIO, LoopState, TurnProposal
+from ..agentloop.text_tool_calls import (
+    TEXT_TOOL_CALL_NOTICE,
+    TextToolCall,
+    detect_text_tool_call,
+)
 from ..agentloop.tools import ToolCall, ToolResult
 from ..core.model import (
     Artifact,
@@ -1766,6 +1771,11 @@ class LoopIOImpl(LoopIO):
         parts = [
             "You are a focused subagent working on a specific delegated task.",
             "",
+            "TOOL CALLS:",
+            "Tool calls are read **only** from the tool channel (`tool_calls`). A call written as",
+            "text inside the reply body (for example `<function=...>` or `<tool_call>...`) is not",
+            "parsed and is not executed.",
+            "",
             "CONTEXT:",
             contract.goal if contract.goal.strip() else "(no task-level goal was declared)",
         ]
@@ -1949,6 +1959,18 @@ class LoopIOImpl(LoopIO):
             # ★ 端点要求原样带回的 assistant 字段（思考模型的 reasoning_content）跟着这次工具轮
             #   一起存进循环建的 assistant 行；端点没给就是空映射，一个键都不加。
             return TurnProposal(tool_calls=calls, text=response.text, carry_back=dict(response.carry_back or {}))
+        # ★★ 工具调用写成了正文文本？**当场告知，绝不执行**（实测 qwen4b6 2 次 / xing29b 1 次，
+        #   每次都静默丢弃、下一轮照旧）。判据是常量表 + 只认实测过的方言；认不出的一律不动。
+        #   ★ 合法答案优先（只读审计 #136）：只有"这段正文**解析不出**合法答案"才算泄漏 ——
+        #     否则一个恰好引用了这段文本的合法答案会被改道、永远不被解析。
+        leaked = detect_text_tool_call(response.text)
+        if leaked is not None and not self._parses_as_answer(response.text, cap, response.usage):
+            # ★★ 下一轮**不许锁 schema**（只读审计 #134）：`wants_structured_output` 的自记实测是
+            #   "带 schema 的请求 110 次 → 工具调用 0 次"。不置这一位，告知要求的"走工具通道重发"
+            #   根本发不出去 —— 那才是真的死路。这一位只说"它这一轮在干活"，不改任何判定。
+            self.last_had_tool_calls = True
+            self._note_text_tool_call(leaked)
+            return TurnProposal(text=response.text, notice=TEXT_TOOL_CALL_NOTICE)
         if not response.text.strip():
             return TurnProposal(text="", detail="the model returned neither text nor a tool call")
         if _declined(response.text):
@@ -2009,6 +2031,42 @@ class LoopIOImpl(LoopIO):
             self._persist_files(response.text, candidate)
         candidate = self._reconcile_workspace(candidate, response.text)
         return TurnProposal(candidate=candidate, text=response.text)
+
+    def _parses_as_answer(self, text: str, cap: int, usage: Mapping[str, Any] | None) -> bool:
+        """这段正文能不能**按答案**解析出来（只读审计 #136）。
+
+        只用来判断"方言样文本是不是恰好出现在一个合法答案里"：解析成功就绝不改道，
+        解析失败（信封没封好等）才当成泄漏。`parse_candidate` 是纯的，试一次没有副作用。
+        """
+        try:
+            self._parse_answer(text, cap, usage)
+        except CandidateFormatError:
+            return False
+        return True
+
+    def _note_text_tool_call(self, hit: TextToolCall) -> None:
+        """记一笔：这一轮发生了文本形式调用、哪种方言、烧了多少字符（只记账，不执行）。
+
+        ★ `ok=False`：它不是一个动作的成功。`kind` 单独一格，**绝不并进 `no_tool_call`**
+          —— 否则"它没想调"与"它调了但走错通道"从此再也分不出来。
+        """
+        if self.log is None:
+            return
+        self.log.record(
+            kind="text_tool_call",
+            task_id=self.task_id,
+            worker_id=self.subtask.id,
+            at=self.epoch(),
+            ok=False,
+            detail={
+                "dialect": hit.dialect,
+                "chars": hit.chars,
+                "names": list(hit.names),
+                "snippet": hit.snippet,
+                # ★ 发生轮次（只读审计 #138）：与归档的 block/turn 对得上。
+                "turn": self.calls,
+            },
+        )
 
     def _parse_answer(self, text: str, cap: int, usage: Mapping[str, Any] | None) -> Candidate:
         """把模型的文本变成候选 —— **唯一**的解析入口（判定语义原样，只是复用它）。"""

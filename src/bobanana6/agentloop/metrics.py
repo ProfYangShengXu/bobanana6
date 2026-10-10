@@ -22,9 +22,11 @@ from .events import Event
 __all__ = [
     "DeliveryMetrics",
     "DeliveryOutcome",
+    "TextToolCallMetrics",
     "ToolMetrics",
     "delivery_metrics",
     "metrics_as_dict",
+    "text_tool_call_metrics",
     "tool_metrics",
 ]
 
@@ -47,6 +49,27 @@ class ToolMetrics:
 def _rate(numerator: int, denominator: int) -> float:
     # Absence of evidence is not evidence of perfection: 0/0 is 0.0, not 1.0.
     return numerator / denominator if denominator else 0.0
+
+
+@dataclass(frozen=True)
+class TextToolCallMetrics:
+    """Tool calls the model wrote as *text* instead of through `tool_calls`.
+
+    Kept apart on purpose: this is neither a call (it never ran) nor "no call" (it
+    tried). Folding it into either is exactly how the distinction disappears.
+    """
+
+    calls: int
+    chars: int
+
+
+def text_tool_call_metrics(events: Iterable[Event]) -> TextToolCallMetrics:
+    """Count ``text_tool_call`` events and the reply length each one burned."""
+    hits = [event for event in events if event.kind == "text_tool_call"]
+    return TextToolCallMetrics(
+        calls=len(hits),
+        chars=sum(int(event.detail.get("chars") or 0) for event in hits),
+    )
 
 
 def tool_metrics(events: Iterable[Event]) -> ToolMetrics:

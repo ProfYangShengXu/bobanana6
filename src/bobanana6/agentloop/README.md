@@ -21,6 +21,7 @@
 | `compress.py` | `context_compressor.py` 的**最小内核**（其余整块不抄） | 21 |
 | `recovery.py` | `turn_recovery.py` 的三级出口 + taint | 21 |
 | `loop.py` | `conversation_loop.py` / `turn_finalizer.py` 的 phase/verdict + 收尾不变式 | 21 |
+| `text_tool_calls.py` | **Hermes 没有**，本项目自补：识别"工具调用写成了正文文本"的方言（只识别、不执行） | — |
 
 ## 四类决策（对着 `FORK-NOTES.md §2/§3/§4`）
 

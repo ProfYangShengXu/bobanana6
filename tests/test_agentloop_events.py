@@ -7,8 +7,8 @@ import pytest
 from bobanana6.agentloop.events import EVENT_KINDS, Event, EventLog, EventSink
 
 
-def test_the_eight_event_kinds() -> None:
-    """★ `#65` 补了第八格：模型的答案结构性不可用时，得有生产者敢声明它。"""
+def test_the_event_kinds() -> None:
+    """★ `#65` 补了 `produce_failure`；本轮补 `text_tool_call`（工具调用写成了正文文本）。"""
     assert EVENT_KINDS == (
         "call",
         "retry",
@@ -18,6 +18,7 @@ def test_the_eight_event_kinds() -> None:
         "checkpoint",
         "attribute",
         "produce_failure",
+        "text_tool_call",
     )
 
 

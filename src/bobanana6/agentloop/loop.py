@@ -328,6 +328,10 @@ class TurnProposal:
     text: str = ""
     declined: bool = False
     detail: str = ""
+    #: ★ 模型把工具调用写成了正文文本时，这里放一句要交给**下一轮**的告知。
+    #:   非空 ⇒ `_text_finish` 把模型正文原样记一行、再把这句话作为 `user` 行挂在
+    #:   下一轮请求的**尾部**（与 REFLECT 同一机制，不伪装成 tool 返回）。
+    notice: str = ""  # blame: fail-closed — 省略即"没有要告知的"，正常轮次一个键都不加
     #: ★ 端点要求原样带回的 assistant 字段（思考模型的 `reasoning_content`）。循环不解释它，
     #: 只把它存进自己建的那条 assistant 行；端点没给就是空 —— 不许凭空造一个空值。
     carry_back: Mapping[str, Any] = field(default_factory=dict)
@@ -624,6 +628,18 @@ class WorkerLoop:
             if proposal is None:
                 return self._classify_and_recover(turn, RuntimeError("produce returned no proposal"))
         proposal = turn.proposal
+        if proposal.notice:
+            # ★ 在这里消费，不在 `_text_finish`（只读审计 #133）：`_retry` 排在 `_text_finish`
+            #   之前，`withheld` 非空时它必返回 RETRY/REFLECT/DEGRADE ⇒ `_text_finish` 根本轮不到，
+            #   告知会被丢掉、永远到不了模型。
+            #   ★ 模型正文**原样**记一行（它说过的每句都要有行）；告知是 `user` 行（不伪装成 tool）。
+            turn.state = replace(
+                turn.state,
+                messages=(*turn.state.messages, answer_row(proposal.text)),
+                injected=({"role": "user", "content": proposal.notice},),
+            )
+            turn.exit_reason = "text_tool_call"
+            return PhaseResult.cont("text_tool_call")
         if proposal.declined:
             turn.gate = GateVerdict(status="declined", scope=self._config.required_scope)
             turn.declined = True
