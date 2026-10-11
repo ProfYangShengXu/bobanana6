@@ -32,6 +32,7 @@ from ..agentloop.tools import (
 from ..core.model import Artifact, Column, Snapshot, TaskContract, canonical_row
 from ..core.ports import ToolSet
 from ..sources.form import SourceForm, decode_body, form_for
+from .command_guard import inline_script_problem
 from .textops import (
     DEFAULT_LIMIT,
     TARGETS,
@@ -606,10 +607,18 @@ def build_registry(
         )
 
     def shell_run(args: Mapping[str, Any]) -> str:
+        command = str(args.get("command", ""))
+        # ★ 内联脚本当场拒（`command_guard.py` 的理由）：脚本不在磁盘上就永远
+        #   "没得改"，`files.patch` 一次都不会被调到。拒的是**这一次调用**
+        #   （`ToolRegistry.execute` 把它折成一条 ok=False 的 ToolResult），
+        #   块不会被判死；拒收信息带 violated / expected / got 并指出下一步。
+        problem = inline_script_problem(command)
+        if problem:
+            raise WorkspaceError(problem)
         return payload(
             dict(
                 _workspace().run(
-                    str(args.get("command", "")),
+                    command,
                     background=str(args.get("background", "")).strip().lower() in ("true", "1", "yes"),
                     timeout=args.get("timeout") or None,
                     workdir=str(args.get("workdir", "")),
