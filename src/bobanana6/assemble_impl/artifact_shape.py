@@ -242,25 +242,29 @@ def _size(value: Any) -> int:
 
 
 def _fit(shape: dict[str, Any], quota: int) -> dict[str, Any]:
-    """按优先级把形状装进一份额度：行/列 → 两列分组 → 重复列 → 列名。
+    """按优先级把形状装进一份额度：行/列 → 列名 → 两列分组 → 重复列。
 
-    ★ 为什么分组排第一：**列名模型读一次表头就有，分组结构它自己算不出来**。
-    装不下的部分**具名**写进 `omitted`（可见，不静默）。
+    ★ 为什么列名排第一：要产出一张带表头的表，模型得先把表头抄对 ——
+      而"它读一次来源就有"对弱模型不成立（实测：画像不给列名 ⇒ 模型去猜，
+      大小写/名字错，整列都写错）。两列分组虽然也算不出来，但排在列名之后。
+    ★ 装填是**按优先级贪心**（高优先的键先占额度），因此额度变大**只会多留**、
+      不会为了别的键把已经留下的高优先键挤掉。
+    ★ 装不下的部分**具名**写进 `omitted`（可见，不静默）；`omitted` 自己占的是
+      至多三个键名的**固定**开销，所以每份画像 ≤ 配额 + 一个小常数，仍然有界。
     """
     keep: dict[str, Any] = {"rows": shape["rows"], "columns": shape["columns"]}
     for key in ("rows_capped", "column_names_capped", "repeated_columns_total", "grouped_columns_total"):
         if key in shape:
             keep[key] = shape[key]
-    omitted: list[str] = []
-    for key in ("grouped_columns", "repeated_columns", "column_names"):
-        value = shape.get(key)
-        if not value:
-            continue
-        if _size(keep) + _size({key: value}) <= quota:
-            keep[key] = value
-        else:
-            omitted.append(key)
-    if omitted and _size(keep) + _size(omitted) + 16 <= quota:
+    order = ("column_names", "grouped_columns", "repeated_columns")
+    present = [(key, shape[key]) for key in order if shape.get(key)]
+    for key, value in present:
+        # ★ 按【拼好之后】的真实大小判，不是把两段长度相加（差一个键名与逗号）。
+        candidate = {**keep, key: value}
+        if _size(candidate) <= quota:
+            keep = candidate
+    omitted = [key for key, _ in present if key not in keep]
+    if omitted:
         keep["omitted"] = omitted
     return keep
 

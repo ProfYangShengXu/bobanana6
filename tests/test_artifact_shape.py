@@ -16,6 +16,8 @@ sys.path.insert(0, str(REPO))
 
 from acceptance.harness import run_task
 from bobanana6.assemble_impl.artifact_shape import (
+    _fit,
+    _size,
     artifact_sections,
     clip_section,
     source_shapes,
@@ -167,6 +169,102 @@ def test_the_whole_section_obeys_the_budget_and_says_what_it_dropped() -> None:
     assert len(rendered) < len(full)
     assert "omitted" in small["t"]
     assert small["t"]["rows"] == 40 and small["t"]["columns"] == 30
+
+
+def test_column_names_outrank_group_structures_under_one_quota() -> None:
+    """★ 列名排第一：额度只够装下列名时，先丢的是分组结构，不是列名。
+
+    反向读数（改前）：`("grouped_columns", "repeated_columns", "column_names")`
+    的装填序下，同样的额度会**先留下分组、把列名具名丢掉** —— 这正是模型
+    猜表头的根因。这条测试把"列名先装"钉成不变量。
+    """
+    names = [f"field_{index:02d}" for index in range(12)]
+    shape = {
+        "rows": 40,
+        "columns": 12,
+        "column_names": names,
+        "grouped_columns": [
+            {"on": ["field_00", "field_01"], "groups": 4, "largest_groups": [20, 10, 5]}
+            for _ in range(5)
+        ],
+        "repeated_columns": [{"name": f"field_{index:02d}", "distinct": 4, "largest": 20} for index in range(6)],
+    }
+    base = _size({"rows": 40, "columns": 12})
+    quota = base + _size({"column_names": names})  # enough for the names, nothing else
+    fitted = _fit(shape, quota)
+    assert fitted["column_names"] == names
+    assert set(fitted.get("omitted") or []) == {"grouped_columns", "repeated_columns"}
+
+
+def test_a_very_wide_table_caps_its_names_and_stays_within_the_quota() -> None:
+    """★ 反向：列名超长/超多时照旧走 `column_names_capped`、照旧具名 `omitted`、额度有界。"""
+    count = 500
+    header = ",".join(f"c{index:03d}" for index in range(count))
+    body = "\n".join(",".join(str((index + step) % 4) for index in range(count)) for step in range(20))
+    profile = source_shapes({"t": header + "\n" + body + "\n"}, 400, 300)["t"]
+    assert profile["columns"] == count
+    assert profile["column_names_capped"] == count - 20
+    assert len(profile["column_names"]) == 20
+    assert profile.get("omitted")
+    assert len(json.dumps(profile, ensure_ascii=False)) <= 400
+
+
+def test_the_omitted_list_always_names_every_part_that_was_left_out() -> None:
+    """★ `omitted` 是"不静默"的凭证 —— 任何被丢的键都必须出现在里面（含记录自身要占额度的情形）。"""
+    shape = {
+        "rows": 9,
+        "columns": 5,
+        "column_names": ["n" * 30 + str(index) for index in range(5)],
+        "grouped_columns": [
+            {"on": ["alpha", "beta"], "groups": 2, "largest_groups": [2, 1]} for _ in range(4)
+        ],
+        "repeated_columns": [{"name": "gamma" * 6, "distinct": 2, "largest": 5}],
+    }
+    optional = ("column_names", "grouped_columns", "repeated_columns")
+    for quota in range(120, 700, 7):
+        fitted = _fit(shape, quota)
+        left_out = {key for key in optional if shape.get(key) and key not in fitted}
+        assert left_out == set(fitted.get("omitted") or []), quota
+
+
+def test_a_bigger_quota_never_trades_a_high_priority_part_for_a_low_one() -> None:
+    """★ 优先级单调：额度变大，保留的部分按 (列名 → 分组 → 重复) **字典序只增不减**。
+
+    反向（上一版 _fit）：记录塞不下时会去删"优先级最低的已保留项"，出现
+    quota=729 保留 `{repeated_columns}`、quota=730 却什么都不留（净亏损）；
+    长列名 q=1387 还会把已经装下的列名也删掉。这里钉死"额度变大不会丢内容"。
+    """
+    shape = {
+        "rows": 12,
+        "columns": 30,
+        "column_names": ["n" * 20 + f"{index:02d}" for index in range(30)],
+        "grouped_columns": [
+            {"on": ["alpha", "beta"], "groups": 2, "largest_groups": [2, 1]} for _ in range(5)
+        ],
+        "repeated_columns": [{"name": "g" * 30 + "x", "distinct": 2, "largest": 6} for _ in range(4)],
+    }
+    optional = ("column_names", "grouped_columns", "repeated_columns")
+    previous = (0, 0, 0)
+    for quota in range(200, 1500, 7):
+        fitted = _fit(shape, quota)
+        vector = tuple(1 if key in fitted else 0 for key in optional)
+        assert vector >= previous, (quota, previous, vector)
+        previous = vector
+
+
+
+def test_the_fitted_profile_stays_within_a_fixed_slack_of_its_quota() -> None:
+    """★ 额度有界：每份画像 ≤ 配额。唯一的例外是 `omitted` 记录本身的**固定**开销 ——
+    当只有列名值得保留、却又必须写下"谁被丢了"时，宁可让记录小幅超出，也不丢列名、不静默。"""
+    slack = 96  # 至多三个键名 + `, "omitted": ` 的固定上界
+    for count in (2, 5, 21, 60):
+        header = ",".join(f"col_{index:02d}" for index in range(count))
+        body = "\n".join(",".join(str((index + step) % 5) for index in range(count)) for step in range(30))
+        shape = table_shape(header + "\n" + body + "\n")
+        assert shape is not None
+        floor = _size({"rows": shape["rows"], "columns": shape["columns"]})
+        for quota in range(200, 1500, 31):
+            assert _size(_fit(shape, quota)) <= max(quota, floor) + slack, (count, quota)
 
 
 # --------------------------------------------------------------------------- #
