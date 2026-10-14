@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.model import Snapshot, SourceRef
-from .store import SnapshotStore, SourceError
+from .store import SnapshotStore, SourceError, SourceLedger
 
 __all__ = ["PROXY_ENV_VARS", "FileFetcher", "HttpFetcher", "suffix_for"]
 
@@ -61,21 +61,32 @@ class FileFetcher:
     store: SnapshotStore
     captured_at: str
     source_kind: str = "file"
+    #: ★ 「这个来源抓过了」的台账。给了它，第二次跑就复用那份冻结件，不再读一遍。
+    #: `None`（缺省）⇒ 每次读源 —— 与加台账之前**逐字相同**，既有读数不受影响。
+    # blame: fail-closed — 没有台账 ⇒ 一律重读（多读一次总比复用错东西安全）
+    ledger: SourceLedger | None = None
 
     def fetch(self, ref: SourceRef) -> Snapshot:
+        if self.ledger is not None:
+            frozen = self.ledger.recall(ref.ref)
+            if frozen is not None:
+                return frozen
         locator = ref.locator or ref.ref
         path = Path(locator)
         try:
             body = path.read_bytes()
         except OSError as exc:
             raise SourceError(f"source {ref.ref!r}: cannot read {path}: {exc}") from exc
-        return self.store.put(
+        snapshot = self.store.put(
             ref=ref.ref,
             body=body,
             source_kind=self.source_kind,
             captured_at=self.captured_at,
             suffix=path.suffix or ".bin",
         )
+        if self.ledger is not None:
+            self.ledger.remember(snapshot)
+        return snapshot
 
 
 @dataclass(frozen=True)
@@ -90,12 +101,20 @@ class HttpFetcher:
     #: which is also what makes the environment proxy take effect.
     opener: Any = None
     headers: dict[str, str] = field(default_factory=lambda: {"User-Agent": "bobanana6/0.1"})
+    #: ★ 同 `FileFetcher.ledger` —— 来源抓过了就不打第二次网络。
+    #: 对网页来源这一条尤其要紧：内容会变，重复抓会拿到**不一样的材料** ⇒ 产物不可复现。
+    # blame: fail-closed — 没有台账 ⇒ 一律打网络（多打一次，好过复用错东西）
+    ledger: SourceLedger | None = None
 
     def proxies(self) -> dict[str, str]:
         """What the environment says, without interpretation (observability hook)."""
         return dict(urllib.request.getproxies())
 
     def fetch(self, ref: SourceRef) -> Snapshot:
+        if self.ledger is not None:
+            frozen = self.ledger.recall(ref.ref)
+            if frozen is not None:
+                return frozen
         locator = ref.locator or ref.ref
         request = urllib.request.Request(locator, headers=dict(self.headers))
         opener = self.opener if self.opener is not None else urllib.request.build_opener()
@@ -110,13 +129,16 @@ class HttpFetcher:
             body = response.read()
         if status != 200:
             raise SourceError(f"source {ref.ref!r}: fetch of {locator!r} returned HTTP {status}")
-        return self.store.put(
+        snapshot = self.store.put(
             ref=ref.ref,
             body=body,
             source_kind=self.source_kind,
             captured_at=self.captured_at,
             suffix=suffix_for(content_type),
         )
+        if self.ledger is not None:
+            self.ledger.remember(snapshot)
+        return snapshot
 
 
 @dataclass(frozen=True)
@@ -133,6 +155,10 @@ class LocatorFetcher:
     captured_at: str
     timeout_s: float = 30.0
     opener: Any = None
+    #: ★ 一路透传给下面两个取数器 —— 台账是**取数层**的账，
+    #: 在哪儿选传输（locator 的 scheme）跟"这个来源抓过没有"无关，所以由它带过去。
+    # blame: fail-closed — 缺省 None ⇒ 两个子取数器各自回到"每次都抓"的老行为
+    ledger: SourceLedger | None = None
 
     def fetch(self, ref: SourceRef) -> Snapshot:
         locator = ref.locator or ref.ref
@@ -142,9 +168,10 @@ class LocatorFetcher:
                 captured_at=self.captured_at,
                 timeout_s=self.timeout_s,
                 opener=self.opener,
+                ledger=self.ledger,
             ).fetch(ref)
         if locator.startswith("file://"):
-            return FileFetcher(store=self.store, captured_at=self.captured_at).fetch(
+            return FileFetcher(store=self.store, captured_at=self.captured_at, ledger=self.ledger).fetch(
                 SourceRef(ref=ref.ref, locator=locator[len("file://") :])
             )
-        return FileFetcher(store=self.store, captured_at=self.captured_at).fetch(ref)
+        return FileFetcher(store=self.store, captured_at=self.captured_at, ledger=self.ledger).fetch(ref)

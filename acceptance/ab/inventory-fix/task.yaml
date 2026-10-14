@@ -1,0 +1,32 @@
+# 单块代码修复题（A/B 对照用）。★ 判据在起点必红 —— 不接受"原样交回"。
+task_id: inventory-fix
+goal: 修好 input/inventory.py 里的缺陷，让 input/tests/test_inventory.py 全部通过；不许修改测试文件
+version: 1
+
+deliverables:
+  - name: input/inventory.py
+    schema: {text: str}
+
+sources:
+  - {ref: inventory-source, locator: input/inventory.py}
+  - {ref: test-inventory, locator: input/tests/test_inventory.py}
+
+constraints:
+  hard:
+    - id: C-tests-pass
+      kind: custom
+      target: input/inventory.py
+      spec:
+        # ★ 必须写死解释器：壳跑判据时 subprocess.run(shell=True) 不激活 venv。
+        check: shell_command
+        command: "cd _run/workspace/input && /mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -m pytest tests/test_inventory.py -q"
+      rationale: "全部测试必须通过（起点是红的，原样交回拿不到分）"
+    - id: C-tests-frozen
+      kind: frozen_files
+      target: "*"
+      spec:
+        sources: [test-inventory]
+      rationale: "不许改测试"
+
+limits: {max_rounds: 3}
+notes: 单块代码修复题；判据在起点就失败，所以有区分度。

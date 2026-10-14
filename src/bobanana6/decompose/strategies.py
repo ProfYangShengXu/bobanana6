@@ -23,8 +23,9 @@ are valid ``Subtask.axis`` values but have no data source in the model yet.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
+from ..contract import SOURCE_KIND_RESEARCH
 from ..core.model import (
     Ontology,
     PlanCosts,
@@ -36,10 +37,11 @@ from ..core.model import (
 )
 from ..core.ontology import map_field
 from ..core.split import declared_layers
-from .budget import RoundBudget, can_refine
+from .budget import READ_FRAME_CHARS_PER_LINE, BlockBudget, RoundBudget, can_refine
 
 __all__ = [
     "LAYERED_SPLIT",
+    "SIZE_AWARE_SPLIT",
     "STRATEGIES",
     "Decomposer",
     "declared_dependencies",
@@ -47,6 +49,7 @@ __all__ = [
     "split_by_dependency",
     "split_by_field",
     "split_by_source",
+    "split_read_then_product",
     "split_single",
 ]
 
@@ -57,6 +60,12 @@ STRATEGIES: tuple[str, ...] = ("source", "field", "module", "single")
 #: 「不修 → 稳定复现、修 → 消失」才能被同一条输入演示两次。读取点只有一个：
 #: `Decomposer._build`（单点收口）。
 LAYERED_SPLIT: bool = True
+
+#: ★★ 按大小开并行的能力开关（反证用）：`False` = 忽略来源尺寸，读层回到
+#: 「一份源一块」。与 `LAYERED_SPLIT` 同一族 —— 判据做成可开可关的一条能力，
+#: 「关掉 ⇒ 块形状退回改动前」才能在**同一条输入**上被演示两次。读取点只有一个：
+#: `split_read_then_product`（单点收口；`_build` 只负责选策略）。
+SIZE_AWARE_SPLIT: bool = True
 
 
 def estimate_costs(block_count: int) -> PlanCosts:
@@ -434,6 +443,266 @@ def declared_dependencies(contract: TaskContract) -> dict[str, tuple[str, ...]]:
     }
 
 
+def _windows_for(line_chars: Sequence[int], budget: BlockBudget) -> list[tuple[int, int]]:
+    """One source's lines -> maximal windows each within the block budget.
+
+    Greedy, line-aligned, deterministic. **Line boundary is the repo's own
+    convention**: `sources.read` is addressed by `offset`/`limit` in *lines*, so a
+    window is the only cut a reader can actually re-request. Cutting at a character
+    offset (or on a semantic boundary) would produce a range the read tool cannot
+    express -- a declaration with no delivery path.
+
+    The one window that can exceed the budget is a **single line** longer than the
+    budget: it is emitted alone rather than dropped or split mid-line (the same case
+    LangChain only logs a warning about; here it stays an explicit, bounded
+    exception), and `_read_blocks` gives that source no other line.
+    """
+    windows: list[tuple[int, int]] = []
+    start = 0
+    total = len(line_chars)
+    while start < total:
+        end = start
+        cost = 0
+        while end < total:
+            add = line_chars[end] + READ_FRAME_CHARS_PER_LINE
+            # ★ the first line always goes in: there is no smaller cut on this axis.
+            if end > start and cost + add > budget.max_chars:
+                break
+            cost += add
+            end += 1
+        windows.append((start, end))
+        start = end
+    return windows
+
+
+def _read_blocks(
+    keys: Sequence[str],
+    lines_by_ref: Mapping[str, tuple[int, ...]],
+    budget: BlockBudget,
+) -> list[tuple[tuple[tuple[str, int, int], ...], tuple[str, ...]]]:
+    """The read layer: one `(windows, covered refs)` entry per block.
+
+    Two structural rules, both size-driven -- no "source count" proxy anywhere:
+
+    ```
+    一份源【超过】单块预算  ⇒ 按行切成多个窗口（每个窗口 <= 预算）
+    多份源【都远小于】预算  ⇒ 合成一块（别为一份 1.8 KB 的清单开一个整块）
+    ```
+
+    Packing is **greedy first-fit in source order** (not size-descending bin packing):
+    each piece goes into the first block it still fits, so a small source can join an
+    earlier partly-filled block even when a full window sits between them. Determinism
+    is total -- pieces follow `keys` order, blocks are scanned in creation order, and
+    no `set`/`dict` iteration enters the decision. A source whose extent we were not
+    told gets a whole-source block of its own and is never merged (we cannot bound
+    what we cannot measure).
+    """
+    blocks: list[list[tuple[str, int, int]]] = []
+    refs_by_block: list[list[str]] = []
+    costs: list[int] = []
+
+    def own_block(ref: str) -> None:
+        blocks.append([])
+        refs_by_block.append([ref])
+        costs.append(budget.max_chars)
+
+    for ref in keys:
+        line_chars = lines_by_ref.get(ref)
+        if not line_chars:
+            # ★ no size fact (or an empty source) ⇒ own block, never merged.
+            own_block(ref)
+            continue
+        for start, end in _windows_for(line_chars, budget):
+            piece = (ref, start, end)
+            piece_cost = budget.cost_of(line_chars[start:end])
+            for index in range(len(blocks)):
+                if costs[index] + piece_cost <= budget.max_chars:
+                    blocks[index].append(piece)
+                    if ref not in refs_by_block[index]:
+                        refs_by_block[index].append(ref)
+                    costs[index] += piece_cost
+                    break
+            else:
+                blocks.append([piece])
+                refs_by_block.append([ref])
+                costs.append(piece_cost)
+    return [(tuple(windows), tuple(refs)) for windows, refs in zip(blocks, refs_by_block, strict=True)]
+
+
+def _read_goal(
+    windows: Sequence[tuple[str, int, int]],
+    refs: Sequence[str],
+    lines_by_ref: Mapping[str, tuple[int, ...]],
+) -> str:
+    """The model-facing coverage line for one read block (lines are 1-based here)."""
+    if not windows:
+        return f"read source {refs[0]!r}"
+    described = []
+    for ref, start, end in windows:
+        total = len(lines_by_ref[ref]) if ref in lines_by_ref else 0
+        if start == 0 and end >= total:
+            described.append(f"{ref!r} (all {total} lines)")
+        else:
+            described.append(f"{ref!r} lines {start + 1}-{end} of {total}")
+    if len(described) == 1:
+        return f"read source {described[0]}"
+    return "read sources " + ", ".join(described)
+
+
+def split_read_then_product(
+    contract: TaskContract,
+    ontology: Ontology,
+    recon: Recon | None = None,
+    *,
+    round: int = 1,  # blame: fail-closed — 省略即第 1 轮，不隐式进入 refine
+    version: int = 1,  # blame: fail-closed — 省略即 v1；计划版本只增不减
+    block_budget: BlockBudget | None = None,  # blame: fail-closed — 缺省即"没声明单块容量"⇒不按大小拆/合，回落一份源一块
+) -> SplitPlan:
+    """★★ 读层 + 产物层**两层叠加** —— 而不是在两者里挑一个。
+
+    ## 为什么必须两层（实测的账，不是推的）
+
+    ```
+    split_by_dependency   有产物依赖、★ 没有读层
+                          ⇒ 每个产物块【自己扛全部源】
+                          ⇒ 实测：10 份材料 290 KB ≈ 135K tokens
+                          ⇒ 上下文爆 ⇒ 压缩 ⇒ ★ 忘了读过 ⇒ 重读
+                          ⇒ 撞 max_restarts ⇒ restart_cap 判死
+
+    split_by_source       有读层、★ 表达不了产物依赖
+                          ⇒ "声明过的链在切分里蒸发"（`Decomposer.refine` 的顾虑）
+    ```
+
+    ## 形状
+
+    ```
+    读层   T-01..T-R     read <窗口>      →  part-<序号>.csv   ← 按【大小】切/合，互相零依赖
+    产物层 T-(R+1)..     assemble <产物>  →  <产物>            ← 一块一份产物
+                         inputs = 全部 part-*.csv + 自己声明的上游产物
+    ```
+
+    ★★ 读层的切口维度是**大小**，不是"源有几份"：
+      超过单块预算的源按行拆成多块；多份远小于预算的源合成一块。
+      `axis="window"` 就是这件事的名字（枚举里一直有它，此前没有实作）。
+
+    ★ 产物块读的是**读层的产物**（小），不是原文（大）。
+      产出块再也不需要自己扛全部材料 —— 上下文爆的那条路被切掉了。
+
+    ★ 产物之间的 `depends_on` 照常接线（层号 = 依赖深度），所以
+      "声明过的链"不会蒸发；同层产物块之间仍然零依赖、可并行。
+
+    ★ 没有单块预算（`block_budget is None`）时**一个字节都不变**：读层回到
+      「一份源一块」、`axis="source"`、`reads=()` —— 这就是反证那一臂的形状。
+    """
+    keys = _source_keys(contract, recon)
+    lines_by_ref: Mapping[str, tuple[int, ...]] = recon.source_lines if recon is not None else {}
+    # ★ 判据是"**有没有尺寸事实**"，不是"是不是研究题"：哪怕一条来源也没有尺寸，
+    #   整层就回落 —— 一份源一块、`axis="source"`、`reads=()`（反证那一臂的形状）。
+    sized = SIZE_AWARE_SPLIT and block_budget is not None and any(lines_by_ref.get(key) for key in keys)
+    part_fields = _deliverable_fields(contract) or ("value",)
+    interfaces: dict[str, str] = {}
+    blocks: list[Subtask] = []
+    parts: list[str] = []
+
+    if sized:
+        assert block_budget is not None  # narrowed by `sized`
+        for index, (windows, refs) in enumerate(_read_blocks(keys, lines_by_ref, block_budget), start=1):
+            # ★ 序号命名（不是 `part-<源>`）：一个块可能覆盖多个窗口 / 多份源，
+            #   名字必须无歧义且唯一；覆盖范围由 `reads` 与 `goal` 声明并送进 brief。
+            output = f"part-{index:02d}.csv"
+            parts.append(output)
+            interfaces[output] = _descriptor(part_fields)
+            blocks.append(
+                Subtask(
+                    id=f"T-{index:02d}",
+                    goal=_read_goal(windows, refs, lines_by_ref),
+                    inputs=(),
+                    output=output,
+                    contract_ref=contract.task_id,
+                    axis="window",
+                    mode="read",
+                    reads=windows,
+                    output_fields=_mapped(ontology, part_fields),
+                )
+            )
+    else:
+        for index, key in enumerate(keys, start=1):
+            output = f"part-{key}.csv"
+            parts.append(output)
+            interfaces[output] = _descriptor(part_fields)
+            blocks.append(
+                Subtask(
+                    id=f"T-{index:02d}",
+                    goal=f"read source {key!r}",
+                    inputs=(),
+                    output=output,
+                    contract_ref=contract.task_id,
+                    axis="source",
+                    mode="read",
+                    output_fields=_mapped(ontology, part_fields),
+                )
+            )
+    read_count = len(blocks)
+
+    layers = declared_layers(contract)
+    ordered = sorted(contract.deliverables, key=lambda deliverable: layers.get(deliverable.name, 0))  # blame: whitelist — 未声明依赖的产物在第 0 层（没有上游）；沿用既有口径
+    for offset, deliverable in enumerate(ordered, start=1):
+        fields = tuple(sorted(deliverable.schema)) or ("value",)
+        interfaces[deliverable.name] = _descriptor(fields)
+        upstream = tuple(deliverable.depends_on)
+        # ★ 读层的全部产物 + 自己声明的上游产物。两者都要：
+        #   少了前者，产出块没有材料可用；少了后者，声明的链会断。
+        inputs = tuple(parts) + upstream
+        blocks.append(
+            Subtask(
+                id=f"T-{read_count + offset:02d}",
+                goal=f"assemble {deliverable.name!r}",
+                inputs=inputs,
+                output=deliverable.name,
+                contract_ref=contract.task_id,
+                axis="product",
+                mode="write",
+                partition=f"deliverable:{deliverable.name}",
+                expects=tuple((name, interfaces[name]) for name in inputs),
+                output_fields=_mapped(ontology, fields),
+            )
+        )
+    return SplitPlan(
+        task_id=contract.task_id,
+        version=version,
+        round=round,
+        subtasks=tuple(blocks),
+        shape="layered",
+        interfaces=interfaces,
+        recon_evidence=recon.evidence if recon is not None else "",
+        costs=estimate_costs(len(blocks)),
+    )
+
+
+def _research_fanout(contract: TaskContract, recon: Recon | None) -> int:
+    """研究来源**展开**出了几份材料 —— 只有这种源才需要垫读层。
+
+    ## 为什么不能用"源数 ≥ 2"当判据（实测的账）
+
+    一开始写的是 `len(_source_keys(...)) >= 2`，结果**打坏了既有任务**：
+    13f 那种契约声明了产物链、也有 ≥2 个来源，于是被一并改成"读层 + 产物层"，
+    `test_declared_dependencies_produce_a_layered_plan` 当场红
+    （期望 `[(), ('a.csv',), …]`，实得 `[(), (), ('part-src-1.csv', …), …]`）。
+
+    ★ 两者的差别是**源的来源**，不是源的个数：
+
+    ```
+    file 源    契约【写死】两三份，块直接读是对的 —— 它本来就知道自己要读哪份
+    research   契约只写了一个【问题】，运行时才展开出 N 份 ⇒ 这才是可并行的独立文档
+    ```
+
+    ⇒ 判据：契约里有 `kind: research` 的来源，且它展开了 ≥2 份（`<ref>:1`…）。
+    """
+    expanded = {ref for ref in (recon.source_ids if recon is not None else ()) if ":" in ref}
+    researched = {source.ref for source in contract.sources if source.kind == SOURCE_KIND_RESEARCH}
+    return len({ref for ref in expanded if ref.split(":", 1)[0] in researched})
+
+
 def split_by_dependency(
     contract: TaskContract,
     ontology: Ontology,
@@ -501,11 +770,18 @@ def split_by_dependency(
 class Decomposer:
     """Implements ``core.ports.DecomposerPort`` for the strategies that exist."""
 
-    def __init__(self, *, strategy: str = "source", budget: RoundBudget | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        strategy: str = "source",
+        budget: RoundBudget | None = None,
+        block_budget: BlockBudget | None = None,  # blame: fail-closed — 缺省即"调用方没声明单块容量"⇒读层回落一份源一块
+    ) -> None:
         if strategy not in STRATEGIES:
             raise ValueError(f"unknown strategy {strategy!r}; expected one of {STRATEGIES}")
         self._strategy = strategy
         self._budget = budget or RoundBudget()
+        self._block_budget = block_budget
         self._version = 0
 
     @property
@@ -515,6 +791,10 @@ class Decomposer:
     @property
     def budget(self) -> RoundBudget:
         return self._budget
+
+    @property
+    def block_budget(self) -> BlockBudget | None:
+        return self._block_budget
 
     def split(self, contract: TaskContract, ontology: Ontology, recon: Recon | None = None) -> SplitPlan:
         self._version += 1
@@ -544,9 +824,26 @@ class Decomposer:
         )
 
     def _build(self, contract: TaskContract, ontology: Ontology, recon: Recon | None, *, round: int, version: int) -> SplitPlan:
-        # ★ 层次切分：契约一旦声明了"产物依赖产物"，这条链就是任务自己给的切口，
+        # ★★ 层次切分：契约一旦声明了"产物依赖产物"，这条链就是任务自己给的切口，
         #   任何策略都不许把它丢掉 —— 所以在派发之前收口一次（单点判断）。没有声明
         #   （含单产物任务）时一个字节都不变，走下面的原策略。`LAYERED_SPLIT` 是反证开关。
+        #
+        #   ★★ 但"有产物链"和"有读层"是**两件事**，不是二选一（实测的账）：
+        #     `split_by_dependency` 把叶子产物直接对着源 ⇒ 每个产物块自己扛全部源。
+        #     源小而少时没事；**研究类任务源 = 290 KB** ⇒ 上下文爆 ⇒ 压缩 ⇒
+        #     忘了读过 ⇒ 重读 ⇒ 撞 `max_restarts` 判死（真实读数：
+        #     `.bobanana6/ab/` 那轮的 T-01，46 条 trace 里 11 轮重复同一批调用）。
+        #   ⇒ 【研究来源展开出多份材料】时才两层叠加（那才是可并行的独立文档）。
+        #     file 源是契约写死的两三份、块本来就该直接读 ⇒ 判据不算它，形状一字不变。
+        if LAYERED_SPLIT and declared_dependencies(contract) and _research_fanout(contract, recon) >= 2:
+            return split_read_then_product(
+                contract,
+                ontology,
+                recon,
+                round=round,
+                version=version,
+                block_budget=self._block_budget,
+            )
         if LAYERED_SPLIT and declared_dependencies(contract):
             return split_by_dependency(contract, ontology, recon, round=round, version=version)
         if self._strategy == "source":

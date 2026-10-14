@@ -1,0 +1,11 @@
+# agent-jd-research 题的本体：公司 / 岗位 / 考点 / 产物文本。
+domain: job-market-research
+version: "2026.1"
+
+concepts:
+  company: {label: 公司, kind: entity}
+  role: {label: 岗位, kind: entity}
+  topic: {label: 考点主题, kind: entity}
+  text: {label: 产物文本, kind: attribute}
+
+calendar: {timezone: Asia/Shanghai}

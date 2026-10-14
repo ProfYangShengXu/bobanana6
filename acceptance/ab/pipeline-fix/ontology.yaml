@@ -1,0 +1,11 @@
+# 单块代码修复题的本体：模块 / 源码文本 / 单位。
+# ★ 照 acceptance/stress/code-convergence/ontology.yaml 的形状（那份已证过能过门）。
+domain: python-module-fix
+version: "2026.1"
+
+concepts:
+  module: {label: 模块, kind: entity}
+  text: {label: 源码文本, kind: attribute}
+  unit: {label: 计量单位, kind: entity}
+
+calendar: {timezone: Asia/Shanghai}

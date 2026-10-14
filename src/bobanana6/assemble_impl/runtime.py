@@ -21,6 +21,7 @@ other's checkpoint and a resume would read the wrong turn.
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -45,7 +46,7 @@ from ..core.model import (
     TaskContract,
 )
 from ..core.ontology import map_field
-from ..core.ports import LLMClient, ToolSet
+from ..core.ports import EscalationPort, LLMClient, ToolSet
 from ..services.checks import BlockJudge
 from ..services.registry import build_registry
 from ..services.tools import BoundTraces
@@ -141,6 +142,53 @@ def _names_a_declared_field(constraint: Constraint, declared: set[str], ontology
     return False
 
 
+#: ★★ 重试退避的默认秒数。**默认 0 = 不退避**：
+#: 单测与离线跑测走的都是同一条装配路径（`acceptance/harness.py` 也走这里），
+#: 默认给 60 会让**每一个**驱动服务端失败的用例真睡一分钟 —— 既有读数就不再是"一字不变"了。
+#: ⇒ 真跑由入口显式打开：`.bobanana6/ab/run_bb6.py` 里 `BB6_RETRY_BACKOFF_S=60`（用户口径）。
+DEFAULT_RETRY_BACKOFF_S = 0.0
+
+
+def retry_backoff_from_env(
+    source: Mapping[str, str] | None = None,  # blame: whitelist — 只为可测注入（假 env），生产传 None 即读 os.environ
+) -> float:
+    """`BB6_RETRY_BACKOFF_S`（秒）—— 缺省 0（不睡）；真跑入口把它设成 60。
+
+    ★ 与 `ToolOutputPolicy.from_env` 同一条规矩：**env 只在这一个装配点读**，
+    loop 自己不读 env（否则单测会依赖环境状态）。
+    ★ 读不出来 / 是负数 ⇒ 回默认值（不静默变成别的秒数）。
+    """
+    raw = str((source if source is not None else os.environ).get("BB6_RETRY_BACKOFF_S", "")).strip()  # blame: fail-closed — 取不到就回默认（不睡），不静默变成别的秒数
+    if not raw:
+        return DEFAULT_RETRY_BACKOFF_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_RETRY_BACKOFF_S
+    return value if value >= 0 else DEFAULT_RETRY_BACKOFF_S
+
+
+def escalation_from_env(
+    source: Mapping[str, str] | None = None,  # blame: whitelist — 只为可测注入（假 env），生产传 None 即读 os.environ
+) -> EscalationPort | None:
+    """`BB6_ESCALATE` 非空且不是 `0`/`false` ⇒ 建一个走本机 agent 桥的出口；否则 `None`。
+
+    ★ 为什么**默认关**：出口是"最后一步"，它会把整跑的墙钟拉长（等的是外面，不是自己）。
+      真实跑测要显式打开（`.bobanana6/ab/run_bb6.py` 里设 `BB6_ESCALATE=1`），
+      单测与离线路径**一个字都不变**。
+    ★ 与 `ToolOutputPolicy.from_env` / `retry_backoff_from_env` 同一条规矩：
+      **env 只在这一个装配点读**，loop 自己不读 env。
+    """
+    # blame: fail-closed — 缺 env 即"不开出口"⇒ 行为与改前逐字相同（默认关）
+    raw = str((source if source is not None else os.environ).get("BB6_ESCALATE", "")).strip().lower()
+    # blame: fail-closed — 空/0/false/no/off 一律当作"不开"
+    if not raw or raw in {"0", "false", "no", "off"}:
+        return None
+    from ..services.escalation import ContactorEscalation
+
+    return ContactorEscalation()
+
+
 class BlockRuntimeError(RuntimeError):
     """The runtime produced no candidate. ``exit_reason`` says where it stopped."""
 
@@ -230,6 +278,15 @@ class BlockRuntime:
     client: LLMClient
     store: SnapshotStore
     contract: TaskContract
+    #: ★★ 契约声明的判据（`content_checks.invariants`，原样）—— 交给块装配器做**归属**：
+    #: 约束哪份产物（`applies_to`），就给产出那份产物的块。判据里带**规格常量**
+    #: （容差 `tol` 等），不交下去的话模型只能按常识写，判定器按契约的尺子量 ⇒ 拒收，
+    #: 且模型不知道自己错在哪。★ 空元组 = 拿不到契约 ⇒ 一条都不给（fail-closed）。
+    content_checks: tuple[Mapping[str, Any], ...] = ()  # blame: fail-closed — 省略即"拿不到契约"⇒一条都不给（既有读数一字不变）；方向保守，不会凭空放宽判定
+    #: ★★ 契约声明的**消费方式**（`content_checks.comparisons`，原样）—— 同上，交给装配器做归属。
+    #: 判据说"值该满足什么"，这里说"产物会被怎么对待"（逐字段机器比对 / 容差多大）。
+    #: ★ 判分器的实现细节（分隔符白名单、哪列开恩）**不从这条路进来** —— 那是偷看口。
+    comparisons: tuple[Mapping[str, Any], ...] = ()  # blame: fail-closed — 省略即"不知道会被怎么比对"⇒不加要求（既有读数一字不变）
     #: ★ `#33`: 工作区（代码类产物落盘在这里）；`None` = 这个部署没有工作区。
     workspace: Path | None = None
     #: ★ `#43`: 继承守卫的观测目录（拒收时把池子与交上来的行落盘）；`None` = 不观测。
@@ -329,6 +386,10 @@ class BlockRuntime:
             observe_dir=self.observe_dir,
             write_region=region,
             frozen_paths=frozen,
+            # ★★ 契约声明的判据（约束哪份产物，就给产出那份产物的块）——
+            #   判定器拿什么尺子量你，你就得看到那把尺子（见 `_content_checks_entry`）。
+            content_checks=self.content_checks,
+            comparisons=self.comparisons,
             # ★ 写工具的账本与答案 `files` 的账本是**同一个**对象：一块的总写入量
             #   要一起累加（见 `services/workspace.py::WriteBudget`）。
             write_budget=workspace.write_budget,
@@ -348,7 +409,17 @@ class BlockRuntime:
             #   `exit=budget_exhausted` —— 死在 6 轮上，不是死在能力上。
             #   本文件上方那句注释本来就是这个意思："that declaration is what
             #   caps the model call -- not a number this adapter keeps for itself"。
-            config=LoopConfig(required_scope=self.required_scope, max_turns=budget.max_calls),
+            config=LoopConfig(
+                required_scope=self.required_scope,
+                max_turns=budget.max_calls,
+                # ★★ 重试退避（用户口径：**失败后等一分钟再打**）——
+                #   类里默认 0（单测/离线不该被真睡的秒数拖住），**生产值在这个装配点给**，
+                #   与 `ToolOutputPolicy.from_env` 同一条规矩：env 只在这里读，loop 自己不读 env。
+                retry_backoff_s=retry_backoff_from_env(),
+            ),
+            # ★★ 外部出口：`BB6_ESCALATE=1` 才建（默认 `None` ⇒ 行为与改前逐字相同）。
+            #   与上面那条同一条规矩：env 只在这个装配点读。
+            escalation=escalation_from_env(),
             store=self.checkpoints,
             gate=self.gate,
             routes=self.route_table,

@@ -64,6 +64,12 @@ def test_replace_reruns_validation() -> None:
         lambda: Relation(src="a", dst="b", kind="invented", cardinality="1:1"),
         lambda: Subtask(id="T", goal="g", inputs=(), output="o", contract_ref="c", axis="source", mode="WRITE"),
         lambda: Subtask(id="T", goal="g", inputs=(), output="o", contract_ref="c", axis="time", mode="read"),
+        lambda: Subtask(
+            id="T", goal="g", inputs=(), output="o", contract_ref="c", axis="window", mode="read", reads=(("", 0, 1),)
+        ),
+        lambda: Subtask(
+            id="T", goal="g", inputs=(), output="o", contract_ref="c", axis="window", mode="read", reads=(("s", 1, 1),)
+        ),
         lambda: SplitPlan(task_id="t", version=0, round=0, subtasks=(), shape="star"),
         lambda: SplitPlan(task_id="t", version=1, round=-1, subtasks=(), shape="star"),
         lambda: SplitPlan(task_id="t", version=1, round=0, subtasks=(), shape="mesh"),

@@ -26,15 +26,24 @@ the KMP stream-continuation dedup for truncated output.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Protocol, TypeVar
 
-from ..core.model import Candidate
+from ..core.model import Candidate, EscalationOutcome, EscalationRequest
+from ..core.ports import EscalationPort
 from .compress import CompressionPolicy, compact
 from .concurrency import ResourceGate, RouteTable, SessionRegistry
-from .errors import BobananaAction, ClassifiedError, classify_error
+from .errors import (
+    SERVER_SIDE_REASONS as _SERVER_SIDE_REASONS,
+)
+from .errors import (
+    BobananaAction,
+    ClassifiedError,
+    classify_error,
+)
 from .events import EventLog
 from .gate import GateVerdict, can_complete
 from .recovery import (
@@ -303,14 +312,37 @@ def common_prefix_length(left: Sequence[Mapping[str, Any]], right: Sequence[Mapp
 # --------------------------------------------------------------------------- #
 
 
+#: ★★ 服务端类的失败 —— 把原因告诉模型**没用**：它重发的是一模一样的东西，服务器还是忙。
+#: 这类只退避，不回灌原因；其余（模型自己能改的）才告诉它。
+#: ★ 判据与 `recovery.decide_recovery` 同源（都在 `errors.SERVER_SIDE_REASONS`），
+#:   两处必须用同一份 —— 否则会出现"那边送去反思、这边按退避办"的错位（真踩过）。
+
+
 @dataclass(frozen=True)
 class LoopConfig:
     max_turns: int = 6  # blame: fail-closed — 省略即给一个**有上限**的回合数，方向保守
     #: ★ An uncapped restart refunds the iteration budget forever.
     max_restarts: int = 2  # blame: fail-closed — 省略即上限 2（注释已写明"无上限的重启会永久退款预算"）
     required_scope: str = "full"  # blame: fail-closed — 省略即要求**最严**的验证范围
-    max_retries: int = 2  # blame: fail-closed — 省略即上限 2
+    #: ★★ 失败上限：**1 次正式 + 3 次重试**（用户口径："重试失败三次后求助"）。
+    #: ★ 读数口径：`decide_recovery` 的闸是 `attempts < max_retries`，而 `attempts` 数的是
+    #:   **总失败次数**（含第一次）⇒ 要给"3 次重试"，这里必须是 **4**。
+    #:   （上一版是 2 = 1 正式 + 1 重试，与用户口径差两次。）
+    #: ★ 另一层：**重试不计入回合预算**（`run()` 里那一轮会还回去），所以这个计数器
+    #:   是重试**唯一**的闸 —— 它必须自己收紧。
+    max_retries: int = 4  # blame: fail-closed — 省略即 1 正式 + 3 重试（重试不吃回合预算，闸只在这里）
     max_reflections: int = 1  # blame: fail-closed — 省略即上限 1
+    #: ★★ 求助上限：求助是**贵**动作（它等的是外部，不是自己的重试），
+    #: 所以只给一次 —— 拿回来的建议再不对，也不该无限打扰外面。
+    max_escalations: int = 1  # blame: fail-closed — 省略即只求助一次
+    #: ★★ 退避时长（秒）：服务端忙（503/529/busy）、5xx、限速、网络超时 —— **等一等再打**。
+    #: 实测（qwen4b14）：503 的分类与动作都对（`OVERLOADED → RETRY_LOCAL`），但重试那一支
+    #: **立刻重发** —— 两次瞬间用完，块被判死；而"服务太忙"恰好是**等一会儿就好**的那一类。
+    #: ★ 类里默认 **0**（不睡）：单测/离线路径不该被真睡的秒数拖住（既有读数一字不变）；
+    #:   **生产值由装配点给**（`assemble_impl/runtime.py` 传 60，沿用 429 那条"分钟级"口径）。
+    retry_backoff_s: float = 0.0  # blame: whitelist — 0 = 不睡（单测/离线）；生产在装配点显式给 60
+    #: 可注入的睡眠（与 `adapters/rate_limit.py` 同一写法）：测试用假 sleeper，不真睡。
+    sleeper: Callable[[float], None] = field(default=time.sleep, compare=False, repr=False)  # blame: whitelist — 只为可测注入（假 sleeper），生产用默认
     taint_threshold: int = 3  # blame: fail-closed — 省略即 3 次就 taint
     #: False when the block cannot be independently verified (the split is wrong).
     block_verifiable: bool = True  # blame: fail-open — 省略即假定"这个块可判定"；真正的不可判定块会被当成"验证失败"而不是"没法验"
@@ -480,6 +512,7 @@ class WorkerLoop:
         classify: Callable[[BaseException], ClassifiedError] = classify_error,
         tool_output: ToolOutputPolicy | None = None,  # blame: fail-closed — 省略即用出厂策略（4000/800/800）；生产装配点显式从 env 读
         spill_tool_output: Callable[[str, str], str] | None = None,  # blame: fail-open — 省略即"没有落盘点 ⇒ 不换页"，把全文交给模型（数据不丢、上下文可能变大）
+        escalation: EscalationPort | None = None,  # blame: fail-closed — 省略即"没有外部出口"⇒ 退化成原来的降级（既有读数一字不变）
     ) -> None:
         self._io = io
         self._config = config or LoopConfig()
@@ -507,6 +540,12 @@ class WorkerLoop:
         #   ``agentloop/tool_output.py``). ``(call_id, full_text) -> workspace-relative
         #   path``, or ``""`` when the write failed.
         self._spill_tool_output = spill_tool_output
+        # ★★ 外部出口（`EscalationPort`）：`None` = 这个部署没有出口，**行为与改前逐字相同**。
+        #   为什么放在这里注入：循环不该知道对面是谁、怎么送达 —— 它只知道
+        #   "我手里没有新东西可换了，把这件事交出去"。
+        #   ★ 计数放在实例上：一个 `WorkerLoop` 只驱动一个块（`runtime.py` 每块新建一个）。
+        self._escalation = escalation
+        self._escalations = 0
 
     @property
     def config(self) -> LoopConfig:
@@ -936,8 +975,34 @@ class WorkerLoop:
             detail=classified.detail,
             reflections=turn.state.reflections,
             has_feedback=feedback is not None,
+            # ★ 有出口、且还没用过 ⇒ 重试与反思都用完时改走"交给外部"。
+            can_escalate=self._escalation is not None and self._escalations < self._config.max_escalations,
         )
         if decision.action is RecoveryAction.RETRY:
+            # ★★ 重试【不计入回合预算】—— 把这一轮还回去。
+            #   为什么：`run()` 的 `while state.turn < max_turns` 每轮都 +1，而重试走的正是
+            #   "再来一轮" ⇒ 它吃的是**同一个预算**（`runtime.py:359` 把 `max_turns` 接到了
+            #   `budget.max_calls`，也就是 BB6_MAX_CALLS 那个总闸）。用户口径：重试的闸是
+            #   `max_retries`（它自己数），不该再从回合预算里扣。
+            #   ★ 不会失控：`attempts` 只增不减，`decide_recovery` 用它卡住重试次数。
+            turn.state = replace(turn.state, turn=max(0, turn.state.turn - 1))
+            reason = str(classified.reason)
+            if reason in _SERVER_SIDE_REASONS:
+                # ★ 服务端忙 / 网络抖：**等一等再打**。立刻重发是往火上浇油 ——
+                #   实测（qwen4b14）两次重试瞬间用完，块被判死，而这类恰好是等一会儿就好的。
+                if self._config.retry_backoff_s > 0:
+                    self._config.sleeper(self._config.retry_backoff_s)
+            else:
+                # ★ 模型自己能改的失败：**把原因回灌给它** —— 不说，它只会原样再交一次。
+                turn.state = replace(
+                    turn.state,
+                    injected=(
+                        {
+                            "role": "user",
+                            "content": reflect_message(reason, detail=classified.detail),
+                        },
+                    ),
+                )
             turn.exit_reason = "retry_after_error"
             return PhaseResult.cont("retry_after_error")
         if decision.action is RecoveryAction.REFLECT:
@@ -967,8 +1032,50 @@ class WorkerLoop:
             )
             turn.exit_reason = "reformat"
             return PhaseResult.cont("reformat")
+        if decision.action is RecoveryAction.ESCALATE:
+            # ★★ 交给外部：把"做不到 + 原因 + 证据"送出去，**等它答复**。
+            #   为什么等而不是弃权：对面若是只会被动应答的一方（人 / 另一个 agent），
+            #   不等就等于把答复扔了 —— 它不会自己回头来找我们。
+            #   ★ 阻塞的边界由实作定（连不上要立刻返回，不能傻等）；总闸仍是整跑的墙钟。
+            outcome = self._ask_outside(turn, classified)
+            if outcome.answered and outcome.advice.strip():
+                self._escalations += 1
+                # ★ 求助这一轮也【不计入回合预算】—— 与重试同类：
+                #   花的是"再试一次"的额度，不是"正式产出"的额度。
+                turn.state = replace(
+                    turn.state,
+                    turn=max(0, turn.state.turn - 1),
+                    injected=({"role": "user", "content": outcome.advice},),
+                )
+                turn.exit_reason = "escalated"
+                return PhaseResult.cont("escalated")
+            # ★ 没拿到答复 ⇒ **落回原来的降级出口**：交不出去不该让这一块更糟。
+            turn.exit_reason = "escalate_unanswered"
+            return PhaseResult.done(RecoveryAction.DEGRADE_SINGLE_AGENT.value)
         turn.exit_reason = decision.action.value
         return PhaseResult.done(decision.action.value)
+
+    def _ask_outside(self, turn: _Turn, classified: ClassifiedError) -> EscalationOutcome:
+        """把这一块的"做不到 + 原因 + 证据"交出去，拿回答复。
+
+        ★ 端口抛异常**不许杀掉整跑** —— 交不出去是"没拿到答复"，不是崩溃。
+          与 `_publish_disk_artifact` 同一条纪律：兜底路径上的 IO 风险要**就地收口**
+          （那一处的原话：它一抛，杀掉的不是这一块而是整个 run）。
+        """
+        escalation = self._escalation
+        if escalation is None:
+            return EscalationOutcome(answered=False, detail="this deployment has no outside exit")
+        request = EscalationRequest(
+            task_id=turn.task_id,
+            block=turn.worker_id,
+            reason=str(classified.reason),
+            attempts=turn.state.attempts,
+            detail=str(classified.detail or ""),
+        )
+        try:
+            return escalation.escalate(request)
+        except Exception as exc:  # noqa: BLE001 - 端口是实现方的代码；坏在这里不该杀整跑
+            return EscalationOutcome(answered=False, detail=f"{type(exc).__name__}: {exc}")
 
     # -- bookkeeping ------------------------------------------------------- #
 

@@ -31,6 +31,10 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 
+#: ★★ 判分器里"这份产物会被怎么比对"的那两个入口（比对方式的机械判据）。
+#: 这是**消费方式**（通用），不是分隔符/宽容列那类实现细节。
+_COMPARISON_ENTRIES = {"_assert_csv_matches", "_assert_json_matches"}
+
 
 @dataclass
 class Extracted:
@@ -121,6 +125,97 @@ def extract_encodings(source: str, *, path: str) -> list[Extracted]:
                         kind=f"encoding.{keyword.arg}",
                         value=value,
                         source=f"{path}:{keyword.value.lineno}",
+                        detail=f"{name} at line {node.lineno}",
+                    )
+                )
+    return found
+
+
+def extract_comparison_modes(source: str, *, path: str) -> list[Extracted]:
+    """★★ 【这份产物会被怎么对待】—— 消费方式。
+
+    判据（机械，只看判分器源码里有没有这几种调用）：
+      · `_assert_csv_matches(<文件名>, ...)` ⇒ 那份 CSV 被**逐行逐列**比对
+      · `_assert_json_matches(...)`          ⇒ summary 被**逐键**比对
+      容差取调用点显式给的值；没给就取函数定义的默认参数。
+
+    ★★★ 只抽「怎么比对」（**通用**：逐字段 / 容差多大 / 非数值是否严格）——
+        这几条换一道题也成立，任何"产物会被机器逐值比对"的题都该让生产者知道。
+    ✗ 不抽「判分器内部用了什么字符」—— 分隔符白名单（`['|',';',',']`）、
+      哪一列开恩（`relaxed_value_cols`）都是**这一个判分器的实现细节**。
+      把它们塞进契约 = 给 A 臂开一个小口径的偷看口；B 臂偷看 `test_outputs.py`
+      拿 51/51 就是那条路走到黑的样子。
+    ★ 判据一句话：**抽「这份产物会被怎么消费」，不抽「判分器里写了什么字符」。**
+    """
+    tree = ast.parse(source)
+    # 先收函数定义的默认容差（调用点没显式给时用它）
+    defaults: dict[str, float] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name not in _COMPARISON_ENTRIES:
+            continue
+        # ★ 默认值只覆盖**最后 N 个**参数（`args=[filename, atol]` / `defaults=[1e-9]`），
+        #   所以必须**从右边对齐**再 zip。左边对齐会把 `filename` 配到 `1e-9` 上 ——
+        #   那样一个都收不到，容差会静默落到下面的 fail-closed 默认值 0（严格），
+        #   看起来"没报错"，实际是把判分器给的尺子丢了。
+        tail = node.args.args[-len(node.args.defaults):] if node.args.defaults else []
+        for argument, fallback in zip(tail, node.args.defaults, strict=False):
+            if argument.arg == "atol":
+                value = _literal(fallback)
+                if isinstance(value, (int, float)):
+                    defaults[node.name] = float(value)
+    found: list[Extracted] = []
+    # ★ 按【函数】作用域扫：判分器把文件名放在循环里批量传
+    #   （`for filename in ['a.csv', 'b.csv']: _assert_csv_matches(filename)`）——
+    #   变量名跨函数会重名，全局查表会串。解析仍是**机械**的：只认字面量列表，不是猜。
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        loops: dict[str, list[str]] = {}
+        for inner in ast.walk(function):
+            if not isinstance(inner, ast.For) or not isinstance(inner.target, ast.Name):
+                continue
+            literal = _literal(inner.iter)
+            if isinstance(literal, (list, tuple)) and all(isinstance(x, str) for x in literal):
+                loops[inner.target.id] = list(literal)
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Call):
+                continue
+            # 判分器里这条断言可能是别名调用的（`_assert_csv_matches` / `self._assert...`）
+            name = _call_name(node.func).rsplit(".", 1)[-1]
+            if name not in _COMPARISON_ENTRIES:
+                continue
+            atol = None
+            for keyword in node.keywords:
+                if keyword.arg in ("atol", "abs_tol"):
+                    value = _literal(keyword.value)
+                    if isinstance(value, (int, float)):
+                        atol = float(value)
+            if atol is None:
+                # blame: fail-closed — 容差取不到就【不许假定宽松】：默认按 0（严格）报，逼调用点显式写
+                atol = defaults.get(name, 0.0)
+            if name == "_assert_json_matches":
+                targets: list[str] = ["output/summary.json"]
+                shape = "key-by-key"
+            else:
+                raw = node.args[0] if node.args else None
+                if isinstance(raw, ast.Name) and raw.id in loops:
+                    targets = [f"output/{item}" for item in loops[raw.id]]
+                elif isinstance(_literal(raw), str):
+                    targets = [f"output/{_literal(raw)}"]
+                else:
+                    continue  # 文件名既不是字面量、也不是字面量列表里的循环变量 ⇒ 具名不抽，不猜
+                shape = "field-by-field"
+            for target in targets:
+                found.append(
+                    Extracted(
+                        kind="compared",
+                        value={
+                            "applies_to": target,
+                            "compare": shape,
+                            "numeric_atol": atol,
+                            "text": "exact",
+                        },
+                        source=f"{path}:{node.lineno}",
                         detail=f"{name} at line {node.lineno}",
                     )
                 )
@@ -436,6 +531,7 @@ def extract(checks_dir: Path) -> list[Extracted]:
         found.extend(extract_reconciliations(source, path=relative))
         found.extend(extract_grouped_invariants(source, path=relative))
         found.extend(extract_summary_tolerance(source, path=relative))
+        found.extend(extract_comparison_modes(source, path=relative))
     return found
 
 
@@ -447,6 +543,7 @@ def as_content_checks(found: list[Extracted]) -> dict[str, Any]:
     summary_numeric = [entry for entry in found if entry.kind == "summary.numeric_tolerance"]
     summary_strict = [entry for entry in found if entry.kind == "summary.strict_key"]
     separation = [entry for entry in found if entry.kind == "encoding.sep"]
+    compared = [entry for entry in found if entry.kind == "compared"]
     declaration: dict[str, Any] = {}
     # ★ 规格 ②：summary 的键容差 —— 落成 invariant 形状（`op: abs_tol` / `op: strict`），
     #   于是内容层 CI **知道**判分器的那把尺子，而不是让块自己猜精度。
@@ -468,6 +565,19 @@ def as_content_checks(found: list[Extracted]) -> dict[str, Any]:
             seen.add(key)
             invariants.append(dict(entry.value))
         declaration["invariants"] = invariants
+    # ★★ 比对方式（消费方式）：这份产物会被【逐字段机器比对】，容差多大。
+    #   ★ 抽的是"怎么消费"，不是"判分器里写了什么字符" —— 后者是这一题的实现细节。
+    #   去重：同一份产物可能在多个用例里被比对（`test_reference_match_*` 分散在三处）。
+    if compared:
+        seen_targets: dict[str, dict[str, Any]] = {}
+        for entry in compared:
+            target = entry.value["applies_to"]
+            previous = seen_targets.get(target)
+            # 同一份产物出现多次时取【最严】的那把尺子（容差最小）——
+            # 宽的那个是别处的口径，严的那个才是它真正会被卡的地方。
+            if previous is None or entry.value["numeric_atol"] < previous["numeric_atol"]:
+                seen_targets[target] = dict(entry.value)
+        declaration["comparisons"] = sorted(seen_targets.values(), key=lambda item: item["applies_to"])
     return {
         "content_checks": declaration,
         "extracted": [entry.as_document() for entry in found],

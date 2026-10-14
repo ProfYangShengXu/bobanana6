@@ -1,0 +1,9 @@
+# 单块代码修复题的本体：模块 / 源码文本 / 数量。
+domain: python-module-fix
+version: "2026.1"
+
+concepts:
+  module: {label: 模块, kind: entity}
+  text: {label: 源码文本, kind: attribute}
+
+calendar: {timezone: Asia/Shanghai}

@@ -30,10 +30,14 @@ from .model import (
     BundleDelta,
     Candidate,
     ConstraintBundle,
+    EscalationOutcome,
+    EscalationRequest,
     InputSurvey,
     ModelResponse,
     Ontology,
     Recon,
+    ResearchBudget,
+    ResearchQuestion,
     Snapshot,
     SnapshotBody,
     SourceRef,
@@ -49,7 +53,9 @@ __all__ = [
     "CheckTools",
     "ConstraintSource",
     "DecomposerPort",
+    "EscalationPort",
     "OntologyPort",
+    "ResearchPort",
     "SemanticsTools",
     "SnapshotReader",
     "SourcePort",
@@ -151,10 +157,50 @@ class ArbiterPort(Protocol):
 
 
 @runtime_checkable
+class EscalationPort(Protocol):
+    """"交出去、拿回来" —— 一块自己做不成时的**外部**出口。
+
+    ★ 为什么要有它：实测（qwen4b14）三个块连挂三跑、失败读数**逐字相同** ——
+      重试与反思都试过之后，壳手里再没有新东西可换，只能判死。
+      "换个脑子看一遍"正是外部能给、壳自己产不出来的那一件。
+
+    ★ 边界（三条都别越）：
+      · 端口只知道【交出去什么、拿回来什么】；怎么送达、对面是谁，是实作的事。
+      · **拿不到答复是正常返回**（`answered=False`），不是异常 ——
+        交不出去不该让这一块更糟，它本来就快做不成了。
+      · ★ **唤醒时机由实作定，但"一直等"与"不等"都合法**：
+        对面若是只会被动应答的一方，等就是对的（超时等于把答复扔了）；
+        对面若是会自动推进的一方，不等也对（答复留给下一轮）。
+    """
+
+    def escalate(self, request: EscalationRequest) -> EscalationOutcome: ...
+
+
+@runtime_checkable
 class SourcePort(Protocol):
     """Whoever fetches raw material and freezes it into a snapshot."""
 
     def fetch(self, ref: SourceRef) -> Snapshot: ...
+
+
+@runtime_checkable
+class ResearchPort(Protocol):
+    """把【一个还没定位的问题】变成【一批可引用的快照】。
+
+    ★ 它比 `SourcePort` **高一层**，而且两者回答的不是同一个问题：
+
+        SourcePort    "我知道东西在哪，去取回来"        → fetch(ref)
+        ResearchPort  "我不知道在哪，先找出来，再冻住"  → research(question, budget)
+
+    ★★ 产出物与 `SourcePort` **同型**（都是 `Snapshot`）—— 这是刻意的：
+       下游不需要知道一份材料是"直接取回的"还是"研究出来的"，
+       快照 / 溯源 / 写区 / 判定四套机制一个字都不用改。
+
+    ★ 所以它**不替换** `SourcePort`，是并排的第二个取数入口。
+      把它塞进 `SourcePort` 会让 `SourceRef.locator` 同时表示"位置"和"问题"两件事。
+    """
+
+    def research(self, question: ResearchQuestion, budget: ResearchBudget) -> tuple[Snapshot, ...]: ...
 
 
 @runtime_checkable

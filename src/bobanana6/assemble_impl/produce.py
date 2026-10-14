@@ -29,7 +29,7 @@ import io
 import json
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NoReturn
@@ -1521,6 +1521,56 @@ def artifact_from_disk(name: str, path: Path) -> Artifact:
     return _artifact_from_disk(Artifact(name=name), path, content)
 
 
+def consumption_requirements(output: str, comparisons: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """★★ 把「这份产物会被**怎么消费**」翻成给模型的**通用要求**（纯函数，便于单独断言）。
+
+    为什么壳该给（13f 官方 checker 实测，2026-10-14）：
+      跑完后 bb6 自己的块级判定 **8/8 全绿**，而官方 checker **47 passed / 4 failed**
+      ⇒ `reward = 0.0`（全有或全无）。四条里有两条的根因是同一个：
+      **模型不知道自己在写一份「要被机器逐字段比对的核验件」**，于是按**给人看**的
+      习惯写 —— 数值只留 7 位有效数字（差 2.3e-9 > atol 1e-9）、
+      多值字段拼成 `A-B`（判分方拆不开，当它是一整个值）。
+
+    ★★★ 关键纪律：**表达成要求，不表达成白名单。**
+      说「优先用结构化形状」—— 原理，换一道题也成立；
+      不说「用 `|` `;` `,`」—— 那是**这一个判分器**的实现细节，
+      写进契约 = 过拟合 + 给 A 臂开一个小口径的偷看口
+      （B 臂偷看 `test_outputs.py` 拿 51/51 就是那条路走到黑的样子）。
+
+    ★ 归属规则与 `_content_checks_entry` 同源：只管 `applies_to == output` 的那些；
+      拿不到 ⇒ 返回 `{}`（fail-closed，一个字都不加）。
+    """
+    modes = [
+        one
+        for one in comparisons
+        if (not one.get("applies_to") or str(one.get("applies_to")) == output) and str(one.get("compare") or "")
+    ]
+    if not modes:
+        return {}
+    kinds = {str(one["compare"]) for one in modes}
+    tolerances = [float(one["numeric_atol"]) for one in modes if isinstance(one.get("numeric_atol"), (int, float))]
+    # 同一份产物出现多个口径时取**最严**的那个 —— 宽的那个卡不住你，严的才会。
+    # blame: fail-closed — 容差一个都取不到就按 0（最严）说，不假定宽松
+    atol = min(tolerances) if tolerances else 0.0
+    rules: list[str] = []  # blame: fail-closed — 空 = 一条消费要求都还没收到；收不到就不加要求，不假定宽松
+    if "field-by-field" in kinds:
+        rules.append("这份产物会被【逐行逐列机器比对】，不是给人读的。")
+    if "key-by-key" in kinds:
+        rules.append("这份产物会被【逐键机器比对】，不是给人读的。")
+    rules.append(
+        f"数值：保留全部有效精度 —— 比对容差 abs_tol={atol:g}。"
+        "按「给人看」的习惯把数字写短（少留几位有效数字）会直接判错。"
+    )
+    rules.append("文本：规范化（大小写 / 多余空格 / 公司后缀缩写统一）之后要求完全相等。")
+    rules.append(
+        "多值字段：★ 优先用**结构化形状**（JSON 数组），不要拼成一个字符串；"
+        "只能用字符串时，选一个**绝不会出现在值内部**的分隔符 —— "
+        "拿直觉拼出来的 `A-B` 一旦值里也有 `-` 就拆不开，判分方认为它是一整个值。"
+    )
+    rules.append("列名 / 键名：必须与规格完全一致（不是近义、不是大小写变体）。")
+    return {"compare": sorted(kinds), "numeric_atol": atol, "requirements": rules}
+
+
 @dataclass
 class LoopIOImpl(LoopIO):
     """The loop's three collaborators: produce, execute, verify.
@@ -1582,6 +1632,28 @@ class LoopIOImpl(LoopIO):
     #: ★★ `None` = **没有声明"别人的东西是哪些"** ⇒ 退回旧规则（不在写区里就拒）。
     #: 默认必须是 None（fail-closed）：一个不知道别人有什么的调用方，不该因此获得"随便写"。
     frozen_paths: tuple[str, ...] | None = None
+    #: ★★ 契约声明的、**约束本块产物**的判据（`content_checks.invariants`，**原样**）。
+    #:
+    #: 为什么必须走到模型眼前：判据里带**规格常量**（容差 `tol`、单位、口径），
+    #: 而它们此前只到判定器、到不了模型 —— 模型按常识写（例：四舍五入到 4 位小数），
+    #: 判定器按契约的尺子量（`tol=1e-10`）⇒ 拒收，且**模型不知道自己错在哪**。
+    #: ★ 13f 实测：T-03/04/05 三块连挂三跑，读数 `sum=0.9992 != 1.0 (tol=1e-10)`；
+    #:   而 31.8MB 的完整归档里 `1e-10` **只出现在事后判定记录里**，
+    #:   模型收到的任何一句上下文里都没有 ⇒ 这记的是壳的账，不是模型的账。
+    #:
+    #: ★ 判据与领域无关（不是为某个任务加的）：**判据声明它约束哪份产物**
+    #:   （`applies_to`），就把它给产出那份产物的块；没写 `applies_to` 的
+    #:   视为约束全部产物 ⇒ 每个块都看得到。壳**只做归属**：不解释、不改写、
+    #:   不替模型推"所以你应该怎么写"。
+    #:
+    #: ★ 空元组 = 拿不到契约 ⇒ 一个字都不加（fail-closed；既有读数一字不变）。
+    content_checks: tuple[Mapping[str, Any], ...] = ()  # blame: fail-closed — 省略即"拿不到判据"⇒一个字都不加（既有读数一字不变）；方向保守，不会凭空放宽判定
+    #: ★★ 契约声明的、**这份产物会被怎么消费**（`content_checks.comparisons`，原样）。
+    #: 与 `content_checks` 分开是**性质不同**：判据说"值该满足什么"，
+    #: 这里说"产物会被怎么对待"（逐字段机器比对 / 容差多大 / 非数值严格相等）。
+    #: ★ 判分器里那些**实现细节**（分隔符白名单、哪列开恩）**不进这个字段** ——
+    #:   塞进来就是给 A 臂开偷看口。见 `acceptance/spec_extractor.py::extract_comparison_modes`。
+    comparisons: tuple[Mapping[str, Any], ...] = ()  # blame: fail-closed — 省略即"不知道会被怎么比对"⇒不加要求（既有读数一字不变）
     #: ★ 本块的总写入字节闸（默认 64 MiB，见 `services/workspace.py::WriteBudget`）。
     #: `runtime` 把 `BoundWorkspace` 的那一份同时交给它 —— 写工具的、答案 `files` 的、
     #: 以及命令副作用的字节，记在同一本账上。
@@ -1636,6 +1708,13 @@ class LoopIOImpl(LoopIO):
         write_scope = self._write_region_entry()
         if write_scope:
             brief["write_region"] = write_scope
+        # ★★ 契约声明的判据（**只取约束本块产物的那几条**）—— 判定器拿什么尺子量你，
+        #   你就得看到那把尺子。以前它们只走到判定器，模型看不到 ⇒ 按常识写、被判据拒，
+        #   而报告上长得像"这个块运行出错了"。★ 规则是结构性的（按 `applies_to` 归属），
+        #   与任务领域无关；拿不到契约 ⇒ 一个字都不加（fail-closed）。
+        judgements = self._content_checks_entry()
+        if judgements:
+            brief["content_checks"] = judgements
         # ★★★ 名字**和地址**一起给（见 `_source_paths` 的注记）：只给名字的后果是
         #   块分不清"来源清单"和"来源内容"，而取数入口只有一次机会。
         #   `authorized_sources` 保住溯源（判定器按 ref 查表），`source_files`
@@ -2607,6 +2686,40 @@ class LoopIOImpl(LoopIO):
                 "要细节用 `task.upstream('<名字>')`"
             )
         return brief
+
+    def _content_checks_entry(self) -> dict[str, Any]:
+        """★★ 判定器核这份产物时用的**判据**（`content_checks.invariants`）—— 原样，一字不改写。
+
+        为什么壳该给：判据里带**规格常量**（容差 `tol`、单位、口径）。它们此前只走到
+        判定器（`runner::_content_judgements` 从 `document.content_checks` 读），
+        **模型收到的上下文里一个都没有** —— 于是模型按常识写、判定器按契约的尺子量 ⇒ 拒收；
+        而报告上这条长得像"运行期出错"，看不出是"规格没给到模型"。
+        ★ 13f 实测：T-03/04/05 连挂三跑，`sum=0.9992 != 1.0 (tol=1e-10)`；
+          31.8MB 归档里 `1e-10` 只出现在事后判定记录里。
+
+        归属规则（**结构性的，与任务领域无关**）：
+          · `applies_to == 本块产物`  ⇒ 给本块；
+          · 没写 `applies_to`（任务级）⇒ 约束全部产物 ⇒ 每个块都给；
+          · 其余                      ⇒ 不给（★ 判据不扩散：只管它真正约束的那一份）。
+
+        ★ 只做归属：不解释判据、不写"所以你应该…"、不把 `tol` 翻译成人话。
+        ★ 取不到契约 / 一条都不归本块 ⇒ 空（fail-closed：一个字都不加）。
+        """
+        output = str(self.subtask.output or "")
+        applicable = [
+            dict(check)
+            for check in self.content_checks
+            if not check.get("applies_to") or str(check.get("applies_to")) == output
+        ]
+        consumption = consumption_requirements(output, self.comparisons)
+        if not applicable and not consumption:
+            return {}
+        entry: dict[str, Any] = {"applies_to": output}
+        if applicable:
+            entry["invariants"] = applicable
+        if consumption:
+            entry["consumed_as"] = consumption
+        return entry
 
     def _write_region_entry(self) -> dict[str, Any]:
         """★ 本块的**写区**（相对工作目录）—— 按块变，所以进 brief（不进恒定前缀）。

@@ -524,6 +524,18 @@ class SourceRef:
     #: ★ `#33`: 这份来源属于哪个**模块** —— 切分的切口就落在模块边界上（`split_by_module`）。
     #: 空串 = 不属于任何模块（例如冻结的测试文件：只做载体，不参与写区）。
     module: str = ""  # external:decompose —— 模块轴读它
+    #: ★★ 这份来源是**已知位置**还是**一个还没定位的问题**。
+    #:
+    #:     "" / "file"     → 现状：`locator` 是确定的位置，`SourcePort.fetch` 取回来
+    #:     "research"      → `locator` 换成**问题本身**，由 `ResearchPort` 先找再冻
+    #:
+    #: ★ 缺省是空串（= 现状），这是 **fail-closed** 的默认值：
+    #:   既有契约一个字不改，行为逐字不变。
+    kind: str = ""  # external:runner —— `Runner._research` 按它分流：research 走 ResearchPort，其余走 SourcePort。# blame: fail-closed — 缺省即"已知位置"，不会把普通来源误当研究问题去搜
+    #: 研究问题（人话一句）—— 只有 `kind="research"` 时有意义。`locator` 留空。
+    question: str = ""  # external:runner/研究器 —— 原样搬进 `ResearchQuestion.question`。# blame: fail-closed — 空 = 非研究来源，不会被拿去搜
+    #: ★★ 种子地址：**起点，不是范围**。给了种子照样该自己往外扩。
+    seeds: tuple[str, ...] = ()  # external:research —— 研究器把它作为搜索起点。# blame: whitelist — 空种子合法（问题可以只给方向，让实作自己找入口）
 
     def __post_init__(self) -> None:
         _require_non_empty(self.ref, "SourceRef.ref must not be empty")
@@ -592,6 +604,12 @@ class Subtask:
     # Inference: which ontology-mapped fields this block produces, so
     # `concept_mapped` is checkable.
     output_fields: tuple[str, ...] = ()  # core:split —— concept_mapped 读它
+    #: ★★ 本块要读的来源窗口：`(ref, 起始行, 结束行)`，行号从 0 起、右开。空 = 不按窗口读
+    #: （回落的一份源一块：读哪份由 `goal` 说）。一个块可以携带多个窗口 —— 那正是
+    #: 「多份小源合成一块」的形态。
+    #: ★ 这是一条**声明**，不是一个注释：读者是 `services/tools.py::BoundTask.mysubtask`，
+    #:   它把 `reads` 原样放进 brief 交到模型手上（模型据此调带 offset/limit 的读工具）。
+    reads: tuple[tuple[str, int, int], ...] = ()  # external:services —— mysubtask 把窗口交进 brief。# blame: fail-closed — 缺省即"没有窗口声明"，不凭空指一个范围
 
     def __post_init__(self) -> None:
         _require_non_empty(self.id, "Subtask.id must not be empty")
@@ -601,6 +619,12 @@ class Subtask:
             self.axis in {"source", "entity", "window", "field", "module", "product"},
             f"unknown subtask axis: {self.axis}",
         )
+        for ref, start, end in self.reads:
+            _require_non_empty(ref, "Subtask.reads must name the source of a window")
+            _require(
+                type(start) is int and type(end) is int and 0 <= start < end,
+                f"Subtask.reads window must satisfy 0 <= start < end, got {start!r}..{end!r}",
+            )
 
 
 @dataclass(frozen=True)
@@ -667,6 +691,15 @@ class Recon:
     evidence: str = ""  # external:decompose —— 切分策略读侦察结论
     source_ids: tuple[str, ...] = ()  # external:decompose —— 侦察覆盖的源，切分读它
     findings: tuple[str, ...] = ()  # external:decompose —— 切分输入；decompose 模块未落地，当前无实现读者
+    #: ★★ 每一份已冻结来源的**逐行字符数**（不含换行）。这是"按大小开并行"唯一的尺寸事实：
+    #: 切分器据此把超预算的源切成按行对齐的窗口、把远小于预算的源合成一块读块。
+    #: ★ 为什么放在 recon 上：`DecomposerPort.split(contract, ontology, recon)` 是计划期
+    #:   唯一携带运行期数据的通道 —— 装配点构造 `Decomposer` 时还不知道取回了哪几份、多大。
+    #: ★ 空 = **没有尺寸事实** ⇒ 切分回落「一份源一块」（不凭空造一个尺寸）。
+    #: 名字里没有"content"：这是度量（每行多长），不是材料本身，recon 不携带正文。
+    source_lines: Mapping[str, tuple[int, ...]] = field(  # blame: fail-closed — 缺省即"没有尺寸事实"⇒不拆不合，回落到改动前的形状
+        default_factory=dict  # external:decompose —— 按大小切窗口 / 合成读块时读它
+    )
 
     # 说明：Recon 整体只作为 DecomposerPort.split 的入参出现，core 不解释它。
 
@@ -789,9 +822,59 @@ class Snapshot:
     body_path: Path  # external:sources —— 固化载体的位置，core 不打开
     captured_at: str  # core:checkers —— freshness 的时间戳比较读它
     source_kind: str = ""  # external:report (SOURCES.md) —— 溯源按来源分层；报告模块未落地，当前无实现读者
+    #: ★ 这条来源是**走哪条路**取回来的（`web-use` 纪律①：降级必须可见）。
+    #: 例：`jina` / `direct` / `github` / `rss`。空的 = 没走取网那条路（本地文件）。
+    #: 读者：`report/builders.py` 的 snapshots 段（报告要能看出"这条是备选后端给的"）。
+    backend: str = ""  # external:report —— SOURCES.md 列出"这条走的是哪条路"。# blame: fail-closed — 空 = 没走取网那条路（本地文件），不假装成网上的
+    #: ★★ 实际用的 ≠ 想要的 ⇒ True。降级来的内容**完整度可能打折**，
+    #: 下游要能知道这件事（否则它会当成一手材料用）。
+    #: 读者：① `report/builders.py` 的 snapshots 段；② 块的 brief（`produce.py`）。
+    degraded: bool = False  # external:report/agentloop —— 报告标出来 + brief 告诉块"这条打折了"。# blame: fail-closed — 缺省 False = 当作没降级，只有真降级时才标 True（不虚报）
 
     def __post_init__(self) -> None:
         _require_non_empty(self.ref, "Snapshot.ref must not be empty")
+
+
+@dataclass(frozen=True)
+class ResearchQuestion:
+    """一个**还没被定位到具体位置**的研究问题。
+
+    ★ 与 `SourceRef` 的区别是这条分工的根：
+      `SourceRef` 的 `locator` 是**已经确定的**位置 —— 取回来就行；
+      这里只知道"要找什么"，位置由研究者（`ResearchPort` 的实作）决定。
+      所以两者不能共用 `locator` 字段（那会把"位置"和"问题"挤进同一个名字）。
+
+    ★★ `seeds` 是**起点，不是范围**：给了种子照样该自己往外扩 ——
+       从一个页面里挖出更多相关来源，才是"研究"而不是"下载"。
+    """
+
+    ref: str  # external:contract —— 产出快照的名字前缀
+    question: str  # external:research —— 要找什么，人话一句
+    seeds: tuple[str, ...] = ()  # external:research —— 搜索起点。# blame: whitelist — 空种子合法（纯搜索型问题，渠道自己找入口）
+    channels: tuple[str, ...] = ()  # external:research —— 限定走哪些后端。# blame: whitelist — 空 = 不限定，由实作按【当前可用】的渠道定
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.ref, "ResearchQuestion.ref must not be empty")
+        _require_non_empty(self.question, "ResearchQuestion.question must not be empty")
+
+
+@dataclass(frozen=True)
+class ResearchBudget:
+    """一次检索花多少 —— 每一项缺省都是**保守**的那一侧。
+
+    ★ 与 `Budget`（整跑的钱）分开：这是**一次取数**的闸，
+      检索本身也可能失控（把整站扒下来），所以它自己要有上限。
+    """
+
+    max_sources: int = 8  # external:research —— 抓几份。# blame: fail-closed — 少抓比多抓好；要更多得显式声明
+    max_depth: int = 1  # external:research —— 从种子往外扩几层。# blame: fail-closed — 只扩一层，不默认爬
+    max_bytes: int = 4_000_000  # external:research —— 落盘上限。# blame: fail-closed — 单次检索约 4MB 封顶
+
+    def __post_init__(self) -> None:
+        if self.max_sources <= 0:
+            raise ValueError("ResearchBudget.max_sources must be positive")
+        if self.max_depth < 0:
+            raise ValueError("ResearchBudget.max_depth must not be negative")
 
 
 @dataclass(frozen=True)
@@ -916,6 +999,35 @@ class ModelResponse:
     carry_back: Mapping[str, Any] = field(  # external:agentloop —— 循环把它放进 assistant 行
         default_factory=dict
     )
+
+
+@dataclass(frozen=True)
+class EscalationRequest:
+    """一处求助的**内容** —— 这一块自己做不成，把"做不到 + 原因 + 证据"交出去。
+
+    ★ 端口只描述**交出去什么**；怎么交、等多久、对面是谁，是实作那一侧的事
+      （`core/` 不认识它们，也不该认识）。
+    ★ 为什么要有这个出口：实测（qwen4b14）三个块连挂三跑，失败读数**逐字相同** ——
+      重试与反思都试过之后，壳手里没有任何新东西可换，只能把它判死。
+      而"换个脑子看一遍"正是外部能提供的、壳自己产不出来的东西。
+    """
+    task_id: str  # external:report —— 报告按它归档
+    block: str  # external:report —— 求助的是哪一块（块自己能报的就是这个）
+    reason: str  # external:report —— 分类出来的失败身份
+    attempts: int  # external:report —— 一共失败了几次
+    # blame: whitelist — 省略即"没有细节"；求助照样发得出去（细节只是附带的证据）
+    detail: str = ""  # external:report —— 分类器给的细节原文
+
+
+@dataclass(frozen=True)
+class EscalationOutcome:
+    """拿回来的答复。★ 拿不到是**正常返回**（`answered=False`），不是异常 ——
+    交不出去不该把这一块判死（它本来就快做不成了）。"""
+    answered: bool  # external:agentloop —— 只有收到了才把答复注入上下文
+    # blame: fail-closed — 省略即"没有答复"⇒ 不注入上下文、落回降级（不会凭空当成功）
+    advice: str = ""  # external:agentloop —— 答复正文（注入给模型的那一段）
+    # blame: whitelist — 省略即"没说明白"，只影响留痕详尽度，不影响判定
+    detail: str = ""  # external:report —— 走的是什么路径 / 为什么没拿到
 
 
 @dataclass(frozen=True)

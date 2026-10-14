@@ -1,0 +1,13 @@
+# research-freeze 题的本体：期次 / 数值 / 产物文本。
+domain: research-feed
+version: "2026.1"
+
+concepts:
+  as_of: {label: 期次, kind: entity}
+  value: {label: 数值, kind: measure, unit: ratio}
+  text: {label: 产物文本, kind: attribute}
+
+units:
+  value: {symbol: ratio, scale: 1.0, base: ratio}
+
+calendar: {timezone: Asia/Shanghai}

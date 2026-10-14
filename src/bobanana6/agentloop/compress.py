@@ -32,9 +32,11 @@ from hashlib import sha256
 from typing import Any
 
 __all__ = [
+    "CHARS_PER_SIZE_UNIT",
     "TRUNCATION_MARKER",
     "CompressionPolicy",
     "CompressionResult",
+    "block_char_budget",
     "compact",
     "compression_threshold",
     "estimate_tokens",
@@ -47,6 +49,11 @@ __all__ = [
 TRUNCATION_MARKER = "…[truncated]"
 _SUMMARY_ROLE = "assistant"
 _SUMMARY_MARKER = "…[summary of dropped messages]"
+
+#: One size unit is this many payload characters. ``estimate_tokens`` and
+#: ``block_char_budget`` both derive from it, so a budget stated in size units
+#: and a payload measured in characters cannot silently drift apart.
+CHARS_PER_SIZE_UNIT = 4
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,23 @@ def compression_threshold(policy: CompressionPolicy) -> int:
     return int((policy.context_length - policy.max_tokens) * policy.pct)
 
 
+def block_char_budget(policy: CompressionPolicy, *, headroom: float = 0.7) -> int:  # blame: fail-closed — 缺省留 30% 余量，宁可多切几块，也不让块一进门就触发压缩
+    """How many payload characters one block's input may carry.
+
+    The anchor is the exact number ``compact`` compares against --
+    :func:`compression_threshold` (in size units) -- converted to characters with
+    the same ruler :func:`estimate_tokens` uses, then scaled by ``headroom`` so a
+    block's input lands *below* the trigger instead of on it.
+
+    Returns ``0`` when the policy is degenerate (see ``--max-output >=
+    --context-length``: the threshold collapses to 0); the caller must then treat
+    "no usable budget" as "no size policy" rather than as "split everything".
+    """
+    if not 0.0 < headroom <= 1.0:
+        raise ValueError("headroom must be in (0, 1]")
+    return max(0, int(compression_threshold(policy) * CHARS_PER_SIZE_UNIT * headroom))
+
+
 def digest(message: Mapping[str, Any]) -> str:
     payload = json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
     return sha256(payload.encode("utf-8")).hexdigest()
@@ -92,7 +116,7 @@ def estimate_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
     """A rough, deterministic size estimate -- never used to reset a breaker."""
     total = 0
     for message in messages:
-        total += 4 + max(1, len(_text(message)) // 4)
+        total += 4 + max(1, len(_text(message)) // CHARS_PER_SIZE_UNIT)
     return total
 
 

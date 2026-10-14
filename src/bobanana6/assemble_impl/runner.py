@@ -39,7 +39,7 @@ from ..agentloop.attribution import (
 )
 from ..agentloop.events import EventLog
 from ..agentloop.metrics import text_tool_call_metrics, tool_metrics
-from ..contract import ContractDocument
+from ..contract import SOURCE_KIND_RESEARCH, ContractDocument
 from ..core.assemble import AssemblyReport, check_assembly
 from ..core.capabilities import BlockSpec, Capability, WorkerCapabilities
 from ..core.checkers.base import CheckContext
@@ -60,6 +60,8 @@ from ..core.model import (
     Ontology,
     Provenance,
     Recon,
+    ResearchBudget,
+    ResearchQuestion,
     Snapshot,
     SnapshotBody,
     SourceRef,
@@ -69,7 +71,13 @@ from ..core.model import (
     Verdict,
 )
 from ..core.ontology import validate_ontology
-from ..core.ports import DecomposerPort, OntologyPort, SnapshotReader, SourcePort
+from ..core.ports import (
+    DecomposerPort,
+    OntologyPort,
+    ResearchPort,
+    SnapshotReader,
+    SourcePort,
+)
 from ..core.split import SplitReport, check_split
 from ..report import ReportBundle, build_reports
 from ..services import (
@@ -81,8 +89,16 @@ from ..services import (
 )
 from ..services.artifacts import ArtifactStore, BlockRecord
 from ..services.ci import invariant_findings, truncation_findings
+from ..services.textops import split_lines
 from ..services.traces import TraceStore
-from ..sources import SnapshotStore, SourceError
+from ..sources import (
+    SnapshotStore,
+    SourceError,
+    SourceFormError,
+    decode_body,
+    form_for,
+    forms_for,
+)
 from .produce import artifact_from_disk
 from .runtime import (
     BlockDeclined,
@@ -180,6 +196,12 @@ class Runner:
     #: 工作区（或显式关掉）—— 那就没有可提交的文件，追溯也随之关闭（如实，不假装）。
     #: 默认由 `workspace` 派生（`<workspace>.parent/artifacts`），见 `_artifact_store`。
     artifacts: ArtifactStore | None = None
+    #: ★★ 研究类取数的入口（`core/ports.py::ResearchPort`）。``None`` = 这个部署不会上网。
+    #: 契约里出现 `kind: research` 的来源而这里是 ``None`` ⇒ **具名拒**（不静默跳过那条来源，
+    #: 那会让"没上网"看起来像"查过了但没有"）。
+    researcher: ResearchPort | None = None  # blame: fail-closed — None ⇒ 声明了研究来源就【具名拒】，不静默跳过
+    #: 一次检索花多少。缺省即 `ResearchBudget` 的保守值（8 份 / 扩 1 层 / 4MB）。
+    research_budget: ResearchBudget = field(default_factory=ResearchBudget)  # blame: fail-closed — 缺省走 ResearchBudget 自己的保守值，不在这里另写一套
 
     # -- the pipeline ------------------------------------------------------ #
 
@@ -214,6 +236,9 @@ class Runner:
             evidence=f"fetched {len(snapshots)} of {len(contract.sources)} declared sources",
             source_ids=tuple(sorted(snapshots)),
             findings=tuple(f"{ref}: {snapshot.source_kind}" for ref, snapshot in sorted(snapshots.items())),
+            # ★★ 尺寸事实交给切分器：`recon` 是 `DecomposerPort.split` 唯一能带运行期数据的
+            #   通道（装配点建 `Decomposer` 时还不知道取回了哪几份、多大）。
+            source_lines=self._source_lines(contract, snapshots),
         )
         plan = self.decomposer.split(contract, ontology, recon)
         bundle = self.constraint_source.compile(contract, plan, ontology)
@@ -398,7 +423,7 @@ class Runner:
             #   **绝不升格**成整跑失败；产物照旧进 pieces（既有"失败≠不存在"的规矩）。
             #   （`artifact` 要到下面才赋值 ⇒ 这里直接取，避免顺序耦合）
             content_failures, content_notices = self._content_judgements(
-                subtask, candidate.artifact(subtask.output), pieces
+                subtask, candidate.artifact(subtask.output), pieces, handoffs
             )
             if content_failures:
                 verdict = replace(
@@ -576,6 +601,9 @@ class Runner:
         """
         snapshots: dict[str, Snapshot] = {}
         for source in contract.sources:
+            if source.kind == SOURCE_KIND_RESEARCH:
+                snapshots.update(self._research(source))
+                continue
             try:
                 snapshots[source.ref] = self.fetcher.fetch(SourceRef(ref=source.ref, locator=source.locator))
             except SourceError as exc:
@@ -590,6 +618,95 @@ class Runner:
                 ("fetch_failed",),
             )
         return snapshots
+
+    def _source_lines(
+        self, contract: TaskContract, snapshots: Mapping[str, Snapshot]
+    ) -> dict[str, tuple[int, ...]]:
+        """Each frozen source's **per-line character counts** -- the size fact the splitter runs on.
+
+        ★ Only the *sizes* leave this method; the text itself is dropped on the spot.
+        ★ Lines are split with `services.textops.split_lines`, the same ruler
+          `sources.read` uses -- otherwise a window boundary computed here would not
+          be the boundary the block can re-request (`offset`/`limit` are line-addressed).
+        ★ A source whose size cannot be measured keeps **no entry**, so the splitter
+          falls back to one block for it rather than treating "unknown" as zero
+          (the failure direction stays conservative).
+        """
+        forms = forms_for(contract.sources)
+        measured: dict[str, tuple[int, ...]] = {}
+        for ref, snapshot in sorted(snapshots.items()):
+            try:
+                text = decode_body(self.store.read(snapshot), form_for(forms, ref)).text
+            except (SourceError, SourceFormError, OSError, ValueError, TypeError, UnicodeError, LookupError) as exc:
+                self.fetch_failures.setdefault(ref, f"size probe failed: {type(exc).__name__}: {exc}")
+                continue
+            measured[ref] = tuple(len(line) for line in split_lines(text))
+        return measured
+
+    def _research(self, source: SourceRef) -> dict[str, Snapshot]:
+        """把一条【研究来源】展开成一批快照 —— 名字里带冒号的那些（`<ref>:1`, `<ref>:2`…）。
+
+        ## 权限：**契约本身就是开关**，不另造一个
+
+        ```
+        契约声明了 kind: research  ⇒ 允许上网（这道题就是要上网查）
+        契约没有这条              ⇒ 压根不上网（既有契约一个字不改）
+        ```
+
+        ★ 再加一道 fail-closed 的拒：**`visibility` 不是 `open` 却要研究** ⇒ 当场拒。
+          判分结果藏着不给块看、同时让它在网上找 —— 那组合的实际效果是
+          "绕过判分器去网上找答案"（13f 那类题的底层数据是公开的）。
+          这不是能力，是作弊通道，所以它必须是一道**显式的拒**而不是一条注释。
+
+        ★ `research()` 返回的第一份是检索清单（ref 就是 `source.ref`），
+          其余是材料（ref 是 `<source.ref>:<i>`）—— 全都进快照表，
+          下游照旧只认识 `Snapshot`，四套机制一个字不用改。
+        """
+        if self.document.content_checks.visibility != "open":
+            raise RunRefused(
+                "sources",
+                f"source {source.ref!r} asks for research, but content_checks.visibility is "
+                f"{self.document.content_checks.visibility!r} -- a task that hides its checks "
+                "must not also go looking for the answer on the network",
+                ("research_forbidden",),
+            )
+        if self.researcher is None:
+            raise RunRefused(
+                "sources",
+                f"source {source.ref!r} asks for research, but no researcher is wired into "
+                "this deployment (a silent skip would read as 'searched, found nothing')",
+                ("research_unavailable",),
+            )
+        question = ResearchQuestion(ref=source.ref, question=source.question, seeds=source.seeds)
+        try:
+            found = self.researcher.research(question, self.research_budget)
+        except Exception as exc:  # noqa: BLE001 — 取数失败是一种**已归因**的结果，不是一个崩点
+            self.fetch_failures[source.ref] = f"{type(exc).__name__}: {exc}"
+            return {}
+        return {snapshot.ref: snapshot for snapshot in found}
+
+    def _authorized(
+        self, contract: TaskContract, snapshots: Mapping[str, Snapshot]
+    ) -> tuple[SourceRef, ...]:
+        """本块**可以读**的来源 = 契约声明的 + 本次实际冻住的。
+
+        ★★ 为什么必须加上后者（实测的账）：**研究来源在契约里只声明"要找什么"**，
+          具体找到哪几份是**运行时**才知道的（`hunt` 展开成 `hunt:1`…`hunt:8`）。
+          那些材料已经冻在快照表里、带着完整溯源，就是块该读的东西。
+
+          ★ 不加这一步的后果实测过：`sources.read {"ref":"hunt:1"}` 被判
+            `PermissionError: not authorized`，块拿得到检索清单、**一份材料都读不到**，
+            只能去 `ls` 自己的目录乱找，最后三个块全部 `failed: no_output`。
+            —— 取数那一层是全通的，断的是**接缝**。
+
+        ★ 这里**没有放宽任何东西**：只有【本次真的冻结过】的 ref 才进得来，
+          块自己编的名字仍然进不来（判据仍是 `ref in self.refs()`）。
+        """
+        declared = {source.ref for source in contract.sources}
+        expanded = tuple(
+            SourceRef(ref=ref) for ref in sorted(snapshots) if ref not in declared
+        )
+        return tuple(contract.sources) + expanded
 
     def _custom_checks(self) -> Mapping[str, Callable[..., Any]]:
         """The ``custom`` checks this host is willing to run (see services/checks.py)."""
@@ -714,7 +831,7 @@ class Runner:
             subtask=subtask,
             contract=self.document.contract,
             ontology=ontology,
-            authorized=self.document.contract.sources,
+            authorized=self._authorized(self.document.contract, snapshots),
             fetched=snapshots,
             upstream=upstream,
             checks=checks,
@@ -831,7 +948,11 @@ class Runner:
         )
 
     def _content_judgements(
-        self, subtask: Subtask, artifact: Artifact | None, pieces: Mapping[str, Any]
+        self,
+        subtask: Subtask,
+        artifact: Artifact | None,
+        pieces: Mapping[str, Any],
+        handoffs: Mapping[str, Mapping[str, Any]] | None = None,  # blame: fail-closed — 省略即"没有上游交接件"⇒一条失败来源都指认不出（既有读数一字不变）
     ) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
         """★ 改动 A：把"产物打开能不能正常用"变成**确定性判据**。
 
@@ -863,13 +984,46 @@ class Runner:
                 },
             )
         invariants = tuple(getattr(checks, "invariants", ()) or ())
+        # ★★ 乙：**上游判失败（或被弃权）⇒ 它那份产物不参与本块的判据**。
+        #
+        #   为什么：产物照发给下游是"失败 ≠ 不存在"（`_publish_disk_artifact` 的规矩），
+        #   但"这份料是坏的"这口锅在**产出它的那一块**，不在拿它的人身上。
+        #   实测（qwen4b14）：T-02 被 503 打挂 ⇒ 产物照发下游 ⇒ 判据在 T-03/04/05
+        #   身上各跑一遍，三块全挂 —— 而它们**写不了那个文件**，改无可改，
+        #   报告上还长得像"这三块自己算错了"。
+        #
+        #   ★ 另一半（缺了它这条就是掩盖）：**上游自己也得挨判**。本块产出自己那份
+        #     照旧进 payload（下面的 `setdefault`），所以产出者跑得完就跑不掉。
+        #   ★ 分档：这条**只记录不拒**（与截短判据同一档，进 `content_notices`）——
+        #     "下游拿着坏输入还硬交"仍然是事实，报告要能追到，但不记在它头上。
+        from_failed: list[dict[str, Any]] = []  # blame: fail-closed — 空 = 没有上游失败要记；这一档【只记录不拒】，空白即无人被指认
+        skipped_names: set[str] = set()
+        if handoffs:
+            for name in pieces:
+                record = handoffs.get(str(name)) or {}
+                verdict_of_producer = str(record.get("producer_verdict") or "")
+                if verdict_of_producer not in ("failed", "declined"):
+                    continue
+                skipped_names.add(str(name))
+                from_failed.append(
+                    {
+                        "judgement": "input_from_failed_block",
+                        "who": str(record.get("from") or ""),
+                        "expected": "the producer of this input passed; it did not",
+                        "got": f"{name} (producer_verdict={verdict_of_producer})",
+                        "violated": (
+                            f"{name} comes from {record.get('from') or '?'} which was judged "
+                            f"{verdict_of_producer} -- it is NOT charged to this block"
+                        ),
+                    }
+                )
         payload = {
             str(name): {
                 "columns": [{"name": column.name, "dtype": column.dtype} for column in piece.columns],
                 "rows": [dict(row) for row in piece.rows],
             }
             for name, piece in pieces.items()
-            if isinstance(piece, Artifact)
+            if isinstance(piece, Artifact) and str(name) not in skipped_names
         }
         if artifact is not None:
             payload.setdefault(
@@ -909,7 +1063,7 @@ class Runner:
                     ]
                 },
             )
-        notices = truncation_findings(payload)
+        notices = (*truncation_findings(payload), *from_failed)
         return violations, notices
 
     def _cleanliness(self) -> dict[str, Any]:

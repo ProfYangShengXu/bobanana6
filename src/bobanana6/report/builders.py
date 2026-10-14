@@ -316,6 +316,10 @@ def render_summary(
                 "ref": snapshot.ref,
                 # reader for Snapshot.source_kind
                 "source_kind": snapshot.source_kind,
+                # reader for Snapshot.backend / Snapshot.degraded —— 报告要能看出
+                # "这条是走哪条路取回来的、是不是降级拿到的"（`web-use` 纪律②）
+                "backend": snapshot.backend,
+                "degraded": snapshot.degraded,
                 "captured_at": snapshot.captured_at,
                 "body_path": str(snapshot.body_path),
             }

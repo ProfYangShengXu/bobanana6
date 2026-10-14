@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from .errors import BobananaAction
+from .errors import SERVER_SIDE_REASONS, BobananaAction
 from .gate import GateVerdict
 
 __all__ = [
@@ -68,6 +68,11 @@ class RecoveryAction(StrEnum):
     REFORMAT = "reformat"
     SWITCH_SOURCE = "switch_source"  # change worker / model / provider
     DEGRADE_SINGLE_AGENT = "degrade_single_agent"  # the split itself is wrong
+    #: ★★ 交给**外部**再试一次 —— 重试与反思都试过、壳手里再没有新东西可换时的出口。
+    #: 与 `DEGRADE_SINGLE_AGENT` 的区别：那个是"认输，换单 agent 收摊"，这个是
+    #: "把做不到 + 原因 + 证据交出去，换一个脑子看一遍"。
+    #: ★ 只在**有端口**时才可能被选中：没有实作时它退化成原来的降级（既有读数一字不变）。
+    ESCALATE = "escalate"
     DECLINE = "decline"  # report we cannot get it -- not a failure
     ABORT = "abort"  # stop; do not retry
 
@@ -227,6 +232,7 @@ def decide_recovery(
     classification: str = "",
     reflections: int = 0,
     has_feedback: bool = False,
+    can_escalate: bool = False,  # blame: fail-closed — 省略即"没有外部出口"⇒ 退化成原来的降级（既有读数一字不变）
 ) -> RecoveryDecision:
     """Pick the next exit for a failure.
 
@@ -263,6 +269,13 @@ def decide_recovery(
         )
 
     if action is BobananaAction.RETRY_LOCAL:
+        # ★★ 服务端类的失败（503 忙 / 5xx / 限速 / 网络超时）：**不走"拿着事实反思"那条**。
+        #   为什么：反思的前提是"模型能改"。服务端忙它改不了 —— 重发的是一模一样的东西，
+        #   把报错文本灌进上下文只是白占位置，而**它真正需要的是等一等再打**。
+        #   实测（qwen4b14）：T-01/T-02 被 503 打挂，走的正是下面 `detail.strip()` 那支
+        #   ⇒ 注入了原因、**没退避**，两次瞬间用完 ⇒ 块被判死。
+        #   ★ 判据是**错误身份**（`FailoverReason`），不是措辞猜测。
+        server_side = str(failure or "") in SERVER_SIDE_REASONS
         # ★ retry != reflect (module docstring): a retry resends the same input for
         #   a transient fault; a reflection hands the failure reason back for a
         #   capability shortfall. When the rejection carries concrete facts (a gate
@@ -272,13 +285,23 @@ def decide_recovery(
         #   rejections before degrading -- only which of them carry the reason.
         can_reflect = reflections < max_reflections
         if attempts >= max_retries + max_reflections:
+            # ★★ 重试与反思都用完了 ⇒ 壳手里**没有新东西可换**了（实测 qwen4b14：
+            #    三跑连挂、失败读数逐字相同）。有外部出口就先交给它 ——
+            #    "换个脑子看一遍"是壳自己产不出来的那一件；没有才认输降级。
+            if can_escalate:
+                return RecoveryDecision(
+                    action=RecoveryAction.ESCALATE,
+                    reason="retries and reflections are spent; hand it to the outside",
+                    attempts=attempts,
+                    tainted_tools=tainted,
+                )
             return RecoveryDecision(
                 action=RecoveryAction.DEGRADE_SINGLE_AGENT,
                 reason="retries and reflections exhausted; stop fanning out",
                 attempts=attempts,
                 tainted_tools=tainted,
             )
-        if detail.strip() and can_reflect:
+        if detail.strip() and can_reflect and not server_side:
             return RecoveryDecision(
                 action=RecoveryAction.REFLECT,
                 reason="the rejection carries concrete facts; reflect on them instead of resending",
@@ -293,7 +316,13 @@ def decide_recovery(
                 attempts=attempts,
                 tainted_tools=tainted,
             )
-        if can_reflect:
+        if can_reflect and not server_side:
+            # ★★ `not server_side` 这一半是**补堵**的：上面那个 REFLECT 出口堵住了，
+            #   这个出口原本还漏着 —— 实测（`tests/test_escalation.py`）：
+            #   `attempts=4, max_retries=4, max_reflections=1` 时，503 走到这里
+            #   ⇒ 还是"注入原因 + 不退避"，与上面那个出口同一个病。
+            #   服务端忙**没有可反思的东西**，给它一条"换个办法"的提示只会白占上下文；
+            #   它该落到下面那条 RETRY（生产接线点会退避）。
             return RecoveryDecision(
                 action=RecoveryAction.REFLECT,
                 reason="retries exhausted; add the failure reason and try a different approach",

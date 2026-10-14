@@ -29,6 +29,7 @@ __all__ = [
     "DECLARED_REASON_ATTRIBUTE",
     "PROGRESS_RULER",
     "REASON_ACTION",
+    "SERVER_SIDE_REASONS",
     "BobananaAction",
     "ClassifiedError",
     "FailoverReason",
@@ -110,6 +111,24 @@ REASON_ACTION: Mapping[FailoverReason, BobananaAction] = {
 #: What an unclassifiable failure does. Hermes retries ``unknown`` with backoff,
 #: and the retry budget (agentloop/loop, step 21) is the ceiling. Keeping that
 #: default means an unrecognised error cannot become a silent abort.
+#: ★★ **服务端类的失败**：503/529（服务太忙）、5xx、限速、网络超时 —— 它们的共同点是
+#: **模型改不了**：重发的是一模一样的东西，服务器还是忙。
+#: ⇒ 处置是**等一等再打**（退避重发），不是"把报错文本灌进上下文让它反思"。
+#: ★ 两个读者：`recovery.decide_recovery`（别把这类送进"拿着事实反思"那支）、
+#:   `loop`（这类才退避；其余的回灌原因）。判据是**错误身份**，不是措辞猜测。
+#: 实测（qwen4b14）：T-01/T-02 被 `HTTP 503 System is too busy now` 打挂，走了反思那支 ⇒
+#: 注入了原因、**没退避**、两次瞬间用完 ⇒ 块被判死。
+SERVER_SIDE_REASONS: frozenset[str] = frozenset(
+    str(reason)
+    for reason in (
+        FailoverReason.OVERLOADED,
+        FailoverReason.SERVER_ERROR,
+        FailoverReason.RATE_LIMIT,
+        FailoverReason.UPSTREAM_RATE_LIMIT,
+        FailoverReason.TIMEOUT,
+    )
+)
+
 _UNKNOWN_ACTION = BobananaAction.RETRY_LOCAL
 
 #: Discipline (1) as data: which ruler measures progress for a reason. A 413 is

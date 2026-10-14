@@ -113,10 +113,14 @@ def test_the_early_reflection_does_not_widen_the_attempt_budget() -> None:
 
 
 def test_reflect_carries_the_failure_reason_back_into_the_context() -> None:
-    decision = decide(attempts=2, failure="timeout", detail="read timed out")
+    # ★ 这条原来举的例子是 `failure="timeout"`，但 `timeout` 现在归**服务端类**
+    #   （`errors.SERVER_SIDE_REASONS`）：网络超时该做的是**等一等再打**，不是反思
+    #   ⇒ 它已经不走这一支了（回归闸在 `tests/test_escalation.py` 里）。
+    #   本条要测的是"反思要**把原因带回上下文**"，换个模型自己能改的失败来举。
+    decision = decide(attempts=2, failure="verification did not pass", detail="read timed out")
     assert decision.action is RecoveryAction.REFLECT
     assert decision.injected is not None
-    assert "timeout" in decision.injected and "read timed out" in decision.injected
+    assert "verification did not pass" in decision.injected and "read timed out" in decision.injected
 
 
 def test_taint_outranks_a_generic_retry() -> None:

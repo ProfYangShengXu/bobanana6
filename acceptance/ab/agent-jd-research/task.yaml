@@ -1,0 +1,79 @@
+# 真实开放性研究题：大厂 AI Agent 岗「招聘要求 + 面经」全套学习攻略
+#
+# ★ 这是**第一道真用上研究类取数**的题：
+#   契约里声明 research 来源 ⇒ bb6 自己去网上找、抓回来、冻住，
+#   而且给的种子只是**起点**，它会从抓回来的正文里自己往外扩。
+#
+# ★ `visibility: open` 是必需的 —— `Runner._research` 对非 open 的任务**具名拒**
+#   （判分结果藏着不给块看、同时让它在网上找 = 绕过判分器）。
+task_id: agent-jd-research
+goal: >
+  调研 2026 年大厂（字节/腾讯/阿里/百度/美团/快手/小红书/华为/微软/OpenAI 等）
+  AI Agent 岗与 LLM 应用岗的**招聘要求**与**真实面试考点**，
+  产出三份可直接用的材料：JD 要求矩阵、面经题库、以及一套分阶段的学习攻略。
+version: 1
+statement: instruction
+
+deliverables:
+  # ★ 四份产物：前三份是"研究结果"，最后一份是"研究过程的自证"。
+  #   层次由契约声明：三份材料各自独立，统计那份汇总前三份。
+  - name: output/jd-matrix.md
+    schema: {text: str}
+  - name: output/interview-bank.md
+    schema: {text: str}
+  - name: output/roadmap.md
+    schema: {text: str}
+  - name: output/summary.json
+    schema: {text: str}
+    depends_on: [output/jd-matrix.md, output/interview-bank.md, output/roadmap.md]
+
+sources:
+  - {ref: instruction, locator: input/instruction.md}
+  # ★★ 研究来源：`question` 是要找什么，`seeds` 是**起点不是范围**。
+  #   以下四个都是实测从本机（WSL 侧）curl 返回 200 的地址。
+  - ref: hunt
+    kind: research
+    question: "2026 年大厂 AI Agent 岗与 LLM 应用岗的招聘要求、真实面试考点、以及转型准备路径"
+    seeds:
+      - "https://raw.githubusercontent.com/harrisliangsu/ai-agent-engineer-handbook/main/interview-prep/jd-requirements.md"
+      - "https://raw.githubusercontent.com/AAAAhuihui/agent/main/%E5%AD%97%E8%8A%82%E8%B7%B3%E5%8A%A8/%E7%9C%9F%E5%AE%9E%E9%9D%A2%E7%BB%8F-%E7%89%9B%E5%AE%A2%E5%AE%9E%E5%BD%95.md"
+      - "https://raw.githubusercontent.com/AAAAhuihui/agent/main/Agent%E5%B7%A5%E7%A8%8B%E5%B8%88%E5%AD%A6%E4%B9%A0%E8%B7%AF%E7%BA%BF%E5%9B%BE.md"
+      - "https://notes.kamacoder.com/interview/llm/20260506bytedance.html"
+
+constraints:
+  hard:
+    - id: C-jd-matrix-has-companies
+      kind: custom
+      target: output/jd-matrix.md
+      spec:
+        check: shell_command
+        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import pathlib,re; t=pathlib.Path('_run/workspace/output/jd-matrix.md').read_text(encoding='utf-8'); ls=[l for l in t.splitlines() if l.startswith('|')]; assert len(ls)>=8, f'表格行太少({len(ls)})，要求至少覆盖 6 家公司'; print('ok', len(ls))\""
+      rationale: "JD 矩阵必须是一张真表（表头+分隔+至少 6 行公司），不是散文"
+    - id: C-interview-bank-has-questions
+      kind: custom
+      target: output/interview-bank.md
+      spec:
+        check: shell_command
+        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import pathlib,re; t=pathlib.Path('_run/workspace/output/interview-bank.md').read_text(encoding='utf-8'); q=re.findall(r'^\\s*(?:\\d+[.、)]|[-*])\\s+.{6,}', t, re.M); assert len(q)>=25, f'题目条数不足({len(q)})，要求至少 25 道'; print('ok', len(q))\""
+      rationale: "题库至少 25 道题（材料里真题远超这个数）"
+    - id: C-roadmap-is-staged
+      kind: custom
+      target: output/roadmap.md
+      spec:
+        check: shell_command
+        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import pathlib,re; t=pathlib.Path('_run/workspace/output/roadmap.md').read_text(encoding='utf-8'); h=re.findall(r'^#{2,3}\\s+\\S', t, re.M); assert len(h)>=5, f'阶段标题不足({len(h)})，要求至少 5 段'; assert len(t)>=2000, f'攻略太短({len(t)}字)'; print('ok', len(h), len(t))\""
+      rationale: "攻略要有至少 5 个阶段且正文不少于 2000 字 —— 这是这份交付物的主件"
+
+content_checks:
+  # ★ 本题没有官方判分器（自建题），所以显式声明"没有内容检查"。
+  #   契约要求"没有"必须说出来（`none: true`），不能靠沉默。
+  none: true
+  # ★★ 必须 open：研究类取数在判断处会读它。见 `Runner._research`。
+  visibility: open
+
+limits: {max_rounds: 6}
+notes: |
+  ★ 这道题判的是**研究 + 综合**，不是"有没有抄对"：
+  材料是真实网页，内容会变、来源会互相重叠，所以判据落在
+  **结构**（矩阵有公司、题库有题、攻略分段）而不是"某个具体句子对不对"。
+  ★ 每份材料里的**出处引用**由块的溯源机制管（引用要能指到具体来源行）。

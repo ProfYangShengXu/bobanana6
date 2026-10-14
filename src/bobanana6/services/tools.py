@@ -131,6 +131,10 @@ class BoundTask(TaskTools):
             "axis": block.axis,
             "mode": block.mode,
             "output_fields": list(block.output_fields),
+            # ★★ 本块要读的来源窗口（`core/model.py::Subtask.reads`）：`(ref, 起始行, 结束行)`，
+            #   0 起、右开。空 = 不按窗口读。没有这一格，窗口就只是 `goal` 里的一句散文 ——
+            #   这一格把它变成模型能直接照着调的 `sources.read(ref, offset, limit)`。
+            "reads": [{"ref": ref, "start": start, "end": end} for ref, start, end in block.reads],
         }
 
     def upstream(self, name: str) -> Mapping[str, Any]:

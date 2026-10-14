@@ -11,6 +11,8 @@ from bobanana6.contract import compile_bundle, parse_contract
 from bobanana6.core.model import AssemblyOutcome, Recon
 from bobanana6.core.split import check_split, subtask_layers
 from bobanana6.decompose import (
+    SIZE_AWARE_SPLIT,
+    BlockBudget,
     Decomposer,
     RoundBudget,
     RoundBudgetExceeded,
@@ -451,3 +453,191 @@ def test_a_contract_written_out_of_order_is_still_emitted_in_topological_order()
     assert [depth[block.id] for block in plan.subtasks] == [0, 1, 2]
     bundle = compile_bundle(document, plan)
     assert check_split(plan, document.contract, bundle, ontology(), frozen_hash=ontology().content_hash()).ok
+
+
+# --------------------------------------------------------------------------- #
+# ★★ 按大小开并行：一份源超预算 ⇒ 拆窗口；多份小源 ⇒ 合成一块
+# --------------------------------------------------------------------------- #
+
+#: 一道最小的"研究来源展开出多份材料"的题：`hunt` 在运行时展开成 `hunt:1`…
+RESEARCH = """
+task_id: research-1
+goal: survey the field
+deliverables:
+  - {name: notes.csv, schema: {pd: float}}
+  - {name: summary.csv, schema: {pd: float}, depends_on: [notes.csv]}
+sources:
+  - {ref: instr}
+  - {ref: hunt, kind: research, question: "which vendors matter", seeds: ["https://a.example"]}
+"""
+
+
+def research_contract():
+    return parse_contract(RESEARCH).contract
+
+
+def research_recon(source_lines=None):
+    return Recon(
+        evidence="probe",
+        source_ids=("hunt", "hunt:1", "hunt:2", "instr"),
+        source_lines=source_lines if source_lines is not None else {},
+    )
+
+
+def _small_lines():
+    # `hunt:1` (200 short lines) is far over a 1000-char budget; the other three fit.
+    return {
+        "hunt": (10,) * 5,
+        "hunt:1": (5,) * 200,
+        "hunt:2": (10,) * 4,
+        "instr": (10,) * 6,
+    }
+
+
+def _read_blocks(plan):
+    return [block for block in plan.subtasks if block.mode == "read"]
+
+
+def _cost(block, lines, budget: BlockBudget) -> int:
+    return sum(budget.cost_of(lines[ref][start:end]) for ref, start, end in block.reads)
+
+
+def test_size_aware_read_layer_splits_big_and_merges_small() -> None:
+    """★★ 判据是**大小**，不是"源有几份"。
+
+    同一份 recon：`hunt:1` 超过预算 ⇒ 拆成多个窗口；`hunt` / `hunt:2` / `instr`
+    都远小于预算 ⇒ 合成一个读块。两侧都断言，缺一侧都不算。
+    """
+    lines = _small_lines()
+    budget = BlockBudget(1000)
+    plan = Decomposer(strategy="source", block_budget=budget).split(
+        research_contract(), ontology(), research_recon(lines)
+    )
+    reads = _read_blocks(plan)
+
+    # ① 超预算的源被拆：`hunt:1` 落在 >= 2 个读块里。
+    homes = {block.id for block in reads if any(ref == "hunt:1" for ref, _, _ in block.reads)}
+    assert len(homes) >= 2, f"hunt:1 没有被拆开：{[(b.id, b.reads) for b in reads]}"
+
+    # ② 小源被合：存在一个读块覆盖 >= 2 份不同的源。
+    covered = [{ref for ref, _, _ in block.reads} for block in reads]
+    assert max(len(group) for group in covered) >= 2, f"小源没有被合成一块：{covered}"
+
+    # ③ 每个读块的输入都落在预算内（每一行都是行边界）。
+    for block in reads:
+        assert _cost(block, lines, budget) <= budget.max_chars, (block.id, block.reads)
+
+    # ④ 读层的切口是 `window`，且窗口被**声明**出来（不是只在 goal 里当散文）。
+    assert all(block.axis == "window" for block in reads)
+    assert all(block.reads for block in reads)
+
+
+def test_the_size_aware_plan_is_still_legal() -> None:
+    lines = _small_lines()
+    plan = Decomposer(strategy="source", block_budget=BlockBudget(1000)).split(
+        research_contract(), ontology(), research_recon(lines)
+    )
+    assert plan.shape == "layered"
+    bundle = compile_bundle(parse_contract(RESEARCH), plan)
+    report = check_split(plan, research_contract(), bundle, ontology(), frozen_hash=ontology().content_hash())
+    assert report.ok, report.codes()
+
+
+def test_switching_the_size_policy_off_returns_the_pre_change_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 反证：关掉按大小切/合 ⇒ 读层回到「一份源一块」（改动前的形状）。"""
+    from bobanana6.decompose import strategies
+
+    on = Decomposer(strategy="source", block_budget=BlockBudget(1000)).split(
+        research_contract(), ontology(), research_recon(_small_lines())
+    )
+    monkeypatch.setattr(strategies, "SIZE_AWARE_SPLIT", False)
+    off = Decomposer(strategy="source", block_budget=BlockBudget(1000)).split(
+        research_contract(), ontology(), research_recon(_small_lines())
+    )
+
+    assert SIZE_AWARE_SPLIT is True  # the capability `split_read_then_product` reads
+    assert len(_read_blocks(on)) != len(_read_blocks(off))
+    assert [block.output for block in _read_blocks(off)] == [
+        "part-hunt.csv",
+        "part-hunt:1.csv",
+        "part-hunt:2.csv",
+        "part-instr.csv",
+    ]
+    assert all(block.axis == "source" and block.reads == () for block in _read_blocks(off))
+
+
+def test_no_budget_is_the_pre_change_shape_too() -> None:
+    """★ 反证的第二臂：预算设成"没有"（/ 无穷大）同样退回改动前的形状。"""
+    plan = Decomposer(strategy="source").split(
+        research_contract(), ontology(), research_recon(_small_lines())
+    )
+    reads = _read_blocks(plan)
+    assert [block.output for block in reads] == [
+        "part-hunt.csv",
+        "part-hunt:1.csv",
+        "part-hunt:2.csv",
+        "part-instr.csv",
+    ]
+    assert all(block.axis == "source" and block.reads == () for block in reads)
+
+
+def test_a_recon_without_size_facts_falls_back_to_one_block_per_source() -> None:
+    """★ 没有尺寸事实 ⇒ 不拆不合（F8：既有 acceptance 的 recon 不带尺寸）。"""
+    plan = Decomposer(strategy="source", block_budget=BlockBudget(1000)).split(
+        research_contract(), ontology(), research_recon(None)
+    )
+    assert [block.output for block in _read_blocks(plan)] == [
+        "part-hunt.csv",
+        "part-hunt:1.csv",
+        "part-hunt:2.csv",
+        "part-instr.csv",
+    ]
+
+
+def test_a_single_line_over_budget_is_emitted_alone_not_dropped() -> None:
+    """边界：一行就超过预算时，它**单独成块**（不丢、不从中间切开）。
+
+    `sources.read` 是**按行**寻址的 ⇒ 行是这条轴上最小的切口；切在行中间会造出
+    一个读工具表达不出来的范围（LangChain 对这种情况只打一条 warning，这里把它
+    变成显式、有界的例外）。
+    """
+    lines = {"hunt": (5000,), "hunt:1": (5,) * 10, "hunt:2": (5,) * 10, "instr": (5,) * 10}
+    budget = BlockBudget(1000)
+    plan = Decomposer(strategy="source", block_budget=budget).split(
+        research_contract(), ontology(), research_recon(lines)
+    )
+    block = next(b for b in _read_blocks(plan) if any(ref == "hunt" for ref, _, _ in b.reads))
+    assert block.reads == (("hunt", 0, 1),), block.reads
+
+
+def test_the_size_layout_is_deterministic() -> None:
+    lines = _small_lines()
+
+    def build():
+        return Decomposer(strategy="source", block_budget=BlockBudget(1000)).split(
+            research_contract(), ontology(), research_recon(lines)
+        )
+
+    first, second = build(), build()
+    assert first.subtasks == second.subtasks
+
+
+def test_the_block_budget_must_be_a_real_budget() -> None:
+    """0 不是"无限大"也不是"随便切" —— 它是调用方没声明容量，由调用方表达成 `None`。"""
+    with pytest.raises(ValueError):
+        BlockBudget(0)
+    with pytest.raises(ValueError):
+        BlockBudget(-1)
+
+
+def test_sized_read_blocks_declare_their_windows_to_the_model() -> None:
+    """声明必须有送达路径：`reads` 要真的进 `task.mysubtask`（模型的 brief）。"""
+    from bobanana6.services.tools import BoundTask
+
+    plan = Decomposer(strategy="source", block_budget=BlockBudget(1000)).split(
+        research_contract(), ontology(), research_recon(_small_lines())
+    )
+    read = next(b for b in _read_blocks(plan) if b.reads)
+    view = BoundTask(subtask=read, contract_document=research_contract()).mysubtask()
+    assert view["reads"] == [{"ref": ref, "start": start, "end": end} for ref, start, end in read.reads]
+    assert view["axis"] == "window"

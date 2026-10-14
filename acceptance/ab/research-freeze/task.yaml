@@ -1,0 +1,49 @@
+# 端到端验收：**同一个来源第二次跑不许再抓**（研究类取数设计 §6① 的端到端版）
+#
+# ★ 与 `tests/test_snapshot_freeze.py` 的分工：
+#   那个在【取数层】证机制（3 秒、零模型）；
+#   这个在【整条流水线】证后果 —— 真的跑 bb6 两遍，比产物。
+#   它闭合 b50 报告里的 `[未验①]`：原来"产物会不同"是从源码推的。
+#
+# ★ 源是个**会变**的 HTTP feed（每次访问换一个数值）——
+#   这正是研究类任务里"网页/API 会变"的最小模型。
+#   两次跑若各自去抓，就会拿到两份不同材料 ⇒ 产物不同。
+task_id: research-freeze
+goal: 读 feed 这份情报源的当前内容，产出 output/findings.csv（两列：as_of 与 value）
+version: 1
+statement: instruction
+
+deliverables:
+  - name: output/findings.csv
+    schema: {as_of: str, value: float}
+
+sources:
+  - {ref: instruction, locator: input/instruction.md}
+  # ★ 端口写死 8799 —— 由 `run_acceptance.py` 在那上面起假服务器。
+  #   写死是有意的：契约必须完全确定，才能让两次跑是"同一份契约"。
+  - {ref: feed, locator: http://127.0.0.1:8799/feed.csv}
+
+constraints:
+  hard:
+    - id: C-two-columns
+      kind: custom
+      target: output/findings.csv
+      spec:
+        # ★ 必须写死解释器：壳跑判据时 subprocess.run(shell=True) 不激活 venv。
+        check: shell_command
+        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import csv,pathlib; r=list(csv.DictReader(pathlib.Path('_run/workspace/output/findings.csv').open())); assert r, 'empty'; assert {'as_of','value'} <= set(r[0]), r[0]\""
+      rationale: "产物必须是两列 CSV（as_of / value）"
+  soft:
+    - id: C-one-row
+      kind: custom
+      target: output/findings.csv
+      spec:
+        check: shell_command
+        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import csv,pathlib; assert len(list(csv.DictReader(pathlib.Path('_run/workspace/output/findings.csv').open()))) == 1\""
+      rationale: "feed 只有一期；一行就够（多了不算错，只是不必）"
+
+limits: {max_rounds: 3}
+notes: |
+  ★ 这道题**不判"答对没答对"** —— feed 每次给的数值都不一样，没有稳定答案可判。
+  它判的是**可复现**：同一份契约跑两遍，产物必须逐字节相同。
+  裁定由 `run_acceptance.py` 做（比两次产物的 sha256 + 数服务器被打了几次）。

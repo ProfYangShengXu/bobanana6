@@ -89,6 +89,16 @@ CONTENT_SOURCES = ("external_runner", "invariants", "generate", "none")
 CONTENT_VISIBILITIES = ("sealed", "open")
 DEFAULT_VISIBILITY = "sealed"
 
+#: ★★ 来源的两种**取法**（`kind`）：
+#:
+#:     ""/"file"   已知位置 —— `locator` 是确定的地方，`SourcePort.fetch` 取回来
+#:     "research"  还没定位 —— `question` 是要找什么，`seeds` 是起点（不是范围）
+#:
+#: ★ 空串（= 已知位置）是缺省值，也是 fail-closed 的那一侧：
+#:   既有契约一个字不改，行为逐字不变。
+SOURCE_KINDS = ("", "file", "research")
+SOURCE_KIND_RESEARCH = "research"
+
 
 @dataclass(frozen=True)
 class ContentChecks:
@@ -104,6 +114,14 @@ class ContentChecks:
     declared: bool = False
     external_runner: Mapping[str, Any] | None = None
     invariants: tuple[Mapping[str, Any], ...] = ()
+    #: ★★ **这份产物会被怎么消费**（逐字段机器比对 / 容差多大 / 非数值严格相等）。
+    #: 与 `invariants` 回答的是**两个问题**：判据说"值该满足什么"，
+    #: 这里说"产物会被怎么对待"。13f 官方 checker 实测：这两样都没送达时，
+    #: 块级判定 8/8 全绿、官方 47/51（数值只留 7 位有效数字、多值字段拼成 `A-B`）。
+    #: ★ 判分器的**实现细节**（分隔符白名单、哪列开恩）**不进这里** —— 塞进来就是偷看口。
+    #: ★ 刻意**不算**一个"检查来源"（不进 `CONTENT_SOURCES`）：声明了比对方式
+    #:   但一个检查都没声明，仍然该具名拒 —— 它们回答的不是同一个问题。
+    comparisons: tuple[Mapping[str, Any], ...] = ()  # blame: fail-closed — 省略即"不知道会被怎么比对"⇒一条要求都不加（既有读数一字不变）
     generate: bool = False
     none: bool = False
     visibility: str = DEFAULT_VISIBILITY
@@ -327,6 +345,21 @@ def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:
                 _fail(source, f"{path}.encoding", f"unknown encoding {encoding!r}", "source")
         if eol not in EOL_MODES:
             _fail(source, f"{path}.eol", f"unknown eol {eol!r}; expected one of {EOL_MODES!r}", "source")
+        # ★★ `kind`: 这份来源是"已知位置"还是"一个还没定位的问题"。
+        #   缺省空串 = 现状（已知位置）。不许写别的值 —— 写错了当场拒，别留到取数时才炸。
+        kind = str(raw.get("kind", "") or "")  # blame: fail-closed — 缺省空串 = "已知位置"，不会把普通来源误当研究问题去搜
+        if kind not in SOURCE_KINDS:
+            _fail(source, f"{path}.kind", f"unknown kind {kind!r}; expected one of {SOURCE_KINDS!r}", "source")
+        if kind == SOURCE_KIND_RESEARCH and not str(raw.get("question", "") or "").strip():  # blame: fail-closed — 拿不到问题就拒，不放它空转去搜
+            # ★ 研究来源**必须有**研究问题 —— 没有问题的"研究"是空转
+            _fail(source, f"{path}.question", "a research source must declare what to look for", "required")
+        # ★ 种子是**起点，不是范围** —— 允许一条都不给（问题可以只给方向）。
+        #   给错了当场拒（不是字符串 / 不是列表），不静默丢。
+        seeds_raw = raw.get("seeds", ())  # blame: whitelist — 缺省空种子：问题可以只给方向，让实作自己找入口
+        if seeds_raw is None:
+            seeds_raw = ()
+        if not isinstance(seeds_raw, Sequence) or isinstance(seeds_raw, (str, bytes)):
+            _fail(source, f"{path}.seeds", "seeds must be a list", "type")
         try:
             sources.append(
                 SourceRef(
@@ -335,6 +368,9 @@ def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:
                     encoding=encoding,
                     eol=eol,
                     module=str(raw.get("module", "") or ""),  # blame: fail-closed — 不属于任何模块 ⇒ 不参与写区，方向保守
+                    kind=kind,
+                    question=str(raw.get("question", "") or ""),  # blame: fail-closed — 拿不到就是空串；空串的研究来源在上面的 question 检查里已经被拒了
+                    seeds=tuple(str(one) for one in seeds_raw),
                 )
             )
         except ValueError as exc:
@@ -481,6 +517,32 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
     )
 
 
+def _invariant(entry: Mapping[str, Any], *, source: str, path: str) -> dict[str, Any]:
+    """★ 判据里的 `tol` 是**数**（容差定义上就是个数）—— 在解析期归一，不留给每个读者。
+
+    为什么必须在这里做：YAML 的浮点写法**要求带小数点** —— `tol: 1e-10` 会被 PyYAML
+    解析成**字符串** `'1e-10'`（写 `1.0e-10` 或 `0.0000000001` 才是 float）。
+    于是契约里声明的容差一路是字符串，下游每个读者各自 `float(...)` 兜着
+    （`produce.py` / `core/checkers/provenance.py` / `services/ci.py`）；
+    ★ 而**给模型看的那一份**（`produce.py::_content_checks_entry`）会把字符串原样带出去 ——
+    模型读到的"公差"就不是个数。这里一次归位，判定器与模型看到的是同一个数。
+
+    ★ 只归 `tol`：`right` 可能是类别名（例：`"abs_tol"`），其余键一律原样。
+    ★ 取不到数 ⇒ **具名拒**（不是静默丢掉：丢了就是判据悄悄放宽，正是 fail-closed 的反面）。
+    """
+    out = dict(entry)
+    if "tol" not in out:
+        return out
+    raw = out["tol"]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        _fail(source, f"{path}.tol", f"tol must be a number, got {type(raw).__name__}", "type")
+    try:
+        out["tol"] = float(raw)
+    except (TypeError, ValueError):
+        _fail(source, f"{path}.tol", f"tol must be a number, got {raw!r}", "type")
+    return out
+
+
 def _content_checks(data: Mapping[str, Any], source: str) -> ContentChecks:
     """★ 内容检查的两个维度都在契约里声明（规格 §二①）—— 不写在代码里。
 
@@ -496,12 +558,12 @@ def _content_checks(data: Mapping[str, Any], source: str) -> ContentChecks:
         _fail(source, "$.content_checks", "content_checks must be a mapping, not null", "type")
     if not isinstance(raw, Mapping):
         _fail(source, "$.content_checks", "content_checks must be a mapping", "type")
-    unknown = sorted(set(raw) - {*CONTENT_SOURCES, "visibility"})
+    unknown = sorted(set(raw) - {*CONTENT_SOURCES, "visibility", "comparisons"})
     if unknown:
         _fail(
             source,
             "$.content_checks",
-            f"unknown keys {unknown!r}; expected any of {[*CONTENT_SOURCES, 'visibility']!r}",
+            f"unknown keys {unknown!r}; expected any of {[*CONTENT_SOURCES, 'visibility', 'comparisons']!r}",
             "additionalProperties",
         )
 
@@ -535,7 +597,33 @@ def _content_checks(data: Mapping[str, Any], source: str) -> ContentChecks:
                 f"invariant is missing {missing!r}",
                 "required",
             )
-        invariants.append(dict(entry))
+        invariants.append(_invariant(entry, source=source, path=f"$.content_checks.invariants[{index}]"))
+
+    # ★★ 比对方式（消费方式）：每条必须说清「约束哪份产物」+「怎么比」。
+    #   与 `invariants` 同一套 fail-closed：拿不到/形状不对 ⇒ 具名拒，不静默丢。
+    # blame: fail-closed — 缺声明即"没有比对方式"⇒ 壳一个字都不加（不会凭空替它放宽/收紧）
+    comparisons_raw = raw.get("comparisons", [])
+    if not isinstance(comparisons_raw, (list, tuple)):
+        _fail(source, "$.content_checks.comparisons", "comparisons must be a list", "type")
+    comparisons: list[Mapping[str, Any]] = []  # blame: fail-closed — 空 = 契约没声明比对方式；壳不加要求，也不替它放宽/收紧
+    for index, entry in enumerate(comparisons_raw):
+        if not isinstance(entry, Mapping):
+            _fail(source, f"$.content_checks.comparisons[{index}]", "each comparison must be a mapping", "type")
+        missing = sorted({"applies_to", "compare"} - set(entry))
+        if missing:
+            _fail(
+                source,
+                f"$.content_checks.comparisons[{index}]",
+                f"comparison is missing {missing!r}",
+                "required",
+            )
+        comparison: dict[str, Any] = {
+            "applies_to": str(entry["applies_to"]),
+            "compare": str(entry["compare"]),
+            "numeric_atol": float(entry.get("numeric_atol", 0.0)),  # blame: fail-closed — 没给容差即按 0（最严）算，不假定宽松
+            "text": str(entry.get("text", "exact")),
+        }
+        comparisons.append(comparison)
 
     generate = raw.get("generate", False)  # blame: fail-closed — 缺声明即"不生成"；不会因为忘了写就自动派 worker 出去
     if not isinstance(generate, bool):
@@ -548,6 +636,7 @@ def _content_checks(data: Mapping[str, Any], source: str) -> ContentChecks:
         declared=True,
         external_runner=dict(external) if isinstance(external, Mapping) else None,
         invariants=tuple(invariants),
+        comparisons=tuple(comparisons),
         generate=generate,
         none=declared_none,
     )
@@ -580,6 +669,7 @@ def _content_checks(data: Mapping[str, Any], source: str) -> ContentChecks:
         declared=True,
         external_runner=declared.external_runner,
         invariants=declared.invariants,
+        comparisons=declared.comparisons,
         generate=declared.generate,
         none=declared.none,
         visibility=str(visibility),

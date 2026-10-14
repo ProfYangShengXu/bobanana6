@@ -61,6 +61,12 @@ sources:
 #   两条关键读数：① 每条不变量都带 `applies_to`（它约束**哪份产物**，算出来的）；
 #               ② summary 数值键容差 abs_tol=1e-12 + 非数值键严格相等（判分器定的尺子）
 content_checks:
+# ★★ `comparisons` 是【消费方式】：这份产物会被**怎么比对** —— 逐字段还是逐键、
+#   容差多大、非数值是否严格相等。它与 `invariants` 回答的是两个不同的问题：
+#   判据说"值该满足什么"，这里说"产物会被怎么对待"。
+#   ★ 抽的是「怎么消费」（通用：换一道题也成立，任何被机器逐值比对的产物都该让生产者知道）；
+#     **不抽**判分器的实现细节（分隔符白名单 `['|',';',',']`、哪一列开恩）——
+#     那两类进契约 = 给 A 臂开一个小口径的偷看口。见 `spec_extractor.py::extract_comparison_modes`。
   invariants:
     - applies_to: "output/effective_holdings.csv"
       left: "weight"
@@ -156,6 +162,39 @@ content_checks:
       right: "strict"
       op: "strict"
       tol: 0.0
+  comparisons:
+    - applies_to: "output/cleaning_audit.csv"
+      compare: "field-by-field"
+      numeric_atol: 1e-09
+      text: "exact"
+    - applies_to: "output/crowded_securities_latest.csv"
+      compare: "field-by-field"
+      numeric_atol: 1e-09
+      text: "exact"
+    - applies_to: "output/effective_holdings.csv"
+      compare: "field-by-field"
+      numeric_atol: 1e-09
+      text: "exact"
+    - applies_to: "output/filing_resolution.csv"
+      compare: "field-by-field"
+      numeric_atol: 1e-09
+      text: "exact"
+    - applies_to: "output/manager_metrics.csv"
+      compare: "field-by-field"
+      numeric_atol: 1e-09
+      text: "exact"
+    - applies_to: "output/overlap_latest.csv"
+      compare: "field-by-field"
+      numeric_atol: 1e-09
+      text: "exact"
+    - applies_to: "output/summary.json"
+      compare: "key-by-key"
+      numeric_atol: 1e-12
+      text: "exact"
+    - applies_to: "output/turnover.csv"
+      compare: "field-by-field"
+      numeric_atol: 1e-09
+      text: "exact"
 constraints:
   # ★ 只放一条【弱】自检：产物在不在、能不能解析。
   #   真正的判据（官方 test_outputs.py + reference_data）在【外面】跑 —— 不许放进本任务，

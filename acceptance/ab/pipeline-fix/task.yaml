@@ -1,0 +1,35 @@
+# 单块代码修复题（A/B 对照用：bb6 单 agent vs Hermes 子代理）
+# 外部判据 = tests/test_hidden.py（不在这道题的 input 里，跑完由外侧拷入）
+task_id: pipeline-fix
+goal: 修复 input/pipeline.py 里的缺陷，让 input/tests/test_existing.py 全部通过；不许修改测试文件
+version: 1
+
+deliverables:
+  - name: input/pipeline.py
+    schema: {text: str}
+
+sources:
+  - {ref: pipeline-source, locator: input/pipeline.py}
+  - {ref: test-existing, locator: input/tests/test_existing.py}
+
+constraints:
+  hard:
+    - id: C-tests-pass
+      kind: custom
+      target: input/pipeline.py
+      spec:
+        # ★ 必须写死解释器：壳跑判据时 subprocess.run(shell=True) 不激活 venv，
+        #   写 `python3` 会拿到系统解释器（没有 pytest）⇒ 判据必然失败。
+        #   见《壳问题三连-首轮AB暴露-20261005.md》§2。
+        check: shell_command
+        command: "cd _run/workspace/input && /mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -m pytest tests/test_existing.py -q"
+      rationale: "既有测试必须全过"
+    - id: C-tests-frozen
+      kind: frozen_files
+      target: "*"
+      spec:
+        sources: [test-existing]
+      rationale: "不许改测试把它改松"
+
+limits: {max_rounds: 3}
+notes: 单块代码修复题；隐藏测试是外部判据，不在本任务内。

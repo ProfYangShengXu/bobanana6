@@ -11,7 +11,7 @@ from .fetchers import (
 )
 from .form import SourceForm, SourceFormError, decode_body, form_for, forms_for
 from .reader import SnapshotFileReader, rows_from_csv, rows_from_json
-from .store import SnapshotStore, SourceError
+from .store import SnapshotStore, SourceError, SourceLedger
 
 __all__ = [
     "PROXY_ENV_VARS",
@@ -23,6 +23,7 @@ __all__ = [
     "SourceError",
     "SourceForm",
     "SourceFormError",
+    "SourceLedger",
     "decode_body",
     "form_for",
     "forms_for",

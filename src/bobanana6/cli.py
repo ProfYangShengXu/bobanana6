@@ -36,7 +36,7 @@ from .adapters import (
     ScriptedClient,
     TokenRateLimiter,
 )
-from .agentloop.compress import CompressionPolicy
+from .agentloop.compress import CompressionPolicy, block_char_budget
 from .agentloop.concurrency import GateConfig, RuntimeGate
 from .agentloop.events import EventLog
 from .assemble_impl import (
@@ -50,9 +50,10 @@ from .contract import parse_contract_file
 from .core.capabilities import Capability, WorkerCapabilities, WorkerLimits
 from .core.model import DEFAULT_LIMITS, Budget
 from .core.ports import LLMClient, OntologyPort, SourcePort
-from .decompose import Decomposer, RoundBudget
+from .decompose import BlockBudget, Decomposer, RoundBudget
 from .ontology import load_ontology_file
-from .sources import LocatorFetcher, SnapshotFileReader, SnapshotStore
+from .services.research import LinkExpandingResearch
+from .sources import LocatorFetcher, SnapshotFileReader, SnapshotStore, SourceLedger
 from .sources.form import forms_for
 
 __all__ = ["App", "build_app", "main"]
@@ -106,18 +107,33 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
     ontology_port = build_ontology_port(args, client)
 
     store = SnapshotStore(root=Path(args.snapshots))
-    fetcher: SourcePort = LocatorFetcher(store=store, captured_at=_now_iso())
+    # ★ 来源台账与冻结仓同目录：冻结件按【内容】寻址（同样的字节只有一份），
+    #   台账按【来源】寻址（同一个 ref 抓过了就不再抓）。两者并存，各答各的问题。
+    #   ⇒ 网页来源第二次跑拿到的是**第一次那份材料**，产物才可复现。
+    ledger = SourceLedger(root=Path(args.snapshots))
+    fetcher: SourcePort = LocatorFetcher(store=store, captured_at=_now_iso(), ledger=ledger)
     # ★ A11: the content-level provenance check needs the frozen rows as data,
     #   and core never opens a path -- so the reader is built here, at the one
     #   assembly point, and injected into the runner.
     # ★ `#32`: 载体的形式由任务声明（sources[].encoding / .eol）；壳在派人之前按它规整。
     reader = SnapshotFileReader(store=store, forms=forms_for(contract.sources))
 
+    budget = Budget(max_calls=args.max_calls, max_wall_s=args.max_wall_s, max_output=args.max_output)
+    # ★★ 单块输入预算 = 压缩阈值 × 余量（同一把尺子，见 `block_char_budget`）。
+    #   切分器据此把一个超预算的源拆成多个读块、把几份小源合成一个读块。
+    #   ★ 阈值塌成 0（`--max-output >= --context-length`）时**不传预算** ——
+    #     "没有可用预算"是"不按大小切"，不是"把每份源拆碎"。
+    compression = CompressionPolicy(
+        context_length=max(args.context_length, budget.max_output + 1),
+        max_tokens=budget.max_output,
+    )
+    block_chars = block_char_budget(compression, headroom=float(getattr(args, "block_headroom", 0.7)))
+    block_budget = BlockBudget(block_chars) if block_chars > 0 else None
     decomposer = Decomposer(
         strategy=args.strategy,
         budget=RoundBudget(document.limits.max_rounds),
+        block_budget=block_budget,
     )
-    budget = Budget(max_calls=args.max_calls, max_wall_s=args.max_wall_s, max_output=args.max_output)
     event_log = EventLog()
     # ★ One limiter, shared by the block's model call and the summarizer callback.
     gate = RuntimeGate(GateConfig(max_concurrent=1, default_timeout=0.0))
@@ -128,14 +144,16 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
         client=client,
         store=store,
         contract=contract,
+        # ★★ 契约声明的判据随块交下去（按 `applies_to` 归属到产出那份产物的块）——
+        #   判定器拿什么尺子量，模型就得看到那把尺子；不然只能按常识写、被判据拒，
+        #   而报告上看起来像"运行期出错"。
+        content_checks=document.content_checks.invariants,
+        comparisons=getattr(document.content_checks, "comparisons", ()),
         workspace=workspace,
         observe_dir=observe_dir,
         budget=budget,
         event_log=event_log,
-        compression=CompressionPolicy(
-            context_length=max(args.context_length, budget.max_output + 1),
-            max_tokens=budget.max_output,
-        ),
+        compression=compression,
         # ★ The compression callback is a model call, and it is injected here --
         #   the loop never reaches a model on its own.
         summarize=llm_summarizer(client, gate=gate),
@@ -150,6 +168,15 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
         fetcher=fetcher,
         store=store,
         reader=reader,
+        # ★★ 研究类取数：只有契约里出现 `kind: research` 的来源才会被用到。
+        #   在这里一并注入（装配点是唯一构造点），`None` 会让那类来源**具名拒**。
+        #   ★ `channels` 暂时用实作里的保守默认（直连 + Jina，本机实测通的那两条）；
+        #     接 `agent-reach doctor` 的读数是下一步（跨侧调用，见设计文档 §3.4）。
+        researcher=LinkExpandingResearch(
+            store=store,
+            ledger=ledger,
+            captured_at=_now_iso(),
+        ),
         now=_now_iso(),
         epoch=time.monotonic,
         limits=DEFAULT_LIMITS,
@@ -206,6 +233,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-wall-s", type=int, default=3600)
     run.add_argument("--max-output", type=int, default=8192)
     run.add_argument("--context-length", type=int, default=32768)
+    #: ★★ 单块输入预算占压缩阈值的比例（默认 0.7 = 留 30% 余量，别一进门就触发压缩）。
+    #: 只影响**切分**（拆窗口 / 合成块），不动压缩阈值本身。
+    run.add_argument(
+        "--block-headroom",
+        type=float,
+        default=0.7,
+        help="一个读块的输入最多占压缩阈值的多少（0,1]；越小切得越碎，默认 0.7",
+    )
     #: 充裕并发是这个项目的前提；声明得比需求小，装配就会以 capability_short 拒绝。
     run.add_argument("--concurrency", type=int, default=8)
     return parser

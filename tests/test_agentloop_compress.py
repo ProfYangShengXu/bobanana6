@@ -292,3 +292,56 @@ def test_a_sanitizer_backstop_keeps_the_sequence_legal() -> None:
     )
     assert "is not declared by the preceding assistant row" in message_sequence_problem(broken)
     assert message_sequence_problem(sanitize_tool_pairs(broken)) == ""
+
+
+# --------------------------------------------------------------------------- #
+# block budget: the splitter's anchor (same ruler as the threshold)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_block_budget_is_a_fraction_of_the_compression_threshold() -> None:
+    """★★ 判据的锚：单块预算 = 阈值 × 余量，且与 `estimate_tokens` 同一把尺子。
+
+    默认 0.7 ⇒ 块的输入落在阈值之内，不会一进门就触发压缩。
+    """
+    from bobanana6.agentloop.compress import CHARS_PER_SIZE_UNIT, block_char_budget
+
+    policy = CompressionPolicy(context_length=32768, max_tokens=8192, pct=0.5)
+    assert compression_threshold(policy) == 12288
+    # 0.7 余量：预算严格小于阈值，且换算回 size unit 就是 0.7 × 阈值。
+    assert block_char_budget(policy) == int(12288 * CHARS_PER_SIZE_UNIT * 0.7)
+    assert block_char_budget(policy) == int(0.7 * compression_threshold(policy) * CHARS_PER_SIZE_UNIT)
+    assert block_char_budget(policy, headroom=1.0) == compression_threshold(policy) * CHARS_PER_SIZE_UNIT
+
+
+def test_the_estimator_and_the_budget_share_one_ruler() -> None:
+    """同一段文本：预算消耗的 size unit 数 == `estimate_tokens` 数它的数。
+
+    两侧都从 `CHARS_PER_SIZE_UNIT` 派生 ⇒ 改一处不会让它们悄悄漂开。
+    """
+    from bobanana6.agentloop.compress import CHARS_PER_SIZE_UNIT, block_char_budget
+
+    policy = CompressionPolicy(context_length=1000, max_tokens=200)
+    chars = block_char_budget(policy, headroom=1.0)
+    assert estimate_tokens([{"role": "user", "content": "x" * chars}]) == 4 + chars // CHARS_PER_SIZE_UNIT
+
+
+def test_a_degenerate_policy_yields_a_degenerate_budget() -> None:
+    """★ 已知的配置陷阱：`--max-output >= --context-length` ⇒ 阈值塌成 0。
+
+    预算跟着是 0 —— 调用方必须把它读成"没有可用预算"，**不是**"把每份源拆碎"。
+    """
+    from bobanana6.agentloop.compress import block_char_budget
+
+    collapsed = CompressionPolicy(context_length=32769, max_tokens=32768)
+    assert compression_threshold(collapsed) == 0
+    assert block_char_budget(collapsed) == 0
+
+
+def test_the_block_budget_rejects_a_bad_headroom() -> None:
+    from bobanana6.agentloop.compress import block_char_budget
+
+    policy = CompressionPolicy(context_length=1000, max_tokens=200)
+    for bad in (0.0, -0.1, 1.5):
+        with pytest.raises(ValueError, match="headroom"):
+            block_char_budget(policy, headroom=bad)
