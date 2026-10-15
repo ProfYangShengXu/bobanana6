@@ -2140,9 +2140,9 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "X47-write-region-check-removed",
         "services/workspace.py",
-        "    def _check_region(self, path: str) -> None:\n",
-        "    def _check_region(self, path: str) -> None:\n"
-        "        return  # mutation: the write region stops being enforced\n",
+        "        if may_write(path, self.write_region, self.frozen_paths):\n",
+        "        return  # mutation: the write region stops being enforced\n"
+        "        if may_write(path, self.write_region, self.frozen_paths):\n",
         "tests/test_services.py::test_a_write_outside_the_write_region_is_refused_before_it_lands",
         "channel 2 becomes a backdoor: any path the model names is writable",
     ),

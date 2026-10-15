@@ -1318,6 +1318,7 @@ _PLAUSIBLE_ARGS: dict[str, dict[str, Any]] = {
     # ★ `#47`: 六个通用原语 —— 读的那两个走授权来源，写/执行的三个落在工作区。
     "sources.read": {"ref": "src-1"},
     "sources.grep": {"pattern": "a"},
+    "files.read": {"path": "out.csv"},
     "files.write": {"path": "out.csv", "content": "x\n"},
     "files.patch": {"path": "out.csv", "old_string": "x", "new_string": "y"},
     "shell.run": {"command": "true"},

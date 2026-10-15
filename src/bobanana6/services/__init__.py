@@ -29,6 +29,7 @@ from .tools import (
 )
 from .workspace import (
     BoundWorkspace,
+    ReadOutsideRegion,
     WorkspaceError,
     WorkspaceLedger,
     WorkspaceUnavailable,
@@ -45,6 +46,7 @@ __all__ = [
     "BoundSources",
     "BoundTask",
     "BoundWorkspace",
+    "ReadOutsideRegion",
     "RecordedEvidence",
     "RegisteredTool",
     "ToolRegistry",

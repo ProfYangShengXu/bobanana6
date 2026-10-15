@@ -380,7 +380,15 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "context = 命中行上下各带几行；limit / offset 分页。"
         "何时不用：不知道找什么、要通读时，用 sources.read 按行看。"
     ),
-    # -- files：把产物写下来 ------------------------------------------------ #
+    # -- files：把产物写下来、再读回来 -------------------------------------- #
+    "files.read": (
+        "何时用：★ 你要回读【自己刚写下的东西】—— 分步写产物时，写一段、读回来确认，"
+        "再写下一段。它读的就是你能写的那些文件（你自己的交付物与草稿）。"
+        "输入：path = 工作区相对路径（必须是你能写的路径，越界会被拒）；"
+        "offset = 从第几行开始（0 起，默认 0）；limit = 读几行（默认 200）。"
+        "何时不用：读任务来源要用 sources.read（那是授权来源，不是你能写的文件）；"
+        "只想知道文件在不在、有多大时用 shell.run。"
+    ),
     "files.write": (
         "何时用：★ 产物是【一份文件】，你要把它的内容落到工作区。短文件直接写。"
         "输入：path = 工作区相对路径（必须落在你的写区内，越界会被拒）；"
@@ -513,6 +521,19 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
         optional=("ref", "target", "limit", "offset", "context"),
         group="sources",
         description=_TOOL_DESCRIPTIONS["sources.grep"],
+    ),
+    #: ★ 读：产物可以直接落工作区，也可以**读回来**（分步写时写一段、回读、再写）。
+    #: 它读的是与 `files.write` **同一条写区判定**（`may_write`）下的路径 ——
+    #: 能写什么就能读什么；冻结路径（别人的交付物 / 任务来源）照样读不到。
+    #: ★ 它不是"读来源"：`sources.*` 才算取数（`produce.read_sources` 只认它）。
+    ToolSpec(
+        "files.read",
+        ("path",),
+        "one numbered line window of a file this block may write",
+        "write region",
+        optional=("offset", "limit"),
+        group="files",
+        description=_TOOL_DESCRIPTIONS["files.read"],
     ),
     #: ★ 写：产物直接落工作区（父目录自动创建），不再要求"整个文件装进一个字符串"。
     #: `append` 是对"整份覆盖写"的一处**有意扩展**：产物大于单次调用上限时，

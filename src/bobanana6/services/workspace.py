@@ -34,8 +34,11 @@ from itertools import count, pairwise
 from pathlib import Path
 from typing import Any
 
+from .textops import DEFAULT_LIMIT, line_window
+
 __all__ = [
     "BoundWorkspace",
+    "ReadOutsideRegion",
     "WorkspaceError",
     "WorkspaceLedger",
     "WorkspaceUnavailable",
@@ -110,6 +113,16 @@ class WorkspaceUnavailable(WorkspaceError):
 
 class WriteOutsideRegion(WorkspaceError):
     """The path is not in this block's write region (or the block has none)."""
+
+
+class ReadOutsideRegion(WorkspaceError):
+    """The path is not in this block's **readable** region.
+
+    ★ A read refusal must not reuse ``WriteOutsideRegion``: reporting "you may not
+    write" for a failed read makes the caller (and attribution) fix the wrong
+    layer. The rule is the same one -- a block may read exactly what it may write
+    (``may_write``) -- only the name and the verb in the message differ.
+    """
 
 
 class WriteBudgetExceeded(WorkspaceError):
@@ -274,7 +287,13 @@ class BoundWorkspace:
             raise WorkspaceError(f"path {path!r} escapes the workspace")
         return candidate
 
-    def _check_region(self, path: str) -> None:
+    def _check_region(
+        self,
+        path: str,
+        *,
+        verb: str = "write",  # blame: fail-closed — 省略即写报文（既有三处调用点逐字不变）
+        error: type[WorkspaceError] = WriteOutsideRegion,  # blame: fail-closed — 省略即写失败；读失败必须显式传 ReadOutsideRegion
+    ) -> None:
         """★ 写区互斥的执行点：**撞到别人的东西**才拒（空区 ≠ 没有权限）。
 
         ★★ 原来这里是"不在本块 partition 里的路径一律不许写" —— 太严：块连临时文件
@@ -282,13 +301,15 @@ class BoundWorkspace:
         进 `rows` 被判"不全"）。写区互斥要防的是"别撞别人的交付物/来源"，
         **不是"只许碰自己那一份"**。规则与 `produce.py::_reconcile_workspace` /
         `_persist_files` 一致 —— 三处不一样的话，换个工具就换个规矩。
+
+        ★ `read()` 走的是**同一条**判定（`may_write`），只在失败时换一个具名异常：
+        读失败报"你不能写"会让归因读错层（见 `ReadOutsideRegion`）。既有调用点的
+        默认值（`verb="write"` / `WriteOutsideRegion`）使它们的报文**逐字不变**。
         """
         if may_write(path, self.write_region, self.frozen_paths):
             return
         allowed = sorted({_normalized(name) for name in self.write_region})
-        raise WriteOutsideRegion(
-            f"block may not write {_normalized(path)!r}: its write region is {allowed!r}"
-        )
+        raise error(f"block may not {verb} {_normalized(path)!r}: its write region is {allowed!r}")
 
     def _note(self) -> None:
         if self.ledger is not None:
@@ -328,6 +349,66 @@ class BoundWorkspace:
         with target.open(mode, encoding="utf-8") as handle:
             handle.write(content)
         return _written(root, target)
+
+    def read(
+        self,
+        path: str,
+        offset: int | str = 0,  # blame: fail-closed — 省略即从头读，一次仍是**一窗**（不整份灌上下文）
+        limit: int | str = DEFAULT_LIMIT,  # blame: fail-closed — 省略即一页（200 行），不整份灌上下文
+    ) -> Mapping[str, Any]:
+        """Read back a file this block is allowed to write (a numbered line window).
+
+        ★ Why this exists (measured, not hypothesised): a block that must write its
+        deliverable in several passes has **no way to read back** what it wrote --
+        `sources.*` only resolves authorized sources, `traces.*` only reads process
+        records. The 4B T-01 run wrote `output/jd-matrix.md`, tried
+        `sources.read` on it (PermissionError), and then spent 33 `shell.run`
+        round-trips on `cat`/`grep -c` to re-read its own draft. That is the
+        shell's debt, not the model's.
+
+        ★ The permission rule is the **same predicate** as writing (`may_write`):
+        a block may read exactly what it may write -- on a deployment that declares
+        `frozen_paths`, that is its deliverable plus any non-frozen path (the same
+        set the write tools accept, including its own scratch files), and **never**
+        the frozen paths (another block's deliverable or a task-declared source).
+        This is a genuine read, not a back door.
+
+        ★ It is **not** "reading the sources": `produce.LoopIOImpl.read_sources`
+        only flips on a successful `sources.*` call, so re-reading one's own draft
+        never satisfies read-before-produce.
+
+        ★ Output is the existing numbered page (`textops.line_window`, the same one
+        `sources.read` uses): `offset` is a 0-based line offset, `limit` a line
+        count, and every line carries its 1-based number. No new pagination.
+
+        ★★ The region is checked **twice**: once on the name the caller gave, and
+        once on the **real** path `_inside` resolved it to. Without the second
+        check a symlink planted inside the write region (`mine.csv -> other/out.csv`)
+        would make a frozen path readable by alias -- the same `validatePath`
+        realpath re-check MCP's filesystem server does. A read must not be a back
+        door to a frozen path even when the name looks allowed.
+        """
+        self._check_region(path, verb="read", error=ReadOutsideRegion)
+        root = self._require_root()
+        target = self._inside(root, path)
+        # ★ realpath re-check（同一条 `may_write`，判的是**真实相对路径**）。
+        self._check_region(_relative(root, target), verb="read", error=ReadOutsideRegion)
+        if not target.is_file():
+            raise WorkspaceError(f"cannot read {path!r}: no such file in the workspace")
+        raw = target.read_bytes()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # Name the failure (blame=model): the caller picked a binary carrier,
+            # this is not a broken shell. Same reasoning as `patch_edits`.
+            raise WorkspaceError(f"cannot read {path!r}: it is not valid UTF-8 text ({exc})") from None
+        window = line_window(text, offset=offset, limit=limit)
+        return {
+            "path": _normalized(path),
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            **dict(window),
+        }
 
     def patch(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> Mapping[str, Any]:
         """Exact text replacement; a non-unique match is refused (Hermes `patch`)."""

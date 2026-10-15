@@ -81,6 +81,8 @@ TOOL_NAMES: tuple[str, ...] = (
     #   参数域换成本仓的授权模型（见 `core/ports.py::_BASE_TOOL_SPECS`）。
     "sources.read",
     "sources.grep",
+    # ★ 读回本块【有权写】的文件（首要就是它自己的交付物）—— 与写共用 `may_write`。
+    "files.read",
     "files.write",
     "files.patch",
     "shell.run",
@@ -563,6 +565,24 @@ def build_registry(
             raise PermissionError(f"subtask {toolset.subtask!r} has no workspace; file tools are not granted")
         return workspace
 
+    def files_read(args: Mapping[str, Any]) -> str:
+        """Read back a file this block may write (a numbered line window).
+
+        ★ The permission predicate is the same ``may_write`` the write tools use
+        (``BoundWorkspace.read``), so "may write ⟺ may read" cannot drift.
+        ★ A successful ``files.read`` does **not** count as "read the sources":
+        ``produce`` flips ``read_sources`` only on ``sources.*``.
+        """
+        return payload(
+            dict(
+                _workspace().read(
+                    str(args.get("path", "")),  # blame: fail-closed — 缺 path 即空串 ⇒ 具名拒，不猜一个默认文件
+                    offset=args.get("offset", 0),  # blame: fail-closed — 缺 offset 即从头读
+                    limit=args.get("limit", DEFAULT_LIMIT),  # blame: fail-closed — 缺 limit 即一页，不整份灌上下文
+                )
+            )
+        )
+
     def files_write(args: Mapping[str, Any]) -> str:
         return payload(
             dict(
@@ -662,6 +682,8 @@ def build_registry(
         "sources.snapshot": (snapshot, "read", ("ref",)),
         "sources.read": (source_read, "read", ("ref",)),
         "sources.grep": (source_grep, "read", ("ref",)),
+        # ★ effect 必须是 `read`：读不是写屏障（`plan_tool_segments` 靠它分段）。
+        "files.read": (files_read, "read", ("path",)),
         "files.write": (files_write, "write", ("path",)),
         "files.patch": (files_patch, "write", ("path",)),
         "shell.run": (shell_run, "write", ()),
