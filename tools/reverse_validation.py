@@ -1302,8 +1302,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "B15-constraint-rejection-not-declared",
         "assemble_impl/runner.py",
-        '                if failure_evidence.get("rejected_by"):\n                    failure_detail["constraint_rejected"] = True\n',
-        "                if False:  # mutation: the judge no longer declares its rejection\n",
+        '            if failure_evidence.get("rejected_by"):\n                failure_detail["constraint_rejected"] = True\n',
+        "            if False:  # mutation: the judge no longer declares its rejection\n",
         "tests/test_acceptance.py::test_a_real_run_attributes_a_rejected_block_to_the_constraint",
         "a block rejected by named constraints no longer blames the constraint layer",
     ),
@@ -2047,8 +2047,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "Q06-block-with-no-inputs-is-still-dispatched",
         "assemble_impl/runner.py",
-        "            if subtask.inputs and not available:\n",
-        "            if False:  # mutation: a block with nothing in hand still starts producing\n",
+        "        if subtask.inputs and not available:\n",
+        "        if False:  # mutation: a block with nothing in hand still starts producing\n",
         "tests/test_acceptance.py::test_a_block_whose_inputs_never_arrived_is_not_dispatched",
         "a block whose producers all failed is asked to answer anyway, and invents the table",
     ),

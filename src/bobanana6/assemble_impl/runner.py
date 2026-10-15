@@ -162,6 +162,45 @@ class RunResult:
         return self.outcome.passed
 
 
+@dataclass(frozen=True)
+class _BlockOutcome:
+    """★ 块产出的**全部东西**，跟着返回值走，不写共享字段。
+
+    这是纯重构（第二步：抽 ``_run_one``）的界面：``_run_one`` 只读传入的快照，
+    把这一块的裁决 / 候选 / 产物 / 交接件 / 痕迹路径 / 事件整理成一个不可变对象；
+    写入 ``pieces`` / ``handoffs`` / ``verdicts`` / ``commits`` / 事件流这些**共享**
+    状态的动作，全部留给调用方在**主线程串行**做（``_merge``）。
+
+    ★ 为什么必须这样：``BlockRuntime`` 的 ``traces`` / ``last_judge`` / ``last_cleanliness``
+    都是**单实例字段**，两个块同时跑必然互相覆盖。串行时没有这个区别，
+    并发时它是正确性问题，不是风格问题。
+    """
+
+    subtask: Subtask
+    #: ``"ok"`` | ``"failed"`` | ``"declined"``（与写进 verdict / commit 的档位同源）。
+    status: str
+    verdict: Verdict
+    candidate: Candidate | None
+    #: 本块产生的收敛判定（串行时按 plan 顺序进 ``decisions``）。
+    decisions: tuple[Convergence, ...]
+    #: 交给下游的产物（成功路径 = 候选产物；失败/弃权但盘上有 = 磁盘产物）。
+    piece: Artifact | None
+    #: 候选自带的逐行溯源（只有成功路径有）。
+    provenance: tuple[Provenance, ...] | None
+    #: 交接件**除** ``producer_commit`` 外的全部字段（commit 要到 merge 才知道）。
+    handoff_base: Mapping[str, Any] | None
+    #: ``_commit_block`` 要提交的路径（与串行时逐字相同）。
+    trace_paths: tuple[str, ...]
+    commit_verdict: str
+    commit_summary: str
+    #: 这块自己的 runtime（并发时是 ``runtime_factory()`` 造的新实例）。
+    runtime: BlockRuntime
+    #: 这块自己的事件流（并发时每块一份，归并时按 plan 顺序并回主日志）。
+    event_log: EventLog
+    gate_ok: bool
+    gate_detail: Mapping[str, Any]
+
+
 @dataclass
 class Runner:
     document: ContractDocument
@@ -300,196 +339,30 @@ class Runner:
         #: 交付物路径 -> 产出它的 commit（痕迹层）。下游的溯源基准就是它。
         commits: dict[str, str] = {}
         for subtask in plan.subtasks:
-            #: ★★ 输入缺失**不再短路**（旧前置门：一件没到就 0 次调用、记 inputs_unavailable）。
-            #:   实测代价（13f，8 块）：T-01 的答案信封不合法 ⇒ T-02..T-08 **全部**停工，
-            #:   八个块实际只跑过 1 个。第一道工序填错工单，后面七道陪葬。
-            #:   新约束：**照样开工，但不许编** —— 缺哪几份、谁答应的，作为已知事实带进
-            #:   这一块的 brief（`produce.py::_input_gaps`）与证据（下面的 `input_gaps`）；
-            #:   它自己的成败由它自己的产物决定，不再因上游失败被判死。
-            #:   ★ E-0 反例（拿不到输入就按名字编一张表）仍由**溯源层**兜底：
-            #:   编出来的行追不到真来源，会被拒（见 `produce.py` 的继承守卫）。
-            gaps = self._input_gaps(subtask, pieces, producer_of)
-            available = [name for name in subtask.inputs if name in pieces]
-            if subtask.inputs and not available:
-                # ★★ 旧前置门在这个条件下 `continue`：一件输入都没到就**不许开工**
-                #    （0 次模型调用，记 `inputs_unavailable`）。实测代价（13f，8 块）：
-                #    T-01 的答案信封不合法 ⇒ T-02..T-08 全部停工，八个块实际只跑过 1 个。
-                #    现在**不 continue**：照样开工，只把"声明的输入一件都没到"作为降级起点
-                #    记下来（`gaps` 照常带进 brief 与证据），成败由它自己的产物决定。
-                all_inputs_missing = True
-            else:
-                all_inputs_missing = False
-            gap_note = self._gap_note(gaps, all_inputs_missing=all_inputs_missing)
-            inherited = tuple(
-                sorted({p.snapshot_ref for name in subtask.inputs for p in piece_provenance.get(name, ())})
-            )
-            toolset = self._toolset(
-                plan, subtask, bundle, ontology, snapshots, pieces, piece_provenance, inherited, context,
-                handoffs,
-            )
-            try:
-                candidate = self.runtime.run(
-                    subtask,
-                    bundle,
-                    ontology,
-                    toolset,
-                    self.budget,
-                    # ★★ 规格 ①：静态知识归位要按【全 DAG】算恒定键，
-                    #   所以把整份计划交下去（不是「跑到哪算到哪」）。
-                    dag_subtasks=tuple(plan.subtasks),
-                )
-            except BlockDeclined as declined:
-                declined_detail: dict[str, Any] = {"exit": declined.exit_reason, "declined": True}
-                declined_evidence: dict[str, str] = {"exit": declined.exit_reason}
-                if gaps:
-                    declined_detail["input_gaps"] = self._gap_event(gaps)
-                    declined_evidence["input_gaps"] = gap_note
-                # ★★ 判定失败 ≠ 产物不存在：它可能只是信封没封好，活早就干完了。
-                published = self._publish_disk_artifact(
-                    subtask, pieces, handoffs, commits=commits, verdict="declined"
-                )
-                if published is not None:
-                    declined_evidence["artifact_on_disk"] = subtask.output
-                    declined_detail["artifact_on_disk"] = subtask.output
-                else:
-                    # ★ 盘上没有产物，但这个块**跑过** —— 照样留一个 commit（规格 §2 第1层）。
-                    self._trace_finished_block(
-                        subtask,
-                        verdict="declined",
-                        summary=f"declined: {declined.exit_reason}",
-                        commits=commits,
-                    )
-                self._note_gate(subtask, False, declined_detail)
-                verdicts[subtask.id] = Verdict(
-                    ok=False, failed=("declined",), evidence=declined_evidence
-                )
-                continue
-            except BlockRuntimeError as failed:
-                # ★ §7⑫: a withheld candidate was rejected by the *judge*, and the
-                #   judge still holds which constraints did it -- that is the
-                #   declaration, recorded here on the real event stream.
-                failure_evidence = self._failure_evidence(failed)
-                failure_detail: dict[str, Any] = {"exit": failed.exit_reason}
-                if failure_evidence.get("rejected_by"):
-                    failure_detail["constraint_rejected"] = True
-                if failure_evidence.get("cause"):
-                    failure_detail["cause"] = failure_evidence["cause"]
-                if gaps:
-                    # ★ 降级起点不能丢：这一块是在"缺输入"的前提下失败/成功的，报告要能追到。
-                    failure_detail["input_gaps"] = self._gap_event(gaps)
-                    failure_evidence["input_gaps"] = gap_note
-                # ★★ 判定失败 ≠ 产物不存在（见 `_publish_disk_artifact`）：产物照样给下游，
-                #   但 `verdicts` 仍是 ok=False —— 两件事独立，绝不因为它在盘上就改成通过。
-                published = self._publish_disk_artifact(
-                    subtask, pieces, handoffs, commits=commits, verdict="failed"
-                )
-                if published is not None:
-                    failure_evidence["artifact_on_disk"] = subtask.output
-                    failure_detail["artifact_on_disk"] = subtask.output
-                else:
-                    # ★ 盘上没有产物，但这个块**跑过** —— 照样留一个 commit（规格 §2 第1层）。
-                    rejected = failure_evidence.get("rejected_by")
-                    self._trace_finished_block(
-                        subtask,
-                        verdict="failed",
-                        summary=f"failed: {failed.exit_reason}"
-                        + (f"; rejected_by={'/'.join(str(one) for one in rejected)}" if rejected else ""),
-                        commits=commits,
-                    )
-                self._note_gate(subtask, False, failure_detail)
-                # ★ 同一个 `"runtime"` 标签的第二半：这里**多半是"候选被判定器拒收"**
-                #   （`exit` 是 `degrade_single_agent` / `fix_constraint` 之类），
-                #   真因在 `evidence["rejected_by"]` 与具名门里 —— 不是进程崩了。
-                #   ★ 实测代价：24 源压力题上修前 1 块、修后 15–16 块都带这个标签，
-                #   只看标签会把"读块各自撞字段规则"误读成"运行期不稳定"。
-                verdicts[subtask.id] = Verdict(
-                    ok=False,
-                    failed=("runtime",),
-                    evidence=failure_evidence,
-                    cause=failure_evidence.get("cause", ""),
-                )
-                continue
-            candidates[subtask.id] = candidate
-            piece_provenance[subtask.output] = candidate.provenance
-            judge = self.runtime.last_judge
-            verdict = judge.last_verdict if judge is not None and judge.last_verdict is not None else judge.admit(candidate)  # type: ignore[union-attr]
-            if gaps:
-                # ★★ 它自己的产物决定了成败，但"这一条是从缺输入那一步开始降级的"必须留下痕迹 ——
-                #   否则报告看起来一切正常（`exit` 里没有门了，`input_gaps` 就是那条痕迹）。
-                verdict = replace(verdict, evidence={**verdict.evidence, "input_gaps": gap_note})
-            # ★★ 改动 A ③：**契约声明的**对账关系（`content_checks.invariants`）重算一遍。
-            #   判据来自声明，不硬编码（"权重和=1"这种规则必须由契约写出来）。
-            #   ★ 分档：不一致 ⇒ **块级拒收**（verdict 记 failed + 具名理由），
-            #   **绝不升格**成整跑失败；产物照旧进 pieces（既有"失败≠不存在"的规矩）。
-            #   （`artifact` 要到下面才赋值 ⇒ 这里直接取，避免顺序耦合）
-            content_failures, content_notices = self._content_judgements(
-                subtask, candidate.artifact(subtask.output), pieces, handoffs
-            )
-            if content_failures:
-                verdict = replace(
-                    verdict,
-                    ok=False,
-                    failed=(*verdict.failed, *(one["who"] for one in content_failures)),
-                    evidence={
-                        **verdict.evidence,
-                        **{str(one["who"]): f"{one['violated']} (expected: {one['expected']}; got: {one['got']})" for one in content_failures},
-                    },
-                )
-            if content_notices:
-                # ★ 第 0 档：**只记录不拒**（截短判据跑够一轮再谈升档）。
-                verdict = replace(
-                    verdict,
-                    evidence={**verdict.evidence, "content_notices": [dict(one) for one in content_notices]},
-                )
-            verdicts[subtask.id] = verdict
-            # ★ judged against this block's slice, not the whole plan's bundle
-            decisions.append(converge(block_bundle(bundle, subtask, ontology), (candidate,), context))
-            artifact = candidate.artifact(subtask.output)
-            if artifact is not None:
-                pieces[subtask.output] = artifact
-            # ★★ 痕迹层：这个块跑完 = 一个 commit（作者 = 块 id，信息 = summary + verdict +
-            #   它用的输入）。判定失败也提交 —— 「产物在不在」与「谁通过了」是两件事。
-            trace_paths = sorted(
-                {str(name) for name in candidate.files} | ({subtask.output} if artifact is not None else set())
-            )
-            record = self._commit_block(
+            outcome = self._run_one(
                 subtask,
-                verdict="ok" if verdict.ok else "failed",
-                paths=trace_paths,
-                summary=candidate.summary,
+                plan=plan,
+                bundle=bundle,
+                ontology=ontology,
+                snapshots=snapshots,
+                context=context,
+                pieces=pieces,
+                handoffs=handoffs,
+                piece_provenance=piece_provenance,
+                producers=producer_of,
+                runtime=self.runtime,
+                event_log=self.event_log,
+            )
+            self._merge(
+                outcome,
+                pieces=pieces,
+                handoffs=handoffs,
+                piece_provenance=piece_provenance,
+                candidates=candidates,
+                verdicts=verdicts,
                 commits=commits,
             )
-            if artifact is not None and record is not None:
-                # ★ 输出路径 -> 产出它的 commit：下游按它溯源（即使这份产物是行数据、
-                #   磁盘上没有对应文件——"哪个块、什么时候产出的"仍然有确定答案）。
-                commits[subtask.output] = record.commit
-            if artifact is not None:
-                # ★★ 交接件（`#66`）：产物之外，把上游**写过哪些文件**（客观，来自
-                #   `candidate.files`）与**它写给接手人的说明**（自述，标注未判定）一起带上。
-                #   ★ 再加产出它的 commit —— 下游溯源到"哪块、什么时候、用什么输入产出的"。
-                handoffs[subtask.output] = {
-                    "from": subtask.id,
-                    "files": sorted(str(name) for name in candidate.files),
-                    "note": candidate.summary,
-                    "producer_verdict": "ok" if verdict.ok else "failed",
-                    "producer_commit": record.commit if record is not None else "",
-                    # ★ 规格 ②：下游要知道拿到的东西是不是【照着判分器做的】。
-                    **self._cleanliness(),
-                }
-            # ★ §7⑫: this verdict comes from the judge, so its ``failed`` names the
-            #   constraints that rejected the block -- the judge is the party that
-            #   declares it. Written here (not inferred downstream) so attribution
-            #   reads a declaration in a *real* run, not only in a hand-made trace.
-            gate_detail: dict[str, Any] = {"failed": list(verdict.failed)}
-            if gaps:
-                gate_detail["input_gaps"] = self._gap_event(gaps)
-            if not verdict.ok:
-                gate_detail["constraint_rejected"] = True
-                if verdict.cause:
-                    # ★ `#44`: 检查器一致声明的原因（目前只有"判据命令自己没跑起来" ⇒ tool）
-                    #   原文照录 —— 归因层读声明，不去猜字符串。
-                    gate_detail["cause"] = verdict.cause
-            self._note_gate(subtask, verdict.ok, gate_detail)
+            decisions.extend(outcome.decisions)
 
         # ★ `#63`: 装配关只拿 pieces —— 两个块的候选从来不会被放在一起，于是
         #   "两个权威源对同一实体给出不同值"这件事在架构上测不到。这里在块跑完之后
@@ -581,6 +454,272 @@ class Runner:
             fetch_failures=dict(self.fetch_failures),
             reports=reports,
         )
+
+    # -- one block -> one outcome -> serial merge --------------------------- #
+
+    def _run_one(
+        self,
+        subtask: Subtask,
+        *,
+        plan: SplitPlan,
+        bundle: ConstraintBundle,
+        ontology: Ontology,
+        snapshots: Mapping[str, Snapshot],
+        context: CheckContext,
+        pieces: Mapping[str, Any],
+        handoffs: Mapping[str, Mapping[str, Any]],
+        piece_provenance: Mapping[str, tuple[Provenance, ...]],
+        producers: Mapping[str, str],
+        runtime: BlockRuntime,
+        event_log: EventLog,
+    ) -> _BlockOutcome:
+        """Run **one** block and return everything it produced (no shared writes).
+
+        ★ 纯重构（第一步）的界面：这里不写 ``self.<可变字段>``，也不碰
+        ``pieces`` / ``handoffs`` / ``verdicts`` / ``commits`` / ``runtime.traces``。
+        读的输入全是调用方传进来的**快照**；写入共享状态的动作全部在 ``_merge``
+        里由调用方**串行**做。这样第二步的调度器可以安全地并发跑多个 ``_run_one``。
+        """
+        #: ★★ 输入缺失**不再短路**（旧前置门：一件没到就 0 次调用、记 inputs_unavailable）。
+        #:   实测代价（13f，8 块）：T-01 的答案信封不合法 ⇒ T-02..T-08 **全部**停工，
+        #:   八个块实际只跑过 1 个。第一道工序填错工单，后面七道陪葬。
+        #:   新约束：**照样开工，但不许编** —— 缺哪几份、谁答应的，作为已知事实带进
+        #:   这一块的 brief（`produce.py::_input_gaps`）与证据（下面的 `input_gaps`）；
+        #:   它自己的成败由它自己的产物决定，不再因上游失败被判死。
+        gaps = self._input_gaps(subtask, pieces, producers)
+        available = [name for name in subtask.inputs if name in pieces]
+        if subtask.inputs and not available:
+            all_inputs_missing = True
+        else:
+            all_inputs_missing = False
+        gap_note = self._gap_note(gaps, all_inputs_missing=all_inputs_missing)
+        inherited = tuple(
+            sorted({p.snapshot_ref for name in subtask.inputs for p in piece_provenance.get(name, ())})
+        )
+        toolset = self._toolset(
+            plan, subtask, bundle, ontology, snapshots, pieces, piece_provenance, inherited, context,
+            handoffs,
+        )
+        try:
+            candidate = runtime.run(
+                subtask,
+                bundle,
+                ontology,
+                toolset,
+                self.budget,
+                # ★★ 规格 ①：静态知识归位要按【全 DAG】算恒定键，
+                #   所以把整份计划交下去（不是「跑到哪算到哪」）。
+                dag_subtasks=tuple(plan.subtasks),
+            )
+        except BlockDeclined as declined:
+            declined_detail: dict[str, Any] = {"exit": declined.exit_reason, "declined": True}
+            declined_evidence: dict[str, str] = {"exit": declined.exit_reason}
+            if gaps:
+                declined_detail["input_gaps"] = self._gap_event(gaps)
+                declined_evidence["input_gaps"] = gap_note
+            # ★★ 判定失败 ≠ 产物不存在：它可能只是信封没封好，活早就干完了。
+            artifact = self._disk_artifact(subtask)
+            if artifact is not None:
+                declined_evidence["artifact_on_disk"] = subtask.output
+                declined_detail["artifact_on_disk"] = subtask.output
+                handoff_base = self._disk_handoff(subtask, "declined", runtime)
+                commit_summary = ""
+            else:
+                handoff_base = None
+                commit_summary = f"declined: {declined.exit_reason}"
+            return _BlockOutcome(
+                subtask=subtask,
+                status="declined",
+                verdict=Verdict(ok=False, failed=("declined",), evidence=declined_evidence),
+                candidate=None,
+                decisions=(),
+                piece=artifact,
+                provenance=None,
+                handoff_base=handoff_base,
+                trace_paths=(subtask.output,),
+                commit_verdict="declined",
+                commit_summary=commit_summary,
+                runtime=runtime,
+                event_log=event_log,
+                gate_ok=False,
+                gate_detail=declined_detail,
+            )
+        except BlockRuntimeError as failed:
+            # ★ §7⑫: a withheld candidate was rejected by the *judge*, and the
+            #   judge still holds which constraints did it -- that is the
+            #   declaration, recorded here on the real event stream.
+            failure_evidence = self._failure_evidence(failed, runtime=runtime)
+            failure_detail: dict[str, Any] = {"exit": failed.exit_reason}
+            if failure_evidence.get("rejected_by"):
+                failure_detail["constraint_rejected"] = True
+            if failure_evidence.get("cause"):
+                failure_detail["cause"] = failure_evidence["cause"]
+            if gaps:
+                # ★ 降级起点不能丢：这一块是在"缺输入"的前提下失败/成功的，报告要能追到。
+                failure_detail["input_gaps"] = self._gap_event(gaps)
+                failure_evidence["input_gaps"] = gap_note
+            # ★★ 判定失败 ≠ 产物不存在（见 `_publish_disk_artifact`）：产物照样给下游，
+            #   但 `verdicts` 仍是 ok=False —— 两件事独立，绝不因为它在盘上就改成通过。
+            artifact = self._disk_artifact(subtask)
+            if artifact is not None:
+                failure_evidence["artifact_on_disk"] = subtask.output
+                failure_detail["artifact_on_disk"] = subtask.output
+                handoff_base = self._disk_handoff(subtask, "failed", runtime)
+                commit_summary = ""
+            else:
+                # ★ 盘上没有产物，但这个块**跑过** —— 照样留一个 commit（规格 §2 第1层）。
+                rejected = failure_evidence.get("rejected_by")
+                handoff_base = None
+                commit_summary = f"failed: {failed.exit_reason}" + (
+                    f"; rejected_by={'/'.join(str(one) for one in rejected)}" if rejected else ""
+                )
+            return _BlockOutcome(
+                subtask=subtask,
+                status="failed",
+                verdict=Verdict(
+                    ok=False,
+                    failed=("runtime",),
+                    evidence=failure_evidence,
+                    cause=failure_evidence.get("cause", ""),
+                ),
+                candidate=None,
+                decisions=(),
+                piece=artifact,
+                provenance=None,
+                handoff_base=handoff_base,
+                trace_paths=(subtask.output,),
+                commit_verdict="failed",
+                commit_summary=commit_summary,
+                runtime=runtime,
+                event_log=event_log,
+                gate_ok=False,
+                gate_detail=failure_detail,
+            )
+        judge = runtime.last_judge
+        verdict = judge.last_verdict if judge is not None and judge.last_verdict is not None else judge.admit(candidate)
+        if gaps:
+            # ★★ 它自己的产物决定了成败，但"这一条是从缺输入那一步开始降级的"必须留下痕迹 ——
+            #   否则报告看起来一切正常（`exit` 里没有门了，`input_gaps` 就是那条痕迹）。
+            verdict = replace(verdict, evidence={**verdict.evidence, "input_gaps": gap_note})
+        # ★★ 改动 A ③：**契约声明的**对账关系（`content_checks.invariants`）重算一遍。
+        #   判据来自声明，不硬编码（"权重和=1"这种规则必须由契约写出来）。
+        #   ★ 分档：不一致 ⇒ **块级拒收**（verdict 记 failed + 具名理由），
+        #   **绝不升格**成整跑失败；产物照旧进 pieces（既有"失败≠不存在"的规矩）。
+        content_failures, content_notices = self._content_judgements(
+            subtask, candidate.artifact(subtask.output), pieces, handoffs, event_log=event_log
+        )
+        if content_failures:
+            verdict = replace(
+                verdict,
+                ok=False,
+                failed=(*verdict.failed, *(one["who"] for one in content_failures)),
+                evidence={
+                    **verdict.evidence,
+                    **{str(one["who"]): f"{one['violated']} (expected: {one['expected']}; got: {one['got']})" for one in content_failures},
+                },
+            )
+        if content_notices:
+            # ★ 第 0 档：**只记录不拒**（截短判据跑够一轮再谈升档）。
+            verdict = replace(
+                verdict,
+                evidence={**verdict.evidence, "content_notices": [dict(one) for one in content_notices]},
+            )
+        artifact = candidate.artifact(subtask.output)
+        # ★★ 痕迹层：这个块跑完 = 一个 commit（作者 = 块 id，信息 = summary + verdict +
+        #   它用的输入）。判定失败也提交 —— 「产物在不在」与「谁通过了」是两件事。
+        trace_paths = tuple(
+            sorted({str(name) for name in candidate.files} | ({subtask.output} if artifact is not None else set()))
+        )
+        handoff_base: dict[str, Any] | None = None
+        if artifact is not None:
+            # ★★ 交接件（`#66`）：产物之外，把上游**写过哪些文件**（客观，来自
+            #   `candidate.files`）与**它写给接手人的说明**（自述，标注未判定）一起带上。
+            #   ★ `producer_commit` 要到 `_merge` 提交后才知道，这里先不放。
+            handoff_base = {
+                "from": subtask.id,
+                "files": sorted(str(name) for name in candidate.files),
+                "note": candidate.summary,
+                "producer_verdict": "ok" if verdict.ok else "failed",
+                # ★ 规格 ②：下游要知道拿到的东西是不是【照着判分器做的】。
+                **self._cleanliness(runtime),
+            }
+        # ★ §7⑫: this verdict comes from the judge, so its ``failed`` names the
+        #   constraints that rejected the block -- the judge is the party that
+        #   declares it. Written here (not inferred downstream) so attribution
+        #   reads a declaration in a *real* run, not only in a hand-made trace.
+        gate_detail: dict[str, Any] = {"failed": list(verdict.failed)}
+        if gaps:
+            gate_detail["input_gaps"] = self._gap_event(gaps)
+        if not verdict.ok:
+            gate_detail["constraint_rejected"] = True
+            if verdict.cause:
+                # ★ `#44`: 检查器一致声明的原因（目前只有"判据命令自己没跑起来" ⇒ tool）
+                #   原文照录 —— 归因层读声明，不去猜字符串。
+                gate_detail["cause"] = verdict.cause
+        return _BlockOutcome(
+            subtask=subtask,
+            status="ok",
+            verdict=verdict,
+            candidate=candidate,
+            # ★ judged against this block's slice, not the whole plan's bundle
+            decisions=(converge(block_bundle(bundle, subtask, ontology), (candidate,), context),),
+            piece=artifact,
+            provenance=candidate.provenance,
+            handoff_base=handoff_base,
+            trace_paths=trace_paths,
+            commit_verdict="ok" if verdict.ok else "failed",
+            commit_summary=candidate.summary,
+            runtime=runtime,
+            event_log=event_log,
+            gate_ok=verdict.ok,
+            gate_detail=gate_detail,
+        )
+
+    def _merge(
+        self,
+        outcome: _BlockOutcome,
+        *,
+        pieces: dict[str, Any],
+        handoffs: dict[str, dict[str, Any]],
+        piece_provenance: dict[str, tuple[Provenance, ...]],
+        candidates: dict[str, Candidate],
+        verdicts: dict[str, Verdict],
+        commits: dict[str, str],
+    ) -> None:
+        """Serialise one block outcome into the shared run state (main thread only).
+
+        ★ 这是**唯一**写入跑测级共享状态的地方：块级并发时，worker 只负责算出
+        ``_BlockOutcome``，所有 dict 写入与事件落流都回到主线程按同一份代码串行做 ——
+        于是"并发跑的判定结果"与串行跑到这里走的是同一条路。
+        """
+        subtask = outcome.subtask
+        if outcome.candidate is not None:
+            candidates[subtask.id] = outcome.candidate
+        if outcome.provenance is not None:
+            piece_provenance[subtask.output] = outcome.provenance
+        verdicts[subtask.id] = outcome.verdict
+        if outcome.piece is not None:
+            pieces[subtask.output] = outcome.piece
+        record = self._commit_block(
+            subtask,
+            verdict=outcome.commit_verdict,
+            paths=outcome.trace_paths,
+            summary=outcome.commit_summary,
+            commits=commits,
+            runtime=outcome.runtime,
+            event_log=outcome.event_log,
+        )
+        if outcome.piece is not None and record is not None:
+            # ★ 输出路径 -> 产出它的 commit：下游按它溯源（即使这份产物是行数据、
+            #   磁盘上没有对应文件——"哪个块、什么时候产出的"仍然有确定答案）。
+            commits[subtask.output] = record.commit
+        if outcome.piece is not None and outcome.handoff_base is not None:
+            # ★ `producer_commit` 在这里补上（`_run_one` 还不知道 commit）。
+            handoffs[subtask.output] = {
+                **outcome.handoff_base,
+                "producer_commit": record.commit if record is not None else "",
+            }
+        self._note_gate(subtask, outcome.gate_ok, outcome.gate_detail, event_log=outcome.event_log)
 
     # -- helpers ----------------------------------------------------------- #
 
@@ -893,22 +1032,76 @@ class Runner:
         ★ 不许静默降级：交接件里写明 `from_disk: true` + `producer_verdict`，并把产出
         它的那个 **commit** 一起带上（规格 §2 第1层）—— 下游 brief 与最终报告都看得见。
         """
+        artifact = self._disk_artifact(subtask)
+        if artifact is None:
+            return None
+        return self._publish_artifact(
+            artifact,
+            subtask,
+            pieces,
+            handoffs,
+            commits=commits,
+            verdict=verdict,
+            summary=summary,
+            runtime=self.runtime,
+            event_log=self.event_log,
+        )
+
+    def _disk_artifact(self, subtask: Subtask) -> Artifact | None:
+        """Read a failed block's on-disk deliverable, or ``None`` (never raises).
+
+        ★ 这一步在调用方的 `except BlockDeclined / BlockRuntimeError` 处理器里跑：
+          它一抛，杀掉的不是这一块而是整个 run（13f 就是这么死的）。已堵的病根之外
+          还有残余 IO 风险（`is_file()` 与 `read_text()` 之间文件被删/权限变化）。
+          读不回 ≠ 不存在：退到"下游拿不到这份件"，块照旧记 failed，run 继续。
+        """
         if self.workspace is None:
             return None
         path = Path(self.workspace) / subtask.output
         if not path.is_file():
             return None
         try:
-            artifact = artifact_from_disk(subtask.output, path)
+            return artifact_from_disk(subtask.output, path)
         except (OSError, ValueError):
-            # ★ 这一步在调用方的 `except BlockDeclined / BlockRuntimeError` 处理器里跑：
-            #   它一抛，杀掉的不是这一块而是整个 run（13f 就是这么死的）。已堵的病根之外
-            #   还有残余 IO 风险（`is_file()` 与 `read_text()` 之间文件被删/权限变化）。
-            #   读不回 ≠ 不存在：退到"下游拿不到这份件"，块照旧记 failed，run 继续。
             return None
+
+    def _disk_handoff(self, subtask: Subtask, verdict: str, runtime: BlockRuntime) -> dict[str, Any]:
+        """On-disk handoff without ``producer_commit`` (``_merge`` adds it after committing)."""
+        return {
+            "from": subtask.id,
+            "files": [],
+            "note": "",
+            "from_disk": True,
+            "producer_verdict": verdict,
+            # ★ 块失败也照记 cleanliness（产物的属性 ≠ 块的成功/失败）
+            **self._cleanliness(runtime),
+        }
+
+    def _publish_artifact(
+        self,
+        artifact: Artifact,
+        subtask: Subtask,
+        pieces: dict[str, Any],
+        handoffs: dict[str, dict[str, Any]],
+        *,
+        commits: dict[str, str],
+        verdict: str,
+        summary: str = "",
+        runtime: BlockRuntime | None = None,  # blame: whitelist — 缺省即用 self.runtime（串行既有行为），只为并发注入 per-block runtime
+        event_log: EventLog | None = None,
+    ) -> Artifact:
+        """Shared write for the "judged failed but the artifact is on disk" path."""
         pieces[subtask.output] = artifact
         # ★ 产物落进 git：即使这个块判定失败，它写过的文件也留一个 commit（痕迹）。
-        record = self._commit_block(subtask, verdict=verdict, paths=[subtask.output], summary=summary)
+        record = self._commit_block(
+            subtask,
+            verdict=verdict,
+            paths=[subtask.output],
+            summary=summary,
+            commits=commits,
+            runtime=runtime,
+            event_log=event_log,
+        )
         if record is not None:
             commits[subtask.output] = record.commit
         handoffs[subtask.output] = {
@@ -919,7 +1112,7 @@ class Runner:
             "producer_verdict": verdict,
             "producer_commit": record.commit if record is not None else "",
             # ★ 块失败也照记 cleanliness（产物的属性 ≠ 块的成功/失败）
-            **self._cleanliness(),
+            **self._cleanliness(runtime),
         }
         return artifact
 
@@ -932,6 +1125,8 @@ class Runner:
         verdict: str,
         summary: str,
         commits: Mapping[str, str] | None = None,
+        runtime: BlockRuntime | None = None,  # blame: whitelist — 缺省即用 self.runtime（串行既有行为），只为并发注入 per-block runtime
+        event_log: EventLog | None = None,
     ) -> BlockRecord | None:
         """★ 规格 §2 第1层：**每个块跑完 = 一个 commit** —— 包括没在盘上留文件的失败块。
 
@@ -944,7 +1139,13 @@ class Runner:
         所以"这个块跑过、结果是失败"这件事本身留痕；`files` 为空是事实（它真没写出文件）。
         """
         return self._commit_block(
-            subtask, verdict=verdict, paths=[subtask.output], summary=summary, commits=commits
+            subtask,
+            verdict=verdict,
+            paths=[subtask.output],
+            summary=summary,
+            commits=commits,
+            runtime=runtime,
+            event_log=event_log,
         )
 
     def _content_judgements(
@@ -953,6 +1154,7 @@ class Runner:
         artifact: Artifact | None,
         pieces: Mapping[str, Any],
         handoffs: Mapping[str, Mapping[str, Any]] | None = None,  # blame: fail-closed — 省略即"没有上游交接件"⇒一条失败来源都指认不出（既有读数一字不变）
+        event_log: EventLog | None = None,
     ) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
         """★ 改动 A：把"产物打开能不能正常用"变成**确定性判据**。
 
@@ -964,12 +1166,13 @@ class Runner:
         返回 `(violations, notices)`；两者都**只影响这一个块**，不影响整跑。
         """
         checks = getattr(self.document, "content_checks", None)
+        log = event_log if event_log is not None else self.event_log
         # ★★ 规格 三①②（fail-closed，上一轮没落实）：**没声明 content_checks ⇒ 具名拒**，
         #   不许静默跳过 —— 第 ④ 格的内容层设计里就写着这一条。
         #   ★ 注意处置：这是**规格缺口**，不是这个块的错 ⇒ 记一条**具名拒绝**进证据，
         #   **不让块失败**（守卫纪律：拒了要说清，但别把没做成的判死）。
         if checks is None or not getattr(checks, "declared", False):
-            self.event_log.record(
+            log.record(
                 kind="gate_check",
                 task_id=self.document.contract.task_id,
                 worker_id=subtask.id,
@@ -1042,7 +1245,7 @@ class Runner:
             skipped = tuple(entry for entry in evaluated if entry.get("skipped"))
             for entry in evaluated:
                 if entry.get("judgement") == "declared_tolerance":
-                    self.event_log.record(
+                    log.record(
                         kind="gate_check",
                         task_id=self.document.contract.task_id,
                         worker_id=subtask.id,
@@ -1051,7 +1254,7 @@ class Runner:
                         detail={"content_declared_tolerance": dict(entry)},
                     )
         if skipped:
-            self.event_log.record(
+            log.record(
                 kind="gate_check",
                 task_id=self.document.contract.task_id,
                 worker_id=subtask.id,
@@ -1066,14 +1269,14 @@ class Runner:
         notices = (*truncation_findings(payload), *from_failed)
         return violations, notices
 
-    def _cleanliness(self) -> dict[str, Any]:
+    def _cleanliness(self, runtime: BlockRuntime | None = None) -> dict[str, Any]:  # blame: whitelist — 缺省即读 self.runtime，只为并发传入本块的 runtime
         """★ 规格 ②：本块结束时算出的 cleanliness（干净 / 污染）。
 
         它是**产物的属性**，不是块的成功/失败 —— 所以 `_publish_disk_artifact` 那条
         "判定失败但产物在盘上"的路径也照记（两件事不许混）。
         它**不参与判定**：不拒收产物、不让块失败、不停跑，只标读数的可信度。
         """
-        recorded = getattr(self.runtime, "last_cleanliness", None)
+        recorded = getattr(runtime if runtime is not None else self.runtime, "last_cleanliness", None)
         if not isinstance(recorded, dict) or not recorded:
             # ★ 缺省不是"没扫"，是"这次跑没有可扫的读类调用"—— 仍然给出可判的形状。
             return {"cleanliness": "clean", "cleanliness_evidence": [], "cleanliness_scanned": 0}
@@ -1105,11 +1308,15 @@ class Runner:
         paths: Sequence[str],
         summary: str = "",
         commits: Mapping[str, str] | None = None,
+        runtime: BlockRuntime | None = None,  # blame: whitelist — 缺省即用 self.runtime（串行既有行为），只为并发注入 per-block runtime
+        event_log: EventLog | None = None,
     ) -> BlockRecord | None:
         """Commit what this block produced; inputs are named **with their producing commit**."""
         store = self._artifact_store()
         if store is None:
             return None
+        runtime = runtime if runtime is not None else self.runtime
+        log = event_log if event_log is not None else self.event_log
         inputs = tuple(
             (name, (commits or {}).get(name, "")) for name in getattr(subtask, "inputs", ()) or ()
         )
@@ -1121,12 +1328,12 @@ class Runner:
                 summary=summary,
                 inputs=inputs,
                 # ★ 过程记录与产物同一个 commit：事后复盘读的就是这份。
-                traces=self.runtime.traces.as_lines(subtask.id),
+                traces=runtime.traces.as_lines(subtask.id),
                 # ★ 预算丢掉的那几条**要有读数**（丢的是过程；静默丢就没人知道少了什么）。
-                traces_dropped=self.runtime.traces.dropped_for(subtask.id),
+                traces_dropped=runtime.traces.dropped_for(subtask.id),
             )
         except (OSError, subprocess.SubprocessError, UnicodeError) as exc:  # 痕迹不能把业务跑挂
-            self.event_log.record(
+            log.record(
                 kind="gate_check",
                 task_id=self.document.contract.task_id,
                 worker_id=subtask.id,
@@ -1162,7 +1369,7 @@ class Runner:
         """The gap as structured event detail (kept structured so a reader can filter it)."""
         return [{"input": name, "producer": producer} for name, producer in gaps]
 
-    def _failure_evidence(self, failed: BlockRuntimeError) -> dict[str, str]:
+    def _failure_evidence(self, failed: BlockRuntimeError, runtime: BlockRuntime | None = None) -> dict[str, str]:  # blame: whitelist — 缺省即读 self.runtime，只为并发传入本块的 runtime
         """Why the block produced nothing -- including a check that rejected it.
 
         ``exit=degrade_single_agent`` with no further detail answers "it failed"
@@ -1171,7 +1378,7 @@ class Runner:
         holds that verdict, so the report can say which rule and on what facts.
         """
         evidence = {"exit": failed.exit_reason, "errors": "; ".join(failed.errors)}
-        judge = self.runtime.last_judge
+        judge = (runtime if runtime is not None else self.runtime).last_judge
         withheld = judge.last_verdict if judge is not None else None
         if withheld is not None and not withheld.ok:
             evidence["rejected_by"] = ", ".join(withheld.failed)
@@ -1282,14 +1489,16 @@ class Runner:
             "blame_actions": {str(blame): list(actions) for blame, actions in BLAME_ACTIONS.items()},
         }
 
-    def _note_gate(self, subtask: Subtask, ok: bool, detail: Mapping[str, Any]) -> None:
+    def _note_gate(
+        self, subtask: Subtask, ok: bool, detail: Mapping[str, Any], event_log: EventLog | None = None  # blame: whitelist — 缺省即用 self.event_log，只为并发注入 per-block log
+    ) -> None:
         """Record one block's outcome on the structured event stream.
 
         ``gate_check`` is the only kind that fits a block outcome: the event
         vocabulary is fixed by ``agentloop/events.py`` and inventing a new kind
         would be a change to the runtime, not to the wiring.
         """
-        self.event_log.record(
+        (event_log if event_log is not None else self.event_log).record(
             kind="gate_check",
             task_id=self.document.contract.task_id,
             worker_id=subtask.id,
