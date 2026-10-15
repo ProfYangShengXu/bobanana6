@@ -298,7 +298,7 @@ constraints:
         description: 给一份 task.yaml 的绝对路径，它按契约切块并行做完，返回每块成没成
         tags: [orchestration, acceptance]
     command: ["wsl", "-d", "Ubuntu", "-u", "root", "--",
-              "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/tools/bb6_bridge.sh"]
+              "/path/to/bobanana6/tools/bb6_bridge.sh"]        # ← 换成你自己的仓库路径
     prompt_via: arg
     cwd: "C:\\Users\\45140"
     timeout_s: 3600

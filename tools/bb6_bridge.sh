@@ -15,6 +15,15 @@
 #   （不进命令行、不进日志、不进桥的配置文件）。
 set -u
 
+#: 仓库根 —— 从本脚本的位置推（`<repo>/tools/bb6_bridge.sh`），不写死某台机器的路径。
+#: 可用 `BB6_REPO` 覆盖（比如仓库不在 WSL 侧的 /mnt/c 下时）。
+THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="${BB6_REPO:-$(cd "$THIS_DIR/.." && pwd)}"
+
+#: 跑 bb6 用的解释器。优先仓库自己的 venv，退回 PATH 上的 python3。
+PY="$REPO/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3 || command -v python)"
+
 #: 端点与 key 的来源。格式与 .env 一致（KEY=VALUE 每行一条）。
 #: 没有这个文件也能跑 —— 那就得靠调用方自己把变量放进 WSL 的环境里。
 BB6_BRIDGE_ENV="${BB6_BRIDGE_ENV:-$HOME/.bb6_bridge.env}"
@@ -26,5 +35,5 @@ if [ -f "$BB6_BRIDGE_ENV" ]; then
     set +a
 fi
 
-cd /mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6 || exit 1
-exec .venv/bin/python tools/bb6_agent_entry.py "$@"
+cd "$REPO" || { echo "{\"ok\": false, \"detail\": \"cannot cd to repo: $REPO\"}"; exit 0; }
+exec "$PY" tools/bb6_agent_entry.py "$@"
