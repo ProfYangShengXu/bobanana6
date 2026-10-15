@@ -135,6 +135,13 @@ def _merge_blocks(
                 partition=f"deliverable:{deliverable.name}",
                 expects=tuple((name, interfaces[name]) for name in parts),
                 output_fields=_mapped(ontology, fields),
+                # ★★ 写块与读块对称：契约声明了体量目标（`min_chars > 0`）时，写块
+                #   收到一条固定的产出指令；没声明 ⇒ `""`，一个字都不加（fail-closed）。
+                write_instruction=_write_output_instruction(
+                    deliverable_name=deliverable.name,
+                    min_chars=deliverable.min_chars,
+                    has_parts=bool(parts),
+                ),
             )
         )
     return blocks
@@ -290,6 +297,11 @@ def split_by_module(
                 mode="write",
                 partition=f"deliverable:{interface_deliverable.name}",
                 output_fields=_mapped(ontology, fields_of(interface_deliverable.name)),
+                write_instruction=_write_output_instruction(
+                    deliverable_name=interface_deliverable.name,
+                    min_chars=interface_deliverable.min_chars,
+                    has_parts=False,
+                ),
             )
         )
     frozen_input = (interface_deliverable.name,) if interface_deliverable is not None else ()
@@ -307,6 +319,11 @@ def split_by_module(
             partition=f"deliverable:{shared.name}",
             expects=tuple((name, interfaces[name]) for name in frozen_input),
             output_fields=_mapped(ontology, fields_of(shared.name)),
+            write_instruction=_write_output_instruction(
+                deliverable_name=shared.name,
+                min_chars=shared.min_chars,
+                has_parts=bool(frozen_input),
+            ),
         )
     )
     module_inputs = (*frozen_input, shared.name)
@@ -332,6 +349,13 @@ def split_by_module(
                 partition=f"module:{name}",
                 expects=tuple((item, interfaces[item]) for item in module_inputs),
                 output_fields=_mapped(ontology, fields_of(output)),
+                # 模块产出一份文件：它**恰好是**某份交付物时才带着那份的体量目标；
+                # 不是交付物（没有任何声明）⇒ 0 ⇒ 不下发，不凭空给代码块一个字数目标。
+                write_instruction=_write_output_instruction(
+                    deliverable_name=output,
+                    min_chars=declared[output].min_chars if output in declared else 0,
+                    has_parts=bool(module_inputs),
+                ),
             )
         )
     return SplitPlan(
@@ -415,6 +439,12 @@ def split_single(
                 mode="write",
                 partition=f"deliverable:{deliverable.name}",
                 output_fields=_mapped(ontology, fields),
+                # 单块也一样：契约声明了体量目标就下发，没声明就一个字都不加。
+                write_instruction=_write_output_instruction(
+                    deliverable_name=deliverable.name,
+                    min_chars=deliverable.min_chars,
+                    has_parts=False,
+                ),
             )
         )
     return SplitPlan(
@@ -687,6 +717,49 @@ def _read_output_instruction(*, input_chars: int, output_floor: int, output_cap:
     )
 
 
+def _write_output_instruction(*, deliverable_name: str, min_chars: int, has_parts: bool) -> str:
+    """The shell's fixed output instruction for one write block.
+
+    The mirror image of :func:`_read_output_instruction`: the read block is told how
+    to *shrink* material into citable points, the write block is told what its
+    artifact must *be*. Four disciplines, all load-bearing:
+
+    * the artifact is the deliverable **itself** -- not a summary, not an outline;
+    * when the contract declares a floor (``min_chars > 0``) it is a **volume** target
+      for the finished text;
+    * text is written straight into the file (``files.write`` / ``append``), and a
+      script that loops out prose is refused by name -- a script may only compute
+      (parse / count / convert), never generate the text itself;
+    * every substantive statement carries a coordinate, and each appended segment is
+      read back with ``files.read`` before the next one is written.
+
+    ``min_chars <= 0`` means the contract declared no floor: the whole instruction is
+    withheld (empty string) rather than guessing one, so a contract written before
+    this option existed behaves exactly as it did before.
+
+    ``has_parts`` is whether the block really was handed input parts: when it was not,
+    the coordinate clause must not claim "the line numbers in the input you got" --
+    that premise would be false (``AGENTS §7⑬``).
+    """
+    if min_chars <= 0:
+        return ""
+    volume_line = f"- 体量：至少 {min_chars} 字符的成品内容。\n"
+    coordinate = "（你收到的输入里带着的行号）" if has_parts else "（你依据的那份输入/来源中的位置）"
+    return (
+        "WRITE BLOCK OUTPUT RULES.\n"
+        f"- 你产出的是 {deliverable_name} 【本身】，不是它的摘要或提纲。\n"
+        + volume_line
+        + "- 直接写进文件：第一次 `files.write`（不带 `append`），"
+        "之后每写一段用 `files.write` + `append=true` 续写。\n"
+        "- ★ 不许写「生成这段文字的脚本」再跑它 —— 脚本循环填出来的是模板"
+        "（同一个值会被填进每一行）。脚本只用于【要算的东西】（解析/统计/格式转换）。\n"
+        f"- 每一条实质性的说法都要带上它的【坐标】{coordinate}。"
+        "这份产物之所以有价值，就在于它可复核。\n"
+        "- 每 append 一段，用 `files.read`（带 offset）回读【刚写的尾巴】，"
+        "确认接上了再写下一段。别靠记忆接。\n"
+    )
+
+
 def _read_goal(
     windows: Sequence[tuple[str, int, int]],
     refs: Sequence[str],
@@ -847,6 +920,13 @@ def split_read_then_product(
                 partition=f"deliverable:{deliverable.name}",
                 expects=tuple((name, interfaces[name]) for name in inputs),
                 output_fields=_mapped(ontology, fields),
+                # ★★ 与读块对称：读块在同一个函数里收到 `_read_output_instruction`，
+                #   写块在这里收到它的另一半 —— 否则"读块被告知写多少、写块没人管"。
+                write_instruction=_write_output_instruction(
+                    deliverable_name=deliverable.name,
+                    min_chars=deliverable.min_chars,
+                    has_parts=bool(inputs),
+                ),
             )
         )
     return SplitPlan(
@@ -935,6 +1015,11 @@ def split_by_dependency(
                 partition=f"deliverable:{deliverable.name}",
                 expects=tuple((name, interfaces[name]) for name in upstream),
                 output_fields=_mapped(ontology, fields),
+                write_instruction=_write_output_instruction(
+                    deliverable_name=deliverable.name,
+                    min_chars=deliverable.min_chars,
+                    has_parts=bool(upstream),
+                ),
             )
         )
     return SplitPlan(

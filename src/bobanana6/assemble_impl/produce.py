@@ -1814,6 +1814,11 @@ class LoopIOImpl(LoopIO):
                     #   压缩先丢最老的 user 行，而 brief 正是那条；指令是 load-bearing 的，
                     #   丢了读块就会自由发挥、把写层再撑爆一次。
                     + (f"\n\n{self.subtask.read_instruction}" if self.subtask.read_instruction else "")
+                    # ★★ 写块的产出指令（若壳给了）——与读块对称的另一半，同样放在
+                    #   **system 的块后缀**：它是 load-bearing 的，丢了写块就退回
+                    #   "产出物写不厚 / 用脚本模板化正文"。空串（契约未声明体量目标）
+                    #   ⇒ 一个字节都不加（fail-closed）。
+                    + (f"\n\n{self.subtask.write_instruction}" if self.subtask.write_instruction else "")
                     + "\n\nComplete this task using the tools available to you. "
                     "When finished, provide a clear, concise summary of:\n"
                     "- What you did\n"

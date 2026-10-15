@@ -1295,6 +1295,33 @@ def test_the_read_output_instruction_reaches_the_model(tmp_path: Path) -> None:
     assert "READ BLOCK OUTPUT RULES." not in plain_system
 
 
+def test_the_write_output_instruction_reaches_the_model(tmp_path: Path) -> None:
+    """★ 与读块对称：写块的产出指令也进 **system 的块后缀**（不是 brief）。
+
+    ★ 字段被赋值而无人读 = `AGENTS §7⑬` 记过的"写下来又没人读" —— 所以必须断言
+    **模型真正收到的那串 messages** 里带着它；非写块（没有指令）一个字节都不加。
+    """
+    from dataclasses import replace
+
+    instruction = (
+        "WRITE BLOCK OUTPUT RULES.\n"
+        "- 你产出的是 out.csv 【本身】，不是它的摘要或提纲。\n"
+        "- 体量：至少 2000 字符的成品内容。\n"
+        "- 直接写进文件：第一次 `files.write`，之后用 `append=true` 续写。\n"
+    )
+    block = replace(
+        subtask("T-01", output="out.csv", mode="write", axis="source"),
+        write_instruction=instruction,
+    )
+    io = _produce_io(tmp_path, _SchemaRefusingClient(), block=block)
+    system = next(message["content"] for message in io.prompt(_state()) if message["role"] == "system")  # type: ignore[attr-defined]
+    assert instruction in system
+    # 非写块（没有指令）一个字节都不加
+    plain = _produce_io(tmp_path, _SchemaRefusingClient())
+    plain_system = next(m["content"] for m in plain.prompt(_state()) if m["role"] == "system")  # type: ignore[attr-defined]
+    assert "WRITE BLOCK OUTPUT RULES." not in plain_system
+
+
 # --------------------------------------------------------------------------- #
 # ★ #39: 工具体检 —— 那个 bug 只在【运行期】现形（字段遮蔽方法）
 #   `BoundTask` 的 dataclass 字段 `contract` 遮蔽了同名方法 `contract()`（实例 `__dict__`

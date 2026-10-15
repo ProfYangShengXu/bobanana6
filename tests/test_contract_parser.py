@@ -261,6 +261,36 @@ def test_a_contract_without_depends_on_stays_empty() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# ★ 写块产出目标：deliverables[].min_chars（给了就解析、没给就是 0、负数报错）
+# --------------------------------------------------------------------------- #
+
+
+def test_min_chars_is_parsed_when_declared() -> None:
+    document = parse_contract(LAYERED.replace("{name: a.csv}", "{name: a.csv, min_chars: 2000}"))
+    assert document.contract.deliverables[0].min_chars == 2000
+    # 其余交付物没声明 ⇒ 0，不会跟着一起变
+    assert [d.min_chars for d in document.contract.deliverables[1:]] == [0, 0]
+
+
+def test_min_chars_absent_is_zero() -> None:
+    """★ fail-closed：没写 `min_chars` ⇒ 0（未声明），与改动前逐字同结果。"""
+    assert all(deliverable.min_chars == 0 for deliverable in parse_contract(VALID).contract.deliverables)
+
+
+def test_min_chars_refuses_a_negative_value() -> None:
+    with pytest.raises(ContractParseError, match=r"\$\.deliverables\[0\]\.min_chars"):
+        parse_contract(LAYERED.replace("{name: a.csv}", "{name: a.csv, min_chars: -5}"))
+
+
+def test_min_chars_refuses_a_value_that_is_not_an_integer() -> None:
+    """★ 坏类型在文件旁边当场拒，不留到切分/运行时才炸。"""
+    for bad in ("'500'", "true", "1.5"):
+        text = LAYERED.replace("{name: a.csv}", f"{{name: a.csv, min_chars: {bad}}}")
+        with pytest.raises(ContractParseError, match="min_chars"):
+            parse_contract(text)
+
+
+# --------------------------------------------------------------------------- #
 # ★ 题面声明：`statement` 指向一个已声明的来源；不填 = 不声明
 # --------------------------------------------------------------------------- #
 

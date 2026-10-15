@@ -487,11 +487,20 @@ class DeliverableSpec:
     #: 不猜、`decompose/` 不解析散文）。空元组 = 没有声明链，此时切分照旧。
     #: core:split —— 分层、同层检查与「接口数纪律」都读它。
     depends_on: tuple[str, ...] = ()  # core:split —— layered 计划据此接线
+    #: ★★ 契约声明的**期望体量**（字符）：这份交付物本身至少要写出多少内容。
+    #: ``0`` = 契约没声明 —— 壳不下发任何产出指令，行为与改动前逐字相同。
+    #: ★ 读者只有一个：写块的产出指令（``decompose/strategies.py``）。它**不是判定** ——
+    #:   产物短了不拒收，这里只加数据、不加规则。
+    min_chars: int = 0  # external:decompose —— 写块的产出体量目标。# blame: fail-closed — 0 = 未声明 ⇒ 不下发任何产出指令，行为与改动前逐字相同
 
     def __post_init__(self) -> None:
         _require_non_empty(self.name, "DeliverableSpec.name must not be empty")
         for upstream in self.depends_on:
             _require_non_empty(upstream, "DeliverableSpec.depends_on entries must not be empty")
+        _require(
+            type(self.min_chars) is int and self.min_chars >= 0,
+            "DeliverableSpec.min_chars must be an integer >= 0",
+        )
 
     @property
     def schema_payload(self) -> Mapping[str, Any]:
@@ -617,6 +626,13 @@ class Subtask:
     #:   （**不进 brief** —— 压缩会先丢最老的 user 行，brief 正是那条）。
     #: 空 = 壳没给产出指令（非读块 / 没声明两级预算）⇒ 一个字都不加。
     read_instruction: str = ""  # external:assemble_impl —— 块提示装配点把它放进 system。# blame: fail-closed — 缺省即"没有产出指令"，不带任何隐含预算
+    #: ★★ 写块的**产出指令** —— 与 `read_instruction` 对称的另一半，但**不复用它**：
+    #: 那个字段的名字与语义都是读块的（把材料压成"一行一条、≤N 字符"的可引用要点），
+    #: 混用会让下一个读代码的人以为写块也受读层预算管。
+    #: 写块收到的是：产出的是交付物【本身】、声明的体量目标、直接写文件（`files.write` +
+    #: `append` 续写）、脚本只用于要算的东西、每条说法带坐标、每段回读尾巴。
+    #: 空 = 壳没给产出指令（契约未声明 `min_chars` / 不是写块）⇒ 一个字都不加。
+    write_instruction: str = ""  # external:assemble_impl —— 块提示装配点把它放进 system（块后缀）。# blame: fail-closed — 缺省即"没有产出指令"
 
     def __post_init__(self) -> None:
         _require_non_empty(self.id, "Subtask.id must not be empty")

@@ -289,9 +289,19 @@ def _deliverables(
         if not isinstance(required, bool):
             _fail(source, f"{path}.required", "required must be a boolean", "type")
         depends_on = _depends_on(raw.get("depends_on", ()), source, path, name=name, names=names)  # blame: fail-open — ★该改：缺声明 ⇒ 没有依赖链 ⇒ 分层/接口检查都无从谈起，切分器照样扇出
+        #: ★★ 期望体量：契约声明的"这份交付物本身至少要写多少字符"。缺声明 = 0，
+        #: 写块就收不到任何产出指令（fail-closed，行为与改动前逐字相同）。
+        #: 校验定在文件旁边：不是整数 / 负数当场拒，不留到切分或运行时才炸。
+        min_chars = raw.get("min_chars", 0)  # blame: fail-closed — 缺声明即 0（未声明）⇒ 不下发产出指令，不凭空压一个体量
+        if isinstance(min_chars, bool) or not isinstance(min_chars, int):
+            _fail(source, f"{path}.min_chars", "min_chars must be an integer", "type")
+        if min_chars < 0:
+            _fail(source, f"{path}.min_chars", "min_chars must be >= 0", "minimum")
         try:
             deliverables.append(
-                DeliverableSpec(name=name, schema=fields, required=required, depends_on=depends_on)
+                DeliverableSpec(
+                    name=name, schema=fields, required=required, depends_on=depends_on, min_chars=min_chars
+                )
             )
         except ValueError as exc:
             _fail(source, path, str(exc), "deliverable")
