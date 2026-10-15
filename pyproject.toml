@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bobanana6"
-version = "0.0.0"
+version = "0.1.0"
 description = "Deterministic judgment kernel for sharded multi-worker task execution."
 # 3.11+ is the floor because the core is meant to stay dependency-free while
 # still being able to read TOML through the stdlib (`tomllib`, added in 3.11).
