@@ -45,7 +45,7 @@ def main() -> int:
         env={},
         workspace=True,
         strategy="source",
-        max_calls=int(os.environ.get("BB6_MAX_CALLS", "60")),
+        max_calls=int(os.environ.get("BB6_MAX_CALLS", "150")),
     )
     seconds = time.time() - started
 

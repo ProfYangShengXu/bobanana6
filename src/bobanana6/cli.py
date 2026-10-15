@@ -270,7 +270,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--strategy", default="source", choices=("source", "field", "module", "single"), help="切分策略")
     run.add_argument("--offline", action="store_true", help="不接网络：用确定性离线模型与本地源")
     run.add_argument("--offline-script", default="", help="离线脚本（JSON），用固定响应驱动")
-    run.add_argument("--max-calls", type=int, default=64)
+    run.add_argument("--max-calls", type=int, default=150)
     run.add_argument("--max-wall-s", type=int, default=3600)
     run.add_argument("--max-output", type=int, default=8192)
     run.add_argument("--context-length", type=int, default=32768)
