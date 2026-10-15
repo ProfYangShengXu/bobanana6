@@ -345,3 +345,49 @@ def test_the_block_budget_rejects_a_bad_headroom() -> None:
     for bad in (0.0, -0.1, 1.5):
         with pytest.raises(ValueError, match="headroom"):
             block_char_budget(policy, headroom=bad)
+
+
+# --------------------------------------------------------------------------- #
+# ★★ the two-level budget: read band + write-layer ceiling, one ruler
+# --------------------------------------------------------------------------- #
+
+
+def test_the_two_level_block_band_is_the_same_ruler_times_four_fractions() -> None:
+    """★★ 两级预算的四个数都从 `compression_threshold` × `CHARS_PER_SIZE_UNIT` 派生。
+
+    默认参数（32768 / 8192）下：threshold = 12288 units = 49152 字符
+      读块输入 ∈ [0.6, 0.8] × 49152 = [29491, 39321]
+      写块输入 ∈ [0.1, 0.3] × 49152 = [4915, 14745]（所有 part 的总和）
+    """
+    from bobanana6.agentloop.compress import (
+        CHARS_PER_SIZE_UNIT,
+        READ_BUDGET_HIGH,
+        READ_BUDGET_LOW,
+        WRITE_BUDGET_HIGH,
+        WRITE_BUDGET_LOW,
+        block_char_band,
+    )
+
+    policy = CompressionPolicy(context_length=32768, max_tokens=8192, pct=0.5)
+    threshold_chars = compression_threshold(policy) * CHARS_PER_SIZE_UNIT
+    assert threshold_chars == 49152
+    band = block_char_band(policy)
+    assert (band.read_min, band.read_max) == (
+        int(READ_BUDGET_LOW * threshold_chars),
+        int(READ_BUDGET_HIGH * threshold_chars),
+    )
+    assert (band.read_min, band.read_max) == (29491, 39321)
+    assert (band.write_min, band.write_max) == (
+        int(WRITE_BUDGET_LOW * threshold_chars),
+        int(WRITE_BUDGET_HIGH * threshold_chars),
+    )
+    assert (band.write_min, band.write_max) == (4915, 14745)
+
+
+def test_a_degenerate_policy_collapses_the_whole_band_to_zero() -> None:
+    """阈值塌 0 ⇒ 四个数全 0，调用方读成"没有预算"（与单层预算同一条出口）。"""
+    from bobanana6.agentloop.compress import block_char_band
+
+    collapsed = CompressionPolicy(context_length=32769, max_tokens=32768)
+    band = block_char_band(collapsed)
+    assert (band.read_min, band.read_max, band.write_min, band.write_max) == (0, 0, 0, 0)

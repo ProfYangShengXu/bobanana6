@@ -641,3 +641,101 @@ def test_sized_read_blocks_declare_their_windows_to_the_model() -> None:
     view = BoundTask(subtask=read, contract_document=research_contract()).mysubtask()
     assert view["reads"] == [{"ref": ref, "start": start, "end": end} for ref, start, end in read.reads]
     assert view["axis"] == "window"
+
+
+# --------------------------------------------------------------------------- #
+# ★★ 两级预算：读块输入落在 [min, max]；写层预算倒推读块的产出上限
+# --------------------------------------------------------------------------- #
+
+
+def _band_lines():
+    """4 份源、framed 总量 3150：3×12 行 + 1×6 行（每行 43 字符 + 32 framing = 75）。
+
+    ⇒ 上界 1000 时至少 4 块；下界 750 时每块都不许低于它。
+    改动前的 first-fit 会留一个 450 的尾块 —— 这正是要修的形态。
+    """
+    return {"hunt": (43,) * 12, "hunt:1": (43,) * 12, "hunt:2": (43,) * 12, "instr": (43,) * 6}
+
+
+def test_the_read_layer_is_cut_by_amount_of_work_into_the_declared_band() -> None:
+    """★★ 判据是【任务量】：块数 = ceil(总字符 / 上界)，每块落在 [下界, 上界]。"""
+    lines = _band_lines()
+    budget = BlockBudget(max_chars=1000, min_chars=750)
+    plan = Decomposer(strategy="source", block_budget=budget).split(
+        research_contract(), ontology(), research_recon(lines)
+    )
+    reads = _read_blocks(plan)
+    costs = [_cost(block, lines, budget) for block in reads]
+    assert len(reads) == 4, costs
+    assert all(budget.min_chars <= cost <= budget.max_chars for cost in costs), costs
+    assert all(block.reads and block.axis == "window" for block in reads)
+
+
+def test_without_a_declared_floor_the_shape_is_the_pre_change_one() -> None:
+    """★ 反证：同一份材料，只是不声明下界 ⇒ 回到旧的 fill-to-cap（尾部 450 < 750）。
+
+    判据是"有没有声明下界"，不是"源有几份" —— 源数一个字没变。
+    """
+    lines = _band_lines()
+    on = Decomposer(strategy="source", block_budget=BlockBudget(max_chars=1000, min_chars=750)).split(
+        research_contract(), ontology(), research_recon(lines)
+    )
+    off = Decomposer(strategy="source", block_budget=BlockBudget(1000)).split(
+        research_contract(), ontology(), research_recon(lines)
+    )
+    ruler = BlockBudget(1000)
+    on_costs = [_cost(block, lines, ruler) for block in _read_blocks(on)]
+    off_costs = [_cost(block, lines, ruler) for block in _read_blocks(off)]
+    assert all(cost >= 750 for cost in on_costs), on_costs
+    assert any(cost < 750 for cost in off_costs), off_costs
+
+
+def test_the_read_output_cap_is_back_derived_from_the_write_ceiling() -> None:
+    """★★ 写层上限 ÷ 读块数 ⇒ 每块的产出上限；写层下限同理给出下限。"""
+    budget = BlockBudget(max_chars=39321, min_chars=29491, write_min_chars=4915, write_max_chars=14745)
+    assert budget.read_output_cap(8) == 1843  # 14745 // 8
+    assert budget.read_output_floor(8) == 615  # ceil(4915 / 8)
+    assert budget.read_output_cap(0) == 14745  # never divide by zero
+    assert BlockBudget(1000).read_output_cap(4) == 0  # no write budget -> no cap
+    assert BlockBudget(1000).read_output_floor(4) == 0
+
+
+def test_the_read_output_instruction_carries_both_budgets_and_the_index_discipline() -> None:
+    """★ 读块的 prompt 里同时有【输入预算】与【产出预算】+ 固定的索引式产出指令。"""
+    lines = _band_lines()
+    budget = BlockBudget(max_chars=1000, min_chars=750, write_min_chars=400, write_max_chars=1200)
+    plan = Decomposer(strategy="source", block_budget=budget).split(
+        research_contract(), ontology(), research_recon(lines)
+    )
+    reads = _read_blocks(plan)
+    cap = budget.read_output_cap(len(reads))  # 1200 // 4
+    floor = budget.read_output_floor(len(reads))  # ceil(400 / 4)
+    for block in reads:
+        instruction = block.read_instruction
+        assert f"at most {cap} characters" in instruction
+        assert f"at least {floor} characters" in instruction
+        assert f"{_cost(block, lines, budget)} characters of material" in instruction
+        # 三条纪律：可回指的坐标 / 行号落在窗口内 / 一行一条
+        assert "citable points with line numbers" in instruction
+        assert "one entry per line" in instruction
+        assert "must lie inside one of the windows" in instruction
+
+
+def test_without_a_write_layer_budget_no_output_instruction_is_handed_down() -> None:
+    """★ fail-closed：不知道写层预算 ⇒ 一个上限都不编，也不下发指令。"""
+    lines = _band_lines()
+    plan = Decomposer(strategy="source", block_budget=BlockBudget(max_chars=1000, min_chars=750)).split(
+        research_contract(), ontology(), research_recon(lines)
+    )
+    reads = _read_blocks(plan)
+    assert reads
+    assert all(block.read_instruction == "" for block in reads)
+
+
+def test_the_block_budget_validates_the_band() -> None:
+    with pytest.raises(ValueError):
+        BlockBudget(max_chars=1000, min_chars=1001)
+    with pytest.raises(ValueError):
+        BlockBudget(max_chars=1000, min_chars=-1)
+    with pytest.raises(ValueError):
+        BlockBudget(max_chars=1000, write_min_chars=10, write_max_chars=5)

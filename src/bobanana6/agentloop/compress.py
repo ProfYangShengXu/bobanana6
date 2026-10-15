@@ -33,9 +33,15 @@ from typing import Any
 
 __all__ = [
     "CHARS_PER_SIZE_UNIT",
+    "READ_BUDGET_HIGH",
+    "READ_BUDGET_LOW",
     "TRUNCATION_MARKER",
+    "WRITE_BUDGET_HIGH",
+    "WRITE_BUDGET_LOW",
+    "BlockCharBand",
     "CompressionPolicy",
     "CompressionResult",
+    "block_char_band",
     "block_char_budget",
     "compact",
     "compression_threshold",
@@ -54,6 +60,23 @@ _SUMMARY_MARKER = "…[summary of dropped messages]"
 #: ``block_char_budget`` both derive from it, so a budget stated in size units
 #: and a payload measured in characters cannot silently drift apart.
 CHARS_PER_SIZE_UNIT = 4
+
+#: ★★ The two-level block budget, as fractions of the same compression threshold
+#: (size units -> chars through ``CHARS_PER_SIZE_UNIT``; see ``block_char_band``).
+#:
+#:   read layer : one read block's input must land in [0.6, 0.8] x threshold_chars
+#:   write layer: the *sum* of every read block's output (what the write block is
+#:                handed) must land in [0.1, 0.3] x threshold_chars
+#:
+#: The write upper bound is what back-derives each read block's output cap: the
+#: write layer can only eat ``0.3 x threshold_chars``, so N read blocks may each
+#: emit at most that divided by N. Without the back-derivation a free-running read
+#: layer re-creates the very overflow this split exists to avoid -- the same
+#: disease in a different place.
+READ_BUDGET_LOW = 0.6
+READ_BUDGET_HIGH = 0.8
+WRITE_BUDGET_LOW = 0.1
+WRITE_BUDGET_HIGH = 0.3
 
 
 @dataclass(frozen=True)
@@ -96,6 +119,37 @@ def block_char_budget(policy: CompressionPolicy, *, headroom: float = 0.7) -> in
     if not 0.0 < headroom <= 1.0:
         raise ValueError("headroom must be in (0, 1]")
     return max(0, int(compression_threshold(policy) * CHARS_PER_SIZE_UNIT * headroom))
+
+
+@dataclass(frozen=True)
+class BlockCharBand:
+    """The two-level block budget in characters, all off the one ruler.
+
+    ``read_min`` / ``read_max`` bound **one read block's input**; ``write_min`` /
+    ``write_max`` bound **the sum of all read-block outputs** (what a write block
+    is handed). Every number is ``block_char_budget`` at a different headroom, so
+    the band and the compression trigger cannot drift apart.
+    """
+
+    read_min: int
+    read_max: int
+    write_min: int
+    write_max: int
+
+
+def block_char_band(policy: CompressionPolicy) -> BlockCharBand:
+    """Both levels of the block budget -- same threshold, three headrooms.
+
+    ``write_min``/``write_max`` are deliberately stated over the *whole* read
+    layer, not per block: the write block consumes every ``part-*.csv`` at once,
+    so a per-block cap alone does not bound what it is handed.
+    """
+    return BlockCharBand(
+        read_min=block_char_budget(policy, headroom=READ_BUDGET_LOW),
+        read_max=block_char_budget(policy, headroom=READ_BUDGET_HIGH),
+        write_min=block_char_budget(policy, headroom=WRITE_BUDGET_LOW),
+        write_max=block_char_budget(policy, headroom=WRITE_BUDGET_HIGH),
+    )
 
 
 def digest(message: Mapping[str, Any]) -> str:

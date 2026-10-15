@@ -36,7 +36,7 @@ from .adapters import (
     ScriptedClient,
     TokenRateLimiter,
 )
-from .agentloop.compress import CompressionPolicy, block_char_budget
+from .agentloop.compress import CompressionPolicy, block_char_band
 from .agentloop.concurrency import GateConfig, RuntimeGate
 from .agentloop.events import EventLog
 from .assemble_impl import (
@@ -119,16 +119,27 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
     reader = SnapshotFileReader(store=store, forms=forms_for(contract.sources))
 
     budget = Budget(max_calls=args.max_calls, max_wall_s=args.max_wall_s, max_output=args.max_output)
-    # ★★ 单块输入预算 = 压缩阈值 × 余量（同一把尺子，见 `block_char_budget`）。
-    #   切分器据此把一个超预算的源拆成多个读块、把几份小源合成一个读块。
+    # ★★ 两级块预算 = 压缩阈值 × 两个系数（同一把尺子，见 `block_char_band`）：
+    #   读块输入 ∈ [0.6, 0.8]×阈值；写块输入（全部 part 的总和）∈ [0.1, 0.3]×阈值。
+    #   切分器据此把一个超预算的源拆成多个读块、把几份小源合成一个读块；
+    #   读块的产出上限由写层上界 ÷ 读块数倒推。
     #   ★ 阈值塌成 0（`--max-output >= --context-length`）时**不传预算** ——
     #     "没有可用预算"是"不按大小切"，不是"把每份源拆碎"。
     compression = CompressionPolicy(
         context_length=max(args.context_length, budget.max_output + 1),
         max_tokens=budget.max_output,
     )
-    block_chars = block_char_budget(compression, headroom=float(getattr(args, "block_headroom", 0.7)))
-    block_budget = BlockBudget(block_chars) if block_chars > 0 else None
+    band = block_char_band(compression)
+    block_budget = (
+        BlockBudget(
+            max_chars=band.read_max,
+            min_chars=band.read_min,
+            write_min_chars=band.write_min,
+            write_max_chars=band.write_max,
+        )
+        if band.read_max > 0
+        else None
+    )
     decomposer = Decomposer(
         strategy=args.strategy,
         budget=RoundBudget(document.limits.max_rounds),
@@ -233,14 +244,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-wall-s", type=int, default=3600)
     run.add_argument("--max-output", type=int, default=8192)
     run.add_argument("--context-length", type=int, default=32768)
-    #: ★★ 单块输入预算占压缩阈值的比例（默认 0.7 = 留 30% 余量，别一进门就触发压缩）。
-    #: 只影响**切分**（拆窗口 / 合成块），不动压缩阈值本身。
-    run.add_argument(
-        "--block-headroom",
-        type=float,
-        default=0.7,
-        help="一个读块的输入最多占压缩阈值的多少（0,1]；越小切得越碎，默认 0.7",
-    )
+    # ★ 单块输入预算不再由命令行给：两级预算的四个系数声明在
+    #   `agentloop/compress.py`（`READ_BUDGET_LOW/HIGH`、`WRITE_BUDGET_LOW/HIGH`），
+    #   与压缩阈值共用一把尺子。原来的 `--block-headroom` 只影响读侧上界，
+    #   留着会让"命令行的 0.6 / argparse 的 0.7"分叉，所以删掉。
     #: 充裕并发是这个项目的前提；声明得比需求小，装配就会以 capability_short 拒绝。
     run.add_argument("--concurrency", type=int, default=8)
     return parser

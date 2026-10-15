@@ -610,6 +610,13 @@ class Subtask:
     #: ★ 这是一条**声明**，不是一个注释：读者是 `services/tools.py::BoundTask.mysubtask`，
     #:   它把 `reads` 原样放进 brief 交到模型手上（模型据此调带 offset/limit 的读工具）。
     reads: tuple[tuple[str, int, int], ...] = ()  # external:services —— mysubtask 把窗口交进 brief。# blame: fail-closed — 缺省即"没有窗口声明"，不凭空指一个范围
+    #: ★★ 读块的**产出指令**（壳写死的模板，不是契约字段）：把材料压成「可引用的要点 + 行号」、
+    #: 一条一行、≤ N 字符。N 由写层预算倒推（`BlockBudget.read_output_cap`），
+    #: 所以读块同时知道【读多少】与【写多少】—— 不知道产出上限的读块会把写层再撑爆一次。
+    #: ★ 读者是 `assemble_impl/produce.py`（块提示的装配点）：它把这段放进 system 的块后缀
+    #:   （**不进 brief** —— 压缩会先丢最老的 user 行，brief 正是那条）。
+    #: 空 = 壳没给产出指令（非读块 / 没声明两级预算）⇒ 一个字都不加。
+    read_instruction: str = ""  # external:assemble_impl —— 块提示装配点把它放进 system。# blame: fail-closed — 缺省即"没有产出指令"，不带任何隐含预算
 
     def __post_init__(self) -> None:
         _require_non_empty(self.id, "Subtask.id must not be empty")

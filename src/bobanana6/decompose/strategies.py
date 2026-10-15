@@ -496,7 +496,15 @@ def _read_blocks(
     no `set`/`dict` iteration enters the decision. A source whose extent we were not
     told gets a whole-source block of its own and is never merged (we cannot bound
     what we cannot measure).
+
+    ★ When a **floor** is declared (``min_chars > 0``) this fill-to-cap behavior is
+    replaced by :func:`_banded_read_blocks`: the group count comes from the amount of
+    material and the groups are balanced against each other, so no block falls under
+    the floor. Without a floor there is nothing to balance toward, and this function
+    keeps the pre-change shape byte for byte.
     """
+    if budget.min_chars > 0:
+        return _banded_read_blocks(keys, lines_by_ref, budget)
     blocks: list[list[tuple[str, int, int]]] = []
     refs_by_block: list[list[str]] = []
     costs: list[int] = []
@@ -527,6 +535,156 @@ def _read_blocks(
                 refs_by_block.append([ref])
                 costs.append(piece_cost)
     return [(tuple(windows), tuple(refs)) for windows, refs in zip(blocks, refs_by_block, strict=True)]
+
+
+def _balanced_line_groups(
+    atoms: Sequence[tuple[str, int, int]],
+    max_chars: int,
+) -> list[list[tuple[str, int, int]]]:
+    """Line atoms -> balanced groups each no larger than ``max_chars``.
+
+    ``atoms`` are ``(ref, line_index, framed_cost)`` in material order; every cost
+    is already ``<= max_chars`` (an over-budget single line is emitted alone by the
+    caller). The group count is the *fewest* that can hold the material,
+    ``ceil(total / max_chars)``; each group then closes once it has taken its fair
+    share of what is left (``remaining / groups_left``), so the groups come out
+    balanced instead of each being filled to the ceiling.
+
+    ★ Why not greedy fill-to-cap: with coarse source windows it leaves a small tail.
+    On the acceptance corpus (296,727 framed characters, cap 39,321) fill-to-cap
+    yields 9 groups, two of them under the 0.6 x threshold floor (22,985 / 16,560).
+    Picking the group count first and re-deriving the fair share after every cut is
+    what puts every group in band. The comparison is done in integers
+    (``carried * groups_left >= remaining``) so it stays exact and deterministic.
+    """
+    total = sum(cost for _, _, cost in atoms)
+    if total <= 0:
+        return []
+    groups_left = max(1, -(-total // max_chars))
+    groups: list[list[tuple[str, int, int]]] = []
+    current: list[tuple[str, int, int]] = []
+    carried = 0
+    remaining = total
+    for atom in atoms:
+        # Close when the next atom no longer fits, or when this group has had its
+        # fair share -- but always keep room for the groups still to come.
+        if current and (
+            carried + atom[2] > max_chars or (groups_left > 1 and carried * groups_left >= remaining)
+        ):
+            groups.append(current)
+            remaining -= carried
+            groups_left = max(1, groups_left - 1)
+            current, carried = [], 0
+        current.append(atom)
+        carried += atom[2]
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _windows_from_lines(
+    group: Sequence[tuple[str, int, int]],
+) -> tuple[tuple[str, int, int], ...]:
+    """Consecutive line atoms -> the ``(ref, start, end)`` windows a reader can re-request.
+
+    ``sources.read`` is addressed by line offset/limit, so the only cut a block can
+    re-ask for is a line range. Atoms arrive in source then line order, so equal-ref
+    runs are exactly the contiguous windows.
+    """
+    windows: list[tuple[str, int, int]] = []
+    ref = ""
+    start = 0
+    previous = -1
+    for line_ref, index, _cost in group:
+        if line_ref == ref and index == previous + 1:
+            previous = index
+            continue
+        if ref:
+            windows.append((ref, start, previous + 1))
+        ref, start, previous = line_ref, index, index
+    if ref:
+        windows.append((ref, start, previous + 1))
+    return tuple(windows)
+
+
+def _banded_read_blocks(
+    keys: Sequence[str],
+    lines_by_ref: Mapping[str, tuple[int, ...]],
+    budget: BlockBudget,
+) -> list[tuple[tuple[tuple[str, int, int], ...], tuple[str, ...]]]:
+    """The read layer packed into the declared band ``[min_chars, max_chars]``.
+
+    ★ Only reached when a floor is declared (``budget.min_chars > 0``); without one
+    ``_read_blocks`` keeps the pre-change fill-to-cap shape.
+
+    The band is what makes the cut "by amount of work": the number of blocks comes
+    from the material (``ceil(total / max_chars)``) and the block boundaries are
+    balanced, instead of each block being filled until it hits the ceiling. A source
+    with no size fact still gets a whole block of its own and is never merged -- it
+    just splits the material into independently balanced runs.
+    """
+    packed: list[tuple[list[tuple[str, int, int]], list[str]]] = []
+
+    def flush(atoms: list[tuple[str, int, int]]) -> None:
+        if not atoms:
+            return
+        for group in _balanced_line_groups(atoms, budget.max_chars):
+            windows = _windows_from_lines(group)
+            packed.append((list(windows), list(dict.fromkeys(ref for ref, _, _ in windows))))
+
+    pending: list[tuple[str, int, int]] = []
+    for ref in keys:
+        line_chars = lines_by_ref.get(ref)
+        if not line_chars:
+            flush(pending)
+            pending = []
+            packed.append(([], [ref]))  # no size fact: own block, never merged
+            continue
+        for index, size in enumerate(line_chars):
+            cost = size + READ_FRAME_CHARS_PER_LINE
+            if cost > budget.max_chars:
+                # The one indivisible unit: a single line longer than the ceiling is
+                # emitted alone rather than dropped or cut mid-line (same rule as
+                # `_windows_for`).
+                flush(pending)
+                pending = []
+                packed.append(([(ref, index, index + 1)], [ref]))
+                continue
+            pending.append((ref, index, cost))
+    flush(pending)
+    return [(tuple(windows), tuple(refs)) for windows, refs in packed]
+
+
+def _read_output_instruction(*, input_chars: int, output_floor: int, output_cap: int) -> str:
+    """The shell's fixed output instruction for one read block.
+
+    Three disciplines, all load-bearing:
+
+    * **index, not argument** -- emit coordinates another machine can recompute from
+      the same material (line number / short verbatim fragment), never prose;
+    * the line numbers must be the ones ``sources.read`` returns (1-based) and must
+      fall inside the window(s) this block was told to read;
+    * **fixed shape** (one entry per line) so the write block can consume it.
+    """
+    floor_clause = (
+        f"aim for at least {output_floor} characters so the assembly block is fed"
+        if 0 < output_floor <= output_cap
+        else "do not pad"
+    )
+    return (
+        "READ BLOCK OUTPUT RULES.\n"
+        "- Compress the material you read into **citable points with line numbers**: "
+        "one entry per line (one row of `text`).\n"
+        "- Every entry starts with the source line number it comes from -- the 1-based "
+        "`line` value `sources.read` returns -- and that line must lie inside one of the "
+        "windows this block was told to read (the brief's `reads`, or the range in your task).\n"
+        "- Index, not prose: give coordinates another machine can recompute from the same "
+        "material (line number + a short verbatim fragment). Do NOT write commentary such as "
+        "\"this section explains ...\".\n"
+        "- Fixed shape: no free-form paragraphs around the entries.\n"
+        f"- Input budget: you were handed {input_chars} characters of material.\n"
+        f"- Output budget: at most {output_cap} characters; {floor_clause}.\n"
+    )
 
 
 def _read_goal(
@@ -584,6 +742,14 @@ def split_read_then_product(
     ★★ 读层的切口维度是**大小**，不是"源有几份"：
       超过单块预算的源按行拆成多块；多份远小于预算的源合成一块。
       `axis="window"` 就是这件事的名字（枚举里一直有它，此前没有实作）。
+      ★ 声明了下界（`BlockBudget.min_chars`）时按【任务量】均衡切：块数 =
+      `ceil(总字符 / 上界)`，块边界让每块落在 `[min, max]` —— 不是"填满再开下一块"
+      （那会在尾部留一个低于下界的小块）。
+
+    ★ 读块的产出也有预算，而且是**倒推**出来的：写块吃全部 part，上限
+      `write_max_chars`，所以 N 个读块每块最多写 `write_max_chars / N`
+      （下限同理用 `write_min_chars / N` 向上取整）。两个数连同一条固定的
+      「可引用要点 + 行号、一条一行」指令交给读块 —— 只读不写的读块会把写层再撑爆一次。
 
     ★ 产物块读的是**读层的产物**（小），不是原文（大）。
       产出块再也不需要自己扛全部材料 —— 上下文爆的那条路被切掉了。
@@ -606,12 +772,27 @@ def split_read_then_product(
 
     if sized:
         assert block_budget is not None  # narrowed by `sized`
-        for index, (windows, refs) in enumerate(_read_blocks(keys, lines_by_ref, block_budget), start=1):
+        packed = _read_blocks(keys, lines_by_ref, block_budget)
+        # ★★ 由写层预算【倒推】读层的产出上限：写块吃所有 part，所以 N 个读块
+        #   每块最多写 write_max_chars / N —— 上限写进每个读块的指令里。
+        #   没有写层预算（write_max_chars == 0）时不给上限、也不下发指令（fail-closed）。
+        output_cap = block_budget.read_output_cap(len(packed))
+        output_floor = block_budget.read_output_floor(len(packed))
+        for index, (windows, refs) in enumerate(packed, start=1):
             # ★ 序号命名（不是 `part-<源>`）：一个块可能覆盖多个窗口 / 多份源，
             #   名字必须无歧义且唯一；覆盖范围由 `reads` 与 `goal` 声明并送进 brief。
             output = f"part-{index:02d}.csv"
             parts.append(output)
             interfaces[output] = _descriptor(part_fields)
+            input_chars = sum(
+                sum(lines_by_ref[ref][start:end]) + READ_FRAME_CHARS_PER_LINE * (end - start)
+                for ref, start, end in windows
+            )
+            read_instruction = (
+                _read_output_instruction(input_chars=input_chars, output_floor=output_floor, output_cap=output_cap)
+                if windows and output_cap > 0
+                else ""
+            )
             blocks.append(
                 Subtask(
                     id=f"T-{index:02d}",
@@ -623,6 +804,7 @@ def split_read_then_product(
                     mode="read",
                     reads=windows,
                     output_fields=_mapped(ontology, part_fields),
+                    read_instruction=read_instruction,
                 )
             )
     else:

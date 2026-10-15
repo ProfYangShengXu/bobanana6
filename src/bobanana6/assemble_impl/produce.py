@@ -1792,6 +1792,10 @@ class LoopIOImpl(LoopIO):
                     self._system_prefix(constant_entries)
                     + "\n\nYOUR TASK:\n"
                     + (self.subtask.goal or self.subtask.output)
+                    # ★★ 读块的产出指令（若壳给了）。放在 **system 的块后缀**，不放 brief：
+                    #   压缩先丢最老的 user 行，而 brief 正是那条；指令是 load-bearing 的，
+                    #   丢了读块就会自由发挥、把写层再撑爆一次。
+                    + (f"\n\n{self.subtask.read_instruction}" if self.subtask.read_instruction else "")
                     + "\n\nComplete this task using the tools available to you. "
                     "When finished, provide a clear, concise summary of:\n"
                     "- What you did\n"

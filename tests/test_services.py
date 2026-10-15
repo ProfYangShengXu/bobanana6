@@ -1267,6 +1267,34 @@ def test_the_system_prompt_is_rendered_from_the_answer_contract(tmp_path: Path) 
         assert answer_field.granularity in system, answer_field.name
 
 
+def test_the_read_output_instruction_reaches_the_model(tmp_path: Path) -> None:
+    """★ 声明必须有送达路径：读块的产出指令进 **system 的块后缀**（不是 brief）。
+
+    ★ 为什么不能只进 brief：压缩先丢最老的 **user** 行，而 brief 正是那条 ——
+    指令丢了读块就自由发挥、把写层再撑爆一次。所以断言 system 里那条。
+    """
+    from dataclasses import replace
+
+    instruction = (
+        "READ BLOCK OUTPUT RULES.\n"
+        "- Compress the material you read into **citable points with line numbers**: one entry per line.\n"
+        "- Output budget: at most 1843 characters; aim for at least 615 characters so the assembly block is fed.\n"
+    )
+    block = replace(
+        subtask("T-01", output="part-01.csv", mode="read", axis="window"),
+        reads=(("hunt", 0, 12),),
+        read_instruction=instruction,
+    )
+    io = _produce_io(tmp_path, _SchemaRefusingClient(), block=block)
+    messages = io.prompt(_state())  # type: ignore[attr-defined]
+    system = next(message["content"] for message in messages if message["role"] == "system")
+    assert instruction in system
+    # 非读块（没有指令）一个字节都不加
+    plain = _produce_io(tmp_path, _SchemaRefusingClient())
+    plain_system = next(m["content"] for m in plain.prompt(_state()) if m["role"] == "system")  # type: ignore[attr-defined]
+    assert "READ BLOCK OUTPUT RULES." not in plain_system
+
+
 # --------------------------------------------------------------------------- #
 # ★ #39: 工具体检 —— 那个 bug 只在【运行期】现形（字段遮蔽方法）
 #   `BoundTask` 的 dataclass 字段 `contract` 遮蔽了同名方法 `contract()`（实例 `__dict__`
