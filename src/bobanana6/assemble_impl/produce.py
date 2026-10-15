@@ -2838,11 +2838,16 @@ class LoopIOImpl(LoopIO):
         root = self._workspace_value()
         if not root:
             return ""
+        # ★ 负向例子用**现算的目录名**，不是写死的 "workspace"：换个部署根目录叫别的
+        #   名字时，提示与护栏（`services/workspace.py` 的 basename 判据）必须指同一层。
+        owner = Path(root).name
         return (
             "\n\nWORKSPACE PATH:\n"
             + root
             + "\n★ 这就是你的工作目录。**brief 里所有相对路径都以它为基准** —— "
             "`output/xxx.csv` 指的就是 `" + root + "/output/xxx.csv`。\n"
+            "★ 不要写成 `" + owner + "/output/xxx` —— 你**已经在**工作目录里面了："
+            "正确是 `output/xxx`，`" + owner + "/` 那层是多余的。\n"
             "★ 不许自己推断或猜测绝对路径：需要绝对路径时，一律拿上面这个前缀去拼。"
             "题面或说明里出现的其它绝对路径（例如 `/app/...`）属于原环境，在这里不成立。\n"
             "Your tools run inside this directory. The task's own material is already "

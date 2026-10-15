@@ -262,6 +262,9 @@ class BoundWorkspace:
     #: ★ 本块的总写入字节闸（见 `WriteBudget`）。默认一块一份；`runtime` 会把这个对象
     #: 同时交给答案 `files` 通道，于是"写工具写的 + 答案写写的"在同一本账上累加。
     write_budget: WriteBudget = field(default_factory=WriteBudget)
+    #: ★★ 重复 workspace 前缀的具名拒（见 `_check_region`）：路径第一段恰好等于工作目录
+    #: 自己的 basename 时拒，并给正确路径。`False` = 关掉（只给测试做反向用）。
+    reject_redundant_prefix: bool = True  # blame: fail-closed — 省略即护栏生效（拦下"多一层目录名"的路径），方向保守
     #: Long-lived helpers owned by this block (background jobs).
     _background: list[subprocess.Popen[bytes]] = field(default_factory=list)
     #: 完整输出落盘失败过几次（**如实报**，不假装存了；见硬边界⑦：落盘是辅助不是前置门）。
@@ -305,11 +308,49 @@ class BoundWorkspace:
         ★ `read()` 走的是**同一条**判定（`may_write`），只在失败时换一个具名异常：
         读失败报"你不能写"会让归因读错层（见 `ReadOutsideRegion`）。既有调用点的
         默认值（`verb="write"` / `WriteOutsideRegion`）使它们的报文**逐字不变**。
+
+        ★★ 重复目录名前缀（`workspace/output/brief.md`，而 cwd 就是 `.../workspace`）：
+        这是上一轮同类失败的现场（`produce.py::_workspace_line` 的 docstring 记着：
+        43 次调用零产物）。措辞那一遍走过、没走通，所以这里加一道**具名拒**：路径
+        第一段恰好等于工作目录自己的 basename 时，拒，并直接给出正确路径。顺序：
+        **frozen / 已声明路径优先**（它们本来就合法，不许被这条误伤），再判前缀。
         """
+        normalized = _normalized(path)
+        allowed = {_normalized(name) for name in self.write_region}
+        frozen = (
+            self.frozen_paths is not None
+            and normalized not in allowed
+            and normalized in {_normalized(name) for name in self.frozen_paths}
+        )
+        if frozen:
+            # ★ frozen 规则优先级更高，报文与改前逐字相同。
+            raise error(f"block may not {verb} {normalized!r}: its write region is {sorted(allowed)!r}")
+        if self.reject_redundant_prefix and normalized not in allowed:
+            problem = self._redundant_prefix_problem(path)
+            if problem:
+                raise error(f"block may not {verb} {normalized!r}: {problem}")
         if may_write(path, self.write_region, self.frozen_paths):
             return
-        allowed = sorted({_normalized(name) for name in self.write_region})
-        raise error(f"block may not {verb} {_normalized(path)!r}: its write region is {allowed!r}")
+        raise error(f"block may not {verb} {normalized!r}: its write region is {sorted(allowed)!r}")
+
+    def _owner_name(self) -> str:
+        """工作目录自己的目录名（**现算**，从不写死 `"workspace"`；别的部署名字不同）。"""
+        if self.root is None:
+            return ""
+        return Path(self.root).name
+
+    def _redundant_prefix_problem(self, path: str) -> str:
+        """``path`` 把工作目录自己的名字又写了一遍时的拒收理由（``""`` = 没问题）。
+
+        ★ 只认**第一段**：`notes/workspace/x` 不触发（那里的 `workspace` 是普通子目录名），
+          `workspace/output/x` 触发。目录名叫什么由 `_owner_name()` 现算。
+        """
+        parts = relative_parts(path)
+        owner = self._owner_name()
+        if not owner or len(parts) < 2 or parts[0] != owner:
+            return ""
+        corrected = "/".join(parts[1:])
+        return f"you are already inside the working directory; the path you want is {corrected!r}"
 
     def _note(self) -> None:
         if self.ledger is not None:
@@ -575,6 +616,13 @@ class BoundWorkspace:
         """
         if not isinstance(command, str) or not command.strip():
             raise WorkspaceError("command must be a non-empty string")
+        # ★ `shell.run` 的 workdir 也走同一条重复前缀判据：在这一层（cwd 就在工作区里）
+        #   再写一次目录名 = 迷路了。它不是写区判定（cwd 不必在写区里），只是前缀；
+        #   放在 `_note` / `_require_root` **之前**：拒就是拒，工作区一个字节都不碰。
+        if workdir and self.reject_redundant_prefix:
+            problem = self._redundant_prefix_problem(workdir)
+            if problem:
+                raise WorkspaceError(f"block may not run in {_normalized(workdir)!r}: {problem}")
         self._note()
         root = self._require_root()
         cwd = self._inside(root, workdir) if workdir else root
