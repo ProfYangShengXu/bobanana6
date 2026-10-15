@@ -50,6 +50,7 @@ from ..core.model import (
     Candidate,
     Claim,
     Column,
+    Constraint,
     ConstraintBundle,
     ModelResponse,
     Provenance,
@@ -616,6 +617,21 @@ def _path_tokens(blob: str, suffixes: Sequence[str]) -> tuple[str, ...]:
     return tuple(found)
 
 
+def constraint_applies_to(constraint: Constraint, subtask: Subtask) -> bool:
+    """★ 约束归属的**唯一**判据：`Constraint.target ∈ {*, 本块 id, 本块产物}` ⇒ 管本块。
+
+    为什么单独拎出来：`Constraint.target` 的词表（`*` / subtask id / 交付物名，见
+    `core/checkers/base.py` 与 `runtime.py::block_bundle`）与 `content_checks` 的
+    `applies_to` **不是同一套** —— 照抄 `applies_to == output` 会漏掉 `target:"*"`
+    （全局不变量）和 `target:T-xx`（点名本块）。`task_nature` / `_reference_refs` /
+    `runtime.block_bundle` 用的是同一条词表；这里写成函数，让新段与既有读者共用一条归属，
+    不再各自抄一份（审计 #691 发现的四份漂移就是这样来的）。
+
+    ★ 与 `_content_checks_entry` 同源：只判「归不归本块」，不解释、不改写。
+    """
+    return constraint.target in ("*", subtask.id, subtask.output)
+
+
 def task_nature(contract: TaskContract, bundle: ConstraintBundle, subtask: Subtask) -> dict[str, Any]:
     """★ 块级 `goal`（`produce 'X'`）丢掉的那一层：**本任务的性质与验收要求**。
 
@@ -636,7 +652,7 @@ def task_nature(contract: TaskContract, bundle: ConstraintBundle, subtask: Subta
     applicable = [
         constraint
         for constraint in (*bundle.hard, *bundle.soft)
-        if constraint.target in ("*", subtask.id, subtask.output)
+        if constraint_applies_to(constraint, subtask)
     ]
     acceptance = [
         constraint.rationale
@@ -1672,6 +1688,23 @@ class LoopIOImpl(LoopIO):
     #: ★ 判分器里那些**实现细节**（分隔符白名单、哪列开恩）**不进这个字段** ——
     #:   塞进来就是给 A 臂开偷看口。见 `acceptance/spec_extractor.py::extract_comparison_modes`。
     comparisons: tuple[Mapping[str, Any], ...] = ()  # blame: fail-closed — 省略即"不知道会被怎么比对"⇒不加要求（既有读数一字不变）
+    #: ★★ 契约**声明**的硬/软约束（`constraints.hard` / `constraints.soft`，`Constraint` 原样）。
+    #:
+    #: 与 `content_checks` 同一件事的两个面：`content_checks` 给的是**机检判据**（含阈值），
+    #: 这里给的是**约束要求**（`id` + `rationale` + `target`）。块的产物被哪些约束管、
+    #: 那些约束**要求什么**，得在 brief 里说清 —— 不然块是按常识写、被判据拒，
+    #: 报告上却长得像"这个块运行出错了"。
+    #:
+    #: ★★★ 只给**要求**，不给**机检细节**：`spec`（`command` 原文 / 正则 / 阈值）
+    #:   **一个字都不进 brief**。判据是：这段文字要能让一个**不知道机检怎么实现**的人
+    #:   照着做对。「至少 12 处 `L<数字>`」这种契约自己声明的写法可以给（它是要求的一部分）；
+    #:   `re.findall(r"\bL(\d{1,5})\b")` 不能给 —— 给了它，模型会去凑正则而不是满足要求。
+    #:
+    #: ★ 取的是**契约声明的**那一份，不是 `judge.bundle`：后者含 `compile_bundle` 合成的
+    #:   `AUTO-*` presence 与 `block_bundle` 的 `C-x@T-xx` retarget 副本，它们不是契约声明的，
+    #:   也会破坏"没声明约束的任务 brief 逐字不变"。
+    #: 空元组 = 拿不到契约 ⇒ 一个字都不加（fail-closed；既有读数一字不变）。
+    constraints: tuple[Constraint, ...] = ()  # blame: fail-closed — 省略即"拿不到契约的约束声明"⇒一个字都不加（既有读数一字不变）；方向保守，不会凭空放宽判定
     #: ★ 本块的总写入字节闸（默认 64 MiB，见 `services/workspace.py::WriteBudget`）。
     #: `runtime` 把 `BoundWorkspace` 的那一份同时交给它 —— 写工具的、答案 `files` 的、
     #: 以及命令副作用的字节，记在同一本账上。
@@ -1733,6 +1766,14 @@ class LoopIOImpl(LoopIO):
         judgements = self._content_checks_entry()
         if judgements:
             brief["content_checks"] = judgements
+        # ★★ 契约声明的**硬/软约束**里管本块产物的那些 —— 只给【要求】：
+        #   `id` + `rationale`（一句人话）+ `target`，**不给** `spec`（命令原文 / 正则 / 阈值）。
+        #   以前这段一个字节都不到模型眼前（`spec.command` 只走到判定器）⇒ 引用/体量这类
+        #   要求变成掷骰子。与 `content_checks` 同一条归属（`constraint_applies_to`），
+        #   拿不到契约 / 不归本块 ⇒ 一个字都不加（fail-closed，既有读数一字不变）。
+        requirements = self._constraints_entry()
+        if requirements:
+            brief["constraints"] = requirements
         # ★★★ 名字**和地址**一起给（见 `_source_paths` 的注记）：只给名字的后果是
         #   块分不清"来源清单"和"来源内容"，而取数入口只有一次机会。
         #   `authorized_sources` 保住溯源（判定器按 ref 查表），`source_files`
@@ -2105,7 +2146,7 @@ class LoopIOImpl(LoopIO):
         refs: set[str] = set()
         authorized = tuple(self.authorized_sources())
         for constraint in (*self.judge.bundle.hard, *self.judge.bundle.soft):
-            if constraint.target not in ("*", self.subtask.id, self.subtask.output):
+            if not constraint_applies_to(constraint, self.subtask):
                 continue
             refs.update(named_source_refs(constraint.spec, authorized))
         return tuple(sorted(refs))
@@ -2747,6 +2788,41 @@ class LoopIOImpl(LoopIO):
         if consumption:
             entry["consumed_as"] = consumption
         return entry
+
+    def _constraints_entry(self) -> dict[str, Any]:
+        """★★ 契约**声明**的硬/软约束里，管本块产物的那些 —— 只给【要求】，不给【机检】。
+
+        每个约束给三样（`Constraint` 自己的字段，壳不派生、不改写）：
+          · `id`      约束的名字（例：`C-cites`）
+          · `expects` 它要求什么 —— 契约自己声明的 `rationale`（一句人话）
+          · `target`  它管哪份产物
+
+        ★★★ 判据（照这句话 review 这段代码）：这段文字必须让一个**不知道机检怎么实现**
+          的人也能照着做对。所以 `spec`（`command` 原文、正则、阈值）**一个字都不进 brief**——
+          给了原始命令，模型会去凑正则，而不是去满足要求。
+          「至少 12 处 `L<数字>`」这种**契约自己声明的写法**可以给（它是要求的一部分）；
+          `re.findall(r"\\bL(\\d{1,5})\\b")` 不能给。
+          ★ 壳只做归属与搬运：不解释约束、不改写 rationale、不把 `spec` 翻译成人话。
+
+        归属规则与 `task_nature` / `_reference_refs` **同一条**（`constraint_applies_to`，
+        与 `content_checks` 那条同源：按 target 结构性归属）：
+          · `target ∈ {*, 本块 id, 本块产物}` ⇒ 给本块；
+          · 其余（点名别的产物）            ⇒ 不给（★ 要求不扩散）。
+
+        ★ 取数只取**契约声明的**那一份（`self.constraints`）—— 不取 `judge.bundle`：
+          后者含 `compile_bundle` 合成的 `AUTO-*` presence 与 `block_bundle` 的
+          `C-x@T-xx` retarget 副本，那些不是"契约声明的约束"，也会破坏
+          "没声明约束的任务 brief 逐字不变"（审计 #685）。
+        ★ 拿不到契约（空元组）/ 一条都不归本块 ⇒ 返回 `{}`（fail-closed：一个字都不加）。
+        """
+        requirements = [
+            {"id": constraint.id, "expects": constraint.rationale, "target": constraint.target}
+            for constraint in self.constraints
+            if constraint_applies_to(constraint, self.subtask)
+        ]
+        if not requirements:
+            return {}
+        return {"applies_to": str(self.subtask.output or ""), "requirements": requirements}
 
     def _write_region_entry(self) -> dict[str, Any]:
         """★ 本块的**写区**（相对工作目录）—— 按块变，所以进 brief（不进恒定前缀）。

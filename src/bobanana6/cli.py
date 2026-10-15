@@ -162,6 +162,12 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
     observe_dir = Path(args.observe_dir) if getattr(args, "observe_dir", "") else None
     content_checks = document.content_checks.invariants
     comparisons = getattr(document.content_checks, "comparisons", ())
+    # ★★ 契约**声明**的硬/软约束（原样）随块交下去 —— 块装配器按 `target`
+    #   归属到本块产物，只把 `id` + `rationale` + `target`（要求）摆到 brief；
+    #   `spec`（`command` 原文 / 正则 / 阈值）一个字都不进 brief。
+    #   ★ 取 `document.hard/soft`（声明），不取 `compile_bundle` 的切片 ——
+    #     后者含合成的 `AUTO-*`；这样"没声明约束的任务" brief 逐字不变。
+    declared_constraints = (*document.hard, *document.soft)
 
     def _make_runtime(log: EventLog, own_gate: RuntimeGate) -> BlockRuntime:
         return BlockRuntime(
@@ -173,6 +179,9 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
             #   而报告上看起来像"运行期出错"。
             content_checks=content_checks,
             comparisons=comparisons,
+            # ★★ 契约声明的硬/软约束（同上随块交下去，按 `target` 归属）；
+            #   只给要求（id/rationale/target），`spec` 不进 brief。
+            constraints=declared_constraints,
             workspace=workspace,
             observe_dir=observe_dir,
             budget=budget,

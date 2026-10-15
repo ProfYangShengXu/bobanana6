@@ -287,6 +287,14 @@ class BlockRuntime:
     #: 判据说"值该满足什么"，这里说"产物会被怎么对待"（逐字段机器比对 / 容差多大）。
     #: ★ 判分器的实现细节（分隔符白名单、哪列开恩）**不从这条路进来** —— 那是偷看口。
     comparisons: tuple[Mapping[str, Any], ...] = ()  # blame: fail-closed — 省略即"不知道会被怎么比对"⇒不加要求（既有读数一字不变）
+    #: ★★ 契约**声明**的硬/软约束（`constraints.hard` / `constraints.soft`，`Constraint` 原样）——
+    #: 交给块装配器做**归属**：`target ∈ {*, 本块 id, 本块产物}` 的那些，把
+    #: `id` + `rationale` + `target` 摆到块眼前。★ 只给要求，不给机检细节
+    #: （`spec.command` / 正则 / 阈值不进 brief，见 `produce.py::_constraints_entry`）。
+    #: 取**契约声明的**那一份（不是 `block_bundle` 的切片）：切片含合成的 `AUTO-*`
+    #: 与 retarget 副本，不该冒充"契约声明的约束"。
+    #: ★ 空元组 = 拿不到契约 ⇒ 一个字都不加（fail-closed；既有读数一字不变）。
+    constraints: tuple[Constraint, ...] = ()  # blame: fail-closed — 省略即"拿不到契约声明的约束"⇒一个字都不加（既有读数一字不变）；方向保守，不会凭空放宽判定
     #: ★ `#33`: 工作区（代码类产物落盘在这里）；`None` = 这个部署没有工作区。
     workspace: Path | None = None
     #: ★ `#43`: 继承守卫的观测目录（拒收时把池子与交上来的行落盘）；`None` = 不观测。
@@ -390,6 +398,9 @@ class BlockRuntime:
             #   判定器拿什么尺子量你，你就得看到那把尺子（见 `_content_checks_entry`）。
             content_checks=self.content_checks,
             comparisons=self.comparisons,
+            # ★★ 契约声明的**硬/软约束**（同上按 `target` 归属）—— 只把「要求」
+            #   （id + rationale + target）给到管本块的约束；`spec` 不进 brief。
+            constraints=self.constraints,
             # ★ 写工具的账本与答案 `files` 的账本是**同一个**对象：一块的总写入量
             #   要一起累加（见 `services/workspace.py::WriteBudget`）。
             write_budget=workspace.write_budget,
