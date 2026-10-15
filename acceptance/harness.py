@@ -256,6 +256,7 @@ def run_task(
     expected_blame: str | None = None,
     offline: bool = False,
     concurrency: int | None = None,
+    parallel: int | None = None,
     task_file: str = "task.yaml",
     workspace: bool = False,
     workspace_seed: Callable[[Path], None] | None = None,
@@ -368,6 +369,9 @@ def run_task(
         #   a 20–40 block plan legitimately needs the deployment to say it can serve
         #   that concurrency, or the capability check reports ``capability_short``.
         argv.extend(["--concurrency", str(concurrency)])
+    if parallel is not None:
+        # ★ 执行旋钮（与 `--concurrency` 能力申报正交）：默认不传 = 串行。
+        argv.extend(["--parallel", str(parallel)])
     previous = Path.cwd()
     if client is not None:
         original = cli.build_client

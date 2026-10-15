@@ -26,6 +26,7 @@ import csv
 import hashlib
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -214,6 +215,14 @@ class Runner:
     now: str
     #: Monotonic seconds for evidence timestamps, injected for the same reason.
     epoch: Callable[[], float]
+    #: ★★ 块级并发旋钮：``1`` = 串行（默认，逐字沿用重构前的 ``for`` 循环），
+    #: ``>= 2`` = 同时最多跑这么多块。★ 与 ``--concurrency``（能力申报）是**两个**
+    #: 独立旋钮：后者只被 ``core/capabilities.py`` 拿去做判定，这里一个字都不读它。
+    parallel: int = 1  # blame: fail-closed — 缺省即串行（1），并发必须显式声明
+    #: ★★ 并发时每块一个 ``BlockRuntime``：它的 ``traces`` / ``last_judge`` /
+    #: ``last_cleanliness`` / ``gate`` 都是单实例状态，共享必串。只有 ``parallel >= 2``
+    #: 会调用它；``parallel >= 2`` 而这里为 ``None`` ⇒ **具名拒**（不静默退化成串行）。
+    runtime_factory: Callable[[], BlockRuntime] | None = None  # blame: fail-closed — 缺省即"没有工厂"⇒ 并发请求被具名拒，不静默串行
     #: ★ `#33`: the workspace the blocks write code into (``None`` = none declared).
     #: The frozen-vs-workspace comparison happens outside; core only compares digests.
     workspace: Path | None = None
@@ -338,9 +347,35 @@ class Runner:
         producer_of = {block.output: block.id for block in plan.subtasks}
         #: 交付物路径 -> 产出它的 commit（痕迹层）。下游的溯源基准就是它。
         commits: dict[str, str] = {}
-        for subtask in plan.subtasks:
-            outcome = self._run_one(
-                subtask,
+        if self.parallel <= 1:
+            # ★ 默认路径：**逐字**沿用重构前的串行行为（不传新参数时一个字节都不变）。
+            for subtask in plan.subtasks:
+                outcome = self._run_one(
+                    subtask,
+                    plan=plan,
+                    bundle=bundle,
+                    ontology=ontology,
+                    snapshots=snapshots,
+                    context=context,
+                    pieces=pieces,
+                    handoffs=handoffs,
+                    piece_provenance=piece_provenance,
+                    producers=producer_of,
+                    runtime=self.runtime,
+                    event_log=self.event_log,
+                )
+                self._merge(
+                    outcome,
+                    pieces=pieces,
+                    handoffs=handoffs,
+                    piece_provenance=piece_provenance,
+                    candidates=candidates,
+                    verdicts=verdicts,
+                    commits=commits,
+                )
+                decisions.extend(outcome.decisions)
+        else:
+            self._run_parallel(
                 plan=plan,
                 bundle=bundle,
                 ontology=ontology,
@@ -350,19 +385,11 @@ class Runner:
                 handoffs=handoffs,
                 piece_provenance=piece_provenance,
                 producers=producer_of,
-                runtime=self.runtime,
-                event_log=self.event_log,
-            )
-            self._merge(
-                outcome,
-                pieces=pieces,
-                handoffs=handoffs,
-                piece_provenance=piece_provenance,
                 candidates=candidates,
                 verdicts=verdicts,
                 commits=commits,
+                decisions=decisions,
             )
-            decisions.extend(outcome.decisions)
 
         # ★ `#63`: 装配关只拿 pieces —— 两个块的候选从来不会被放在一起，于是
         #   "两个权威源对同一实体给出不同值"这件事在架构上测不到。这里在块跑完之后
@@ -720,6 +747,188 @@ class Runner:
                 "producer_commit": record.commit if record is not None else "",
             }
         self._note_gate(subtask, outcome.gate_ok, outcome.gate_detail, event_log=outcome.event_log)
+
+    # -- concurrent block execution (opt-in; default stays serial) ---------- #
+
+    def _run_parallel(
+        self,
+        *,
+        plan: SplitPlan,
+        bundle: ConstraintBundle,
+        ontology: Ontology,
+        snapshots: Mapping[str, Snapshot],
+        context: CheckContext,
+        pieces: dict[str, Any],
+        handoffs: dict[str, dict[str, Any]],
+        piece_provenance: dict[str, tuple[Provenance, ...]],
+        producers: Mapping[str, str],
+        candidates: dict[str, Candidate],
+        verdicts: dict[str, Verdict],
+        commits: dict[str, str],
+        decisions: list[Convergence],
+    ) -> None:
+        """Run blocks concurrently, but keep every shared write on the main thread.
+
+        ★ 调度规则（三条，硬约束）：
+          ① **依赖**：一个块的全部 ``inputs`` 的产出者都**跑完**才可开始。
+             产出者没交出产物也算跑完 —— 串行时下游照样开工（见 ``_run_one`` 的输入缺失处理），
+             这里必须一致，否则并发会"多跑"或"少跑"块。
+          ② **写区互斥**：正在跑的块占着的 `partition`（非 ``None``），另一个同名块不得同时跑。
+          ③ **并发上限** = ``self.parallel``。
+        ★ 主线程只做：发车、收车、``_merge``；worker 里只有一个只读快照，不碰共享可变状态。
+        ★ 归并顺序 **按 `plan.subtasks` 的原始顺序**（不是完成顺序）：``decisions`` 与事件流
+          只有这样才可能与串行逐字一致。
+        """
+        factory = self.runtime_factory
+        if factory is None:
+            raise ValueError(
+                "parallel >= 2 requires runtime_factory: each block needs its own "
+                "BlockRuntime (traces / last_judge / gate are per-instance state)"
+            )
+        if self.workspace is not None:
+            # ★★ fail-closed（不静默改变判定）：`WorkspaceLedger.changed()` 对整个工作区做
+            #   全树 diff，两个并发写者互相看得见对方的改动 ⇒ 兄弟块的**交付物**会被本块
+            #   误判成 `write_outside_region`（它的路径在 `frozen_paths` 里）。
+            #   在"块改动按路径归属"的共享写日志落地之前，并发 + 工作区会改变
+            #   谁通过/谁被拒 —— 所以这里具名拒，而不是让判定悄悄分叉。
+            raise RunRefused(
+                "parallel",
+                "parallel >= 2 is refused while a workspace is declared: the per-block "
+                "workspace ledger diffs the whole tree, so two concurrent writers cannot be "
+                "attributed without changing judgement semantics (a shared per-path write "
+                "journal is needed first)",
+                ("workspace_concurrency_unsupported",),
+            )
+        order = [block.id for block in plan.subtasks]
+        main_traces = self.runtime.traces
+        unstarted = list(plan.subtasks)
+        finished: set[str] = set()
+        running: dict[Future[_BlockOutcome], tuple[Subtask, BlockRuntime]] = {}
+        outcomes: dict[str, _BlockOutcome] = {}
+        workers = max(1, min(self.parallel, len(plan.subtasks))) if plan.subtasks else 1
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while unstarted or running:
+                while unstarted and len(running) < self.parallel:
+                    busy = {
+                        block.partition for block, _runtime in running.values() if block.partition is not None
+                    }
+                    ready = next(
+                        (
+                            block
+                            for block in unstarted
+                            if self._inputs_ready(block, pieces, finished, producers)
+                            and not self._partition_conflict(block, busy)
+                        ),
+                        None,
+                    )
+                    if ready is None:
+                        break
+                    unstarted.remove(ready)
+                    runtime = self._new_block_runtime(factory)
+                    runtime.context = context
+                    self._seed_traces(runtime, main_traces)
+                    # ★ 传**快照**：worker 读这三份映射时主线程仍会写它们。
+                    future = pool.submit(
+                        self._run_one,
+                        ready,
+                        plan=plan,
+                        bundle=bundle,
+                        ontology=ontology,
+                        snapshots=snapshots,
+                        context=context,
+                        pieces=dict(pieces),
+                        handoffs=dict(handoffs),
+                        piece_provenance=dict(piece_provenance),
+                        producers=producers,
+                        runtime=runtime,
+                        event_log=runtime.event_log,
+                    )
+                    running[future] = (ready, runtime)
+                if not running:
+                    stuck = ", ".join(block.id for block in unstarted)
+                    raise RuntimeError(f"no block is ready and none is running (dependency cycle?): {stuck}")
+                done, _pending = wait(tuple(running), return_when=FIRST_COMPLETED)
+                for future in done:
+                    block, runtime = running.pop(future)
+                    outcome = future.result()
+                    outcomes[block.id] = outcome
+                    # ★ 立刻 merge：下游块要读 pieces / handoffs / commits。
+                    self._merge(
+                        outcome,
+                        pieces=pieces,
+                        handoffs=handoffs,
+                        piece_provenance=piece_provenance,
+                        candidates=candidates,
+                        verdicts=verdicts,
+                        commits=commits,
+                    )
+                    self._absorb_traces(main_traces, runtime, block)
+                    finished.add(block.id)
+        # ★ 确定性归并：decisions / 事件流 / traces 的丢弃清单都按 plan 顺序拼。
+        for block_id in order:
+            outcome = outcomes.get(block_id)
+            if outcome is not None:
+                decisions.extend(outcome.decisions)
+        self._replay_events([outcomes[block_id].event_log for block_id in order if block_id in outcomes])
+        main_traces.dropped = [
+            entry
+            for block_id in order
+            if block_id in outcomes
+            for entry in outcomes[block_id].runtime.traces.dropped
+        ]
+
+    def _new_block_runtime(self, factory: Callable[[], BlockRuntime]) -> BlockRuntime:
+        """One isolated runtime per block; sharing any of it would串状态."""
+        runtime = factory()
+        if runtime is self.runtime or runtime.traces is self.runtime.traces or runtime.event_log is self.event_log:
+            raise ValueError(
+                "runtime_factory must return an isolated BlockRuntime "
+                "(own traces + own event_log), not share the runner's"
+            )
+        return runtime
+
+    @staticmethod
+    def _inputs_ready(
+        block: Subtask, pieces: Mapping[str, Any], finished: set[str], producers: Mapping[str, str]
+    ) -> bool:
+        """Every declared input either arrived, or its producer has already run."""
+        for name in block.inputs:
+            if name in pieces:
+                continue
+            producer = producers.get(name)
+            if producer is None or producer in finished:
+                continue
+            return False
+        return True
+
+    @staticmethod
+    def _partition_conflict(block: Subtask, busy: set[str]) -> bool:
+        """A non-``None`` partition is a write region; two blocks must not share it at once."""
+        return block.partition is not None and block.partition in busy
+
+    @staticmethod
+    def _seed_traces(runtime: BlockRuntime, main_traces: TraceStore) -> None:
+        """Give this block the process records the serial run would already have."""
+        runtime.traces.by_block = {block_id: list(entries) for block_id, entries in main_traces.by_block.items()}
+        runtime.traces.chars_by_block = dict(main_traces.chars_by_block)
+
+    @staticmethod
+    def _absorb_traces(main_traces: TraceStore, runtime: BlockRuntime, block: Subtask) -> None:
+        """Copy **this block's own** entries back (seeded upstream entries are already there)."""
+        if block.id in runtime.traces.by_block:
+            main_traces.by_block[block.id] = list(runtime.traces.by_block[block.id])
+        if block.id in runtime.traces.chars_by_block:
+            main_traces.chars_by_block[block.id] = runtime.traces.chars_by_block[block.id]
+
+    def _replay_events(self, logs: Sequence[EventLog]) -> None:
+        """Append per-block event logs to the run's log **in the given (plan) order**.
+
+        ★ 事件流的读者是归因与指标；`EventLog` 是单写者、自己发 `seq`，所以并发时
+          每块一份、最后由主线程按 plan 顺序重编号并回 —— 与串行时同序。
+        """
+        for log in logs:
+            for event in log.events:
+                self.event_log.emit(replace(event, seq=len(self.event_log) + 1))
 
     # -- helpers ----------------------------------------------------------- #
 

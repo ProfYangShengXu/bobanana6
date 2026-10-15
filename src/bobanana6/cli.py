@@ -160,31 +160,52 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
     workspace = Path(args.workspace) if getattr(args, "workspace", "") else None
     # ★ `#43`: 继承守卫的观测目录（只落盘、不改判定）；不给 = 不观测。
     observe_dir = Path(args.observe_dir) if getattr(args, "observe_dir", "") else None
-    runtime = BlockRuntime(
-        client=client,
-        store=store,
-        contract=contract,
-        # ★★ 契约声明的判据随块交下去（按 `applies_to` 归属到产出那份产物的块）——
-        #   判定器拿什么尺子量，模型就得看到那把尺子；不然只能按常识写、被判据拒，
-        #   而报告上看起来像"运行期出错"。
-        content_checks=document.content_checks.invariants,
-        comparisons=getattr(document.content_checks, "comparisons", ()),
-        workspace=workspace,
-        observe_dir=observe_dir,
-        budget=budget,
-        event_log=event_log,
-        compression=compression,
-        # ★ The compression callback is a model call, and it is injected here --
-        #   the loop never reaches a model on its own.
-        summarize=llm_summarizer(client, gate=gate),
-        gate=gate,
-    )
+    content_checks = document.content_checks.invariants
+    comparisons = getattr(document.content_checks, "comparisons", ())
+
+    def _make_runtime(log: EventLog, own_gate: RuntimeGate) -> BlockRuntime:
+        return BlockRuntime(
+            client=client,
+            store=store,
+            contract=contract,
+            # ★★ 契约声明的判据随块交下去（按 `applies_to` 归属到产出那份产物的块）——
+            #   判定器拿什么尺子量，模型就得看到那把尺子；不然只能按常识写、被判据拒，
+            #   而报告上看起来像"运行期出错"。
+            content_checks=content_checks,
+            comparisons=comparisons,
+            workspace=workspace,
+            observe_dir=observe_dir,
+            budget=budget,
+            event_log=log,
+            compression=compression,
+            # ★ The compression callback is a model call, and it is injected here --
+            #   the loop never reaches a model on its own.
+            summarize=llm_summarizer(client, gate=own_gate),
+            gate=own_gate,
+        )
+
+    runtime = _make_runtime(event_log, gate)
+
+    def runtime_factory() -> BlockRuntime:
+        """One isolated runtime per block (only used when ``--parallel >= 2``).
+
+        ★ ``traces`` / ``last_judge`` / ``last_cleanliness`` / ``gate`` 都是单实例状态，
+          并发必须每块一份；``event_log`` 也是（``EventLog`` 是单写者，最后按 plan 顺序并回）。
+          自己的限流器让块内调用串行；跨块并发由 ``--parallel`` 决定。
+        """
+        own_gate = RuntimeGate(GateConfig(max_concurrent=1, default_timeout=0.0))
+        return _make_runtime(EventLog(), own_gate)
+
+    parallel = max(1, int(getattr(args, "parallel", 1)))
     runner = Runner(
         document=document,
         ontology_port=ontology_port,
         decomposer=decomposer,
         constraint_source=ContractConstraintSource(document=document),
         runtime=runtime,
+        # ★ 默认 1 ⇒ factory 为 None ⇒ `run()` 走**逐字不变**的串行路径。
+        parallel=parallel,
+        runtime_factory=runtime_factory if parallel > 1 else None,
         fetcher=fetcher,
         store=store,
         reader=reader,
@@ -259,6 +280,14 @@ def _parser() -> argparse.ArgumentParser:
     #   留着会让"命令行的 0.6 / argparse 的 0.7"分叉，所以删掉。
     #: 充裕并发是这个项目的前提；声明得比需求小，装配就会以 capability_short 拒绝。
     run.add_argument("--concurrency", type=int, default=8)
+    # ★★ 块级并发旋钮（与上一条**正交**）：`--concurrency` 是**能力申报**，`--parallel`
+    #   是**执行计划**。默认 1 = 串行（生产端点扛不住并发）；>= 2 才真并发跑块。
+    run.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="同时跑几个块（默认 1 = 串行）；这是执行旋钮，不改 --concurrency 的能力申报",
+    )
     return parser
 
 
