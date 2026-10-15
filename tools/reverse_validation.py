@@ -2258,7 +2258,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "single-door-tool-output-not-paged",
         "agentloop/loop.py",
-        '                "content": self._page_tool_result(turn, result, names.get(result.call_id, "")),\n',
+        '                "content": self._deliver_tool_result(turn, calls_by_id.get(result.call_id), result),\n',
         '                "content": result.content,  # mutation: the single door does not page\n',
         "tests/test_tool_output.py::test_over_threshold_return_is_paged_with_a_readable_pointer",
         "over-threshold tool returns go into the transcript whole again",

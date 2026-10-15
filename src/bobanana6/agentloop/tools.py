@@ -24,6 +24,7 @@ Results are always written back in the model's original call order.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -39,9 +40,11 @@ __all__ = [
     "call_signature",
     "declared_arguments_problem",
     "invalid_arguments_result",
+    "loop_keys",
     "order_results",
     "parse_tool_arguments",
     "plan_tool_segments",
+    "shell_paths",
 ]
 
 TOOL_EFFECTS: tuple[str, ...] = ("read", "write")
@@ -217,15 +220,98 @@ def call_signature(call: ToolCall) -> str:
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
+#: Characters a workspace-relative path token may consist of. A shell command is
+#: split on the shell's own separators, and anything left that is not made only of
+#: these characters (regex fragments, flags, redirections, URLs) is not a path.
+_PATH_TOKEN = re.compile(r"^[A-Za-z0-9_./~+-]+$")
+#: A bare file name is a target only when it carries a suffix (``bank.md``); a bare
+#: word (``grep``, ``head``, ``-20``) is a command, a flag or a pattern, not a file.
+_FILE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+_SHELL_SEPARATORS = re.compile(r"[\s|;&()<>='\"`]+")
+
+
+def shell_paths(command: str) -> tuple[str, ...]:
+    """Workspace-relative paths a ``shell.run`` command names, in first-seen order.
+
+    ★ Why this exists: the loop detector needs "the thing this call touches", and
+    ``shell.run`` declares no ``target_args`` -- every one of T-01's 16 counting
+    commands was a different regex over the *same* file, so ``(tool, args)`` keys
+    never repeat. The file is the only stable handle.
+
+    Absolute paths are deliberately **not** targets: ``cd /abs/workspace`` and
+    ``/usr/bin/python3`` are host coordinates, and treating a shared prefix as a
+    target would manufacture a loop out of unrelated commands. See the 4B T-01
+    trace (``t45``-``t60``): every counting command named ``./interview-bank.md``.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return ()
+    found: list[str] = []
+    for raw in _SHELL_SEPARATORS.split(command):
+        token = raw.strip().strip(",;")
+        if not token or token in (".", ".."):
+            continue
+        if token.startswith("/") or (len(token) > 1 and token[1] == ":"):
+            continue  # absolute path / drive letter: not a workspace-relative target
+        while token.startswith("./"):
+            token = token[2:]
+        token = token.rstrip("/")
+        if not token or token in (".", "..") or not _PATH_TOKEN.match(token):
+            continue
+        if "/" not in token and not _FILE_SUFFIX.search(token):
+            continue
+        if any(part == ".." for part in token.split("/")):
+            continue
+        if token not in found:
+            found.append(token)
+    return tuple(found)
+
+
+def loop_keys(call: ToolCall) -> tuple[tuple[str, str], ...]:
+    """``((counter key, human-readable target), ...)`` for the repetition detector.
+
+    Two different notions of "the same action on the same target", because the two
+    kinds of tool need different ones:
+
+    * A tool that declares ``target_args`` (the registry fills ``call.targets``)
+      pages its target: ``sources.read`` over window 1, 2, 3 is **progress**, and so
+      is ``sources.grep`` with a different pattern. For those the whole declared
+      call is the action -- the content fingerprint. That is exactly what keeps the
+      normal 21-call read-in of T-01 from being misreported as a loop.
+    * A tool that declares no target (``shell.run``) has only the files in its
+      command as a stable handle. Counting by file is what catches the 16 distinct
+      regexes over one file.
+
+    A call that names several files contributes one key per file; each is counted.
+    """
+    declared = tuple(call.targets)
+    if declared and declared != (call.name,):
+        return ((call_signature(call), declared[0]),)
+    command = call.arguments.get("command")
+    if isinstance(command, str) and command.strip():
+        paths = shell_paths(command)
+        if paths:
+            return tuple((f"{call.name}\x00{path}", path) for path in paths)
+    return ((call_signature(call), ""),)
+
+
 @dataclass(frozen=True)
 class GuardrailConfig:
     repeat_block_after: int = 4  # blame: fail-closed — 省略即 4 次就拦，方向保守
     same_tool_block_after: int = 6  # blame: fail-closed — 省略即 6 次就拦，方向保守
     max_calls_per_turn: int = 0  # 0 = unlimited  # blame: fail-open — 省略即**无上限**（0 = unlimited）；单轮调用数不设闸，方向危险
+    #: ★ The *hint* threshold (part of this turn's fix): from the Nth execution of
+    #: the same action on the same target -- success or failure, it does not matter
+    #: -- the tool result carries an advisory paragraph. 0 disables it.
+    #: 4 is the same conservative line the hard failure guard uses: a genuine
+    #: four-fold repeat on one target is already suspicious, and the hint only
+    #: appends text (it never runs, blocks or refuses anything).
+    repeat_hint_after: int = 4  # blame: fail-closed — 省略即第 4 次起附一句提示（不拦），方向保守
 
     def __post_init__(self) -> None:
         if min(self.repeat_block_after, self.same_tool_block_after, self.max_calls_per_turn) < 0:
             raise ValueError("guardrail thresholds must be >= 0")
+        if self.repeat_hint_after < 0:
+            raise ValueError("GuardrailConfig.repeat_hint_after must be >= 0")
 
 
 class ToolCallGuardrailController:
@@ -238,6 +324,12 @@ class ToolCallGuardrailController:
 
     def __init__(self, config: GuardrailConfig | None = None) -> None:
         self._config = config or GuardrailConfig()
+        # ★ The repetition-activity counters are **not** per-turn state: a model that
+        #   re-issues the same action once per turn (T-01's ``t45``-``t60``) would be
+        #   invisible to a per-turn counter. They live on the instance (one loop
+        #   drives one block) and are deliberately not cleared by ``reset_for_turn``.
+        self._activity: dict[str, int] = {}
+        self._activity_marks: dict[str, tuple[int, str]] = {}
         self.reset_for_turn()
 
     @property
@@ -249,6 +341,10 @@ class ToolCallGuardrailController:
         self._tool_failures: dict[str, int] = {}
         self._calls_this_turn = 0
         self._halted = False
+        # ★ Only the per-turn marks are dropped; ``_activity`` survives on purpose
+        #   (see ``__init__``). The failure counters above stay per-turn -- a fresh
+        #   turn is a fresh experiment for *blocking*, but not for *observing a loop*.
+        self._activity_marks = {}
 
     @property
     def halted(self) -> bool:
@@ -275,7 +371,46 @@ class ToolCallGuardrailController:
             return blocked_tool_result(
                 call.call_id, f"tool {call.name!r} is failing repeatedly", error_type="same_tool_failure"
             )
+        # ★ Only an *allowed* call counts as activity (a blocked call is already
+        #   answered by the guardrails above). Success and failure both count -- the
+        #   hint is about repetition, not about the outcome.
+        marks = [(self._bump(key), target) for key, target in loop_keys(call)]
+        if marks:
+            self._activity_marks[call.call_id] = max(marks, key=lambda item: item[0])
         return None
+
+    def _bump(self, key: str) -> int:
+        count = self._activity.get(key, 0) + 1
+        self._activity[key] = count
+        return count
+
+    def loop_hint(self, call: ToolCall) -> str:
+        """The advisory paragraph appended to a repeated call's result (``""`` = none).
+
+        ★ This is a **hint, not a block**: the call already ran and its real result
+        is on its way to the model. The paragraph only names the three things the
+        model needs to get itself out of the loop -- the count, the diagnosis
+        ("this looks like a side check, not the main line"), and the exit (change
+        the approach; drop an optional count; write the artifact and hand it in).
+
+        ★ Domain-free on purpose: the wording is structural (``边缘核对`` /
+        ``主线产物``), never this task's subject matter -- the loop detector lives in
+        ``agentloop/`` and must not learn any one acceptance task.
+        """
+        if self._config.repeat_hint_after <= 0:
+            return ""
+        mark = self._activity_marks.get(call.call_id)
+        if mark is None:
+            return ""
+        count, target = mark
+        if count < self._config.repeat_hint_after:
+            return ""
+        where = f"`{target}`" if target else "同一组参数"
+        return (
+            f"\n★ 提示（不是拦截）：这是你第 {count} 次用 `{call.name}` 对 {where} 做同一件事了。"
+            "这看着像【边缘核对】，不是主线。换个办法；如果这是可有可无的核对"
+            "（例如“数一下成品里有多少条”），就放弃它 —— 主线是把产物写出来交掉。\n"
+        )
 
     def observe(self, call: ToolCall, result: ToolResult) -> None:
         if result.ok:

@@ -838,6 +838,19 @@ class WorkerLoop:
         )
         return page.body
 
+    def _deliver_tool_result(self, turn: _Turn, call: ToolCall | None, result: ToolResult) -> str:
+        """The single door onto the transcript: page the body, then attach the hint.
+
+        ★ The repetition hint is appended **after** paging: an over-threshold body's
+        own page marker keeps its head+tail shape, and the hint is never the text the
+        page dropped. Repeating one action is a fact about the *call*, not about how
+        large this particular output happened to be.
+        """
+        content = self._page_tool_result(turn, result, call.name if call is not None else "")
+        if call is None:
+            return content
+        return content + self._guardrails.loop_hint(call)
+
     def _note_truncate(self, turn: _Turn, tool: str, *, ok: bool, detail: dict[str, Any]) -> None:
         """The event that answers "was it paged, and where is the original".
 
@@ -917,12 +930,14 @@ class WorkerLoop:
         # ★★ 工具返回进上下文之前的那【唯一】一道门就是这里：执行出来的、被 guardrail
         #   拦下的、参数不可解析而合成的 tool 行全部经过这一处 ⇒ 「超阈值 ⇒ 头尾 + 指针」
         #   只写一遍（`agentloop/tool_output.py`）。放回各工具里就是每个工具一份，必然漂移。
-        names = {call.call_id: call.name for call in proposal.tool_calls}
+        #   同一道门也负责【追加打转提示】（`_deliver_tool_result`）—— 提示不是拦截：
+        #   `result` 已经产出、判定没动，只是正文后面多一段。
+        calls_by_id = {call.call_id: call for call in proposal.tool_calls}
         tool_rows = tuple(
             {
                 "role": "tool",
                 "tool_call_id": result.call_id,
-                "content": self._page_tool_result(turn, result, names.get(result.call_id, "")),
+                "content": self._deliver_tool_result(turn, calls_by_id.get(result.call_id), result),
             }
             for result in turn.results
         )
