@@ -58,3 +58,6 @@ acceptance/**/_run/
 out/
 result.csv
 *.log
+
+# 例子跑出来的产物（跑题时生成，不入库）
+examples/_run/

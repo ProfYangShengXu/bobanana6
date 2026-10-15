@@ -205,7 +205,7 @@ constraints:
       target: output/summary.json
       spec:
         check: shell_command
-        command: "cd _run/workspace && /mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import json,pathlib; d=pathlib.Path('output'); need=['filing_resolution.csv','effective_holdings.csv','manager_metrics.csv','turnover.csv','overlap_latest.csv','crowded_securities_latest.csv','cleaning_audit.csv','summary.json']; miss=[f for f in need if not (d/f).exists() or (d/f).stat().st_size==0]; json.load(open(d/'summary.json')); print('missing:', miss); raise SystemExit(1 if miss else 0)\""
+        command: "cd _run/workspace && python3 -c \"import json,pathlib; d=pathlib.Path('output'); need=['filing_resolution.csv','effective_holdings.csv','manager_metrics.csv','turnover.csv','overlap_latest.csv','crowded_securities_latest.csv','cleaning_audit.csv','summary.json']; miss=[f for f in need if not (d/f).exists() or (d/f).stat().st_size==0]; json.load(open(d/'summary.json')); print('missing:', miss); raise SystemExit(1 if miss else 0)\""
       rationale: "八个产物必须都写出来且非空；summary.json 必须是合法 JSON（真正的语义判据在外部）"
 
 limits: {max_rounds: 4}

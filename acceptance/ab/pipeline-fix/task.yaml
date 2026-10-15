@@ -22,7 +22,7 @@ constraints:
         #   写 `python3` 会拿到系统解释器（没有 pytest）⇒ 判据必然失败。
         #   见《壳问题三连-首轮AB暴露-20261005.md》§2。
         check: shell_command
-        command: "cd _run/workspace/input && /mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -m pytest tests/test_existing.py -q"
+        command: "cd _run/workspace/input && python3 -m pytest tests/test_existing.py -q"
       rationale: "既有测试必须全过"
     - id: C-tests-frozen
       kind: frozen_files

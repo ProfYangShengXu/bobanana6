@@ -94,6 +94,15 @@ def build_ontology_port(args: argparse.Namespace, client: LLMClient) -> Ontology
         # Read it once here so a bad file fails before any worker exists.
         load_ontology_file(args.ontology)
         return FileOntology(Path(args.ontology))
+    # ★ 任务目录里的 `ontology.yaml` 就是它的本体 —— 摆在旁边却不被使用是个坑：
+    #   用户以为自己把本体给了，实际却去走了"模型起草"，而离线模型起草不出合法本体，
+    #   报的是 `Additional properties are not allowed ('columns', 'rows' ...)` ——
+    #   一个跟"你没给本体"完全对不上的错。
+    #   约定和发现顺序保持一致：显式 `--ontology` > 同目录同名文件 > 模型起草。
+    sibling = Path(args.task).resolve().parent / "ontology.yaml"
+    if sibling.is_file():
+        load_ontology_file(sibling)
+        return FileOntology(sibling)
     return DraftingOntology(client=client)
 
 
@@ -302,3 +311,12 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         return 1
     _print_result(result)
     return 0 if result.ok else 1
+
+
+# ★ 让 `python -m bobanana6.cli ...` 真的跑起来。
+#   没有这个块时，`-m` 只 import 模块就退出、**exit 0** —— 一个"静默成功"：
+#   调用方拿退出码当判据，就会把"什么都没干"读成"干成了"。
+#   实测踩过一次：桥入口脚本用 `-m` 调起子进程，子进程秒退 0，
+#   入口据此回了 `ok: true, exit_code: 0, detail: "passed"`。
+if __name__ == "__main__":
+    raise SystemExit(main())

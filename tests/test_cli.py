@@ -110,10 +110,18 @@ def test_build_app_can_load_a_scripted_offline_model(tmp_path: Path) -> None:
     assert isinstance(app.runner.runtime.client, ScriptedClient)
 
 
-def test_build_app_drafts_the_ontology_when_none_is_given(tmp_path: Path) -> None:
+def test_build_app_drafts_the_ontology_only_when_there_is_none_to_find(tmp_path: Path) -> None:
+    """★ 起草是**最后一档**，不是"没给 `--ontology`"这一档。
+
+    改动说明（2026-10-15）：这条原来断言的是"不给 `--ontology` ⇒ 走起草"。
+    加了同目录自动发现之后，那个断言不再成立 —— 而它原来能过，只是因为
+    `_fixture` 恰好也在同目录写了一份 `ontology.yaml`，等于**测了一件假事**。
+    现在它测的才是真约定：显式给了用给的，没给就看同目录，两处都没有才起草。
+    """
     from bobanana6.adapters import DraftingOntology
 
-    task, _ = _fixture(tmp_path)
+    task, ontology = _fixture(tmp_path)
+    ontology.unlink()  # ★ 同目录那份也拿掉 —— 这才叫"没有本体可找"
     app = cli.build_app(_args(tmp_path, task))
     assert isinstance(app.runner.ontology_port, DraftingOntology)
 
@@ -201,3 +209,30 @@ def test_main_reports_a_missing_task_file(tmp_path: Path, capsys: pytest.Capture
 def test_run_command_requires_a_task_argument() -> None:
     with pytest.raises(SystemExit):
         cli.main(["run"])
+
+
+# --------------------------------------------------------------------------- #
+# 本体的发现顺序：显式 --ontology > 同目录 ontology.yaml > 模型起草
+# --------------------------------------------------------------------------- #
+
+
+def test_a_sibling_ontology_is_used_without_being_asked(tmp_path: Path) -> None:
+    """★ 任务旁边的 `ontology.yaml` 就该被用上。
+
+    摆在旁边却不被使用是个**安静**的坑：用户以为本体已经给了，实际却去走
+    "模型起草"，而离线模型起草不出合法本体 —— 报出来的是一句跟"你没给本体"
+    完全对不上的话（`Additional properties are not allowed ('columns', 'rows' ...)`）。
+    """
+    task, _ = _fixture(tmp_path)  # 同目录已经放了 ontology.yaml
+    app = cli.build_app(_args(tmp_path, task, ontology=None))
+    assert isinstance(app.runner.ontology_port, FileOntology)
+
+
+def test_an_explicit_ontology_wins_over_the_sibling(tmp_path: Path) -> None:
+    """显式给的那份优先级最高 —— 同目录那份只是缺省，不许压过用户的选择。"""
+    task, _ = _fixture(tmp_path)
+    other = tmp_path / "elsewhere.yaml"
+    other.write_text(ONTOLOGY.replace("2026.1", "2027.2"), encoding="utf-8")
+    app = cli.build_app(_args(tmp_path, task, other))
+    assert isinstance(app.runner.ontology_port, FileOntology)
+    assert app.runner.ontology_port.path == other

@@ -266,3 +266,75 @@ def test_a_broken_answer_reads_as_nothing() -> None:
     assert parse_lines(['{"answered": true, "advice": "ok"}']).answered is True
     assert parse_lines(['{"answered": "yes-please"}']).answered is True
     assert parse_lines([]).answered is False
+
+
+# --------------------------------------------------------------------------- #
+# ⑤ 送达方式可换：不许把某个平台/某台机器的解释器写死
+# --------------------------------------------------------------------------- #
+
+
+def _reload_with(monkeypatch, **env: str):
+    """按给定的环境变量重新加载模块 —— 探测发生在 import 期，只有这样才测得到。"""
+    import importlib
+
+    import bobanana6.services.escalation as module
+
+    for name in ("BB6_BRIDGE_PYTHON", "BB6_WINDOWS_PYTHON"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return importlib.reload(module)
+
+
+def test_without_any_setting_it_falls_back_to_the_running_interpreter(monkeypatch) -> None:
+    """★ 核心断言：**没有配任何东西**时不许依赖某个平台的绝对路径。
+
+    换到纯 Linux、或桥与本进程同栈时，这一步就该能用 ——
+    以前这里默认指向一个 Windows 的 `python.exe` 绝对路径，
+    等于"换个环境必断"，而且断的方式是启动失败，不是具名结果。
+    """
+    module = _reload_with(monkeypatch)
+    assert module.DEFAULT_HELPER_PYTHON == sys.executable
+    assert "python.exe" not in module.DEFAULT_HELPER_PYTHON
+
+
+def test_the_generic_name_wins_over_the_legacy_one(monkeypatch) -> None:
+    module = _reload_with(monkeypatch, BB6_BRIDGE_PYTHON="/opt/py/bin/python3",
+                          BB6_WINDOWS_PYTHON=r"C:\other\python.exe")
+    assert module.DEFAULT_HELPER_PYTHON == "/opt/py/bin/python3"
+
+
+def test_the_legacy_name_still_works(monkeypatch) -> None:
+    """★ 已有部署写的是老名字，不能因为改名就废掉它们。"""
+    module = _reload_with(monkeypatch, BB6_WINDOWS_PYTHON=r"C:\legacy\python.exe")
+    assert module.DEFAULT_HELPER_PYTHON == r"C:\legacy\python.exe"
+
+
+def test_blank_values_are_ignored_not_obeyed(monkeypatch) -> None:
+    """★ 空串 = 没配。不许把空串当解释器去起进程（那会报一个看不懂的错）。"""
+    module = _reload_with(monkeypatch, BB6_BRIDGE_PYTHON="   ")
+    assert module.DEFAULT_HELPER_PYTHON == sys.executable
+
+
+def test_the_chosen_interpreter_is_what_actually_gets_run(monkeypatch) -> None:
+    """★ 断言的是**行为**不是常量：runner 真收到那个解释器。
+
+    ★ 顺序要紧：必须**先 reload、后取类**。探测发生在 import 期，
+      所以 reload 之前 import 进来的那个类是带着旧默认值的 ——
+      这条测试第一次跑就栽在这儿（拿到的还是旧的 `sys.executable`），
+      正好说明它测的确实是行为，不是常量。
+    """
+    module = _reload_with(monkeypatch, BB6_BRIDGE_PYTHON="/custom/python")
+    ContactorEscalation = module.ContactorEscalation
+    seen: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = '{"answered": true, "advice": "ok"}'
+        stderr = ""
+
+    esc = ContactorEscalation(runner=lambda argv, **kw: (seen.append(argv), _Done())[1])
+    outcome = esc.escalate(EscalationRequest(task_id="t", block="B", reason="r", attempts=1))
+    assert seen and seen[0][0] == "/custom/python"
+    assert seen[0][1].endswith("bridge_call.py")
+    assert outcome.answered is True

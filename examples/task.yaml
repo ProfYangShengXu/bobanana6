@@ -9,7 +9,10 @@ deliverables:
     schema: {obligor: str, pd: float, amount: float}
 
 sources:
-  - {ref: panel-2026q1, locator: examples/panel.csv}
+  # ★ 相对【任务目录】写，不是相对仓库根：跑题时会 chdir 到 task.yaml 所在目录，
+  #   写成 `examples/panel.csv` 换个入口（比如走 harness / 走桥）就找不到了，
+  #   表现是"在 sources 门被拒"，看着完全不像路径问题。
+  - {ref: panel-2026q1, locator: panel.csv}
 
 constraints:
   hard:

@@ -31,7 +31,7 @@ constraints:
       spec:
         # ★ 必须写死解释器：壳跑判据时 subprocess.run(shell=True) 不激活 venv。
         check: shell_command
-        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import csv,pathlib; r=list(csv.DictReader(pathlib.Path('_run/workspace/output/findings.csv').open())); assert r, 'empty'; assert {'as_of','value'} <= set(r[0]), r[0]\""
+        command: "python3 -c \"import csv,pathlib; r=list(csv.DictReader(pathlib.Path('_run/workspace/output/findings.csv').open())); assert r, 'empty'; assert {'as_of','value'} <= set(r[0]), r[0]\""
       rationale: "产物必须是两列 CSV（as_of / value）"
   soft:
     - id: C-one-row
@@ -39,7 +39,7 @@ constraints:
       target: output/findings.csv
       spec:
         check: shell_command
-        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import csv,pathlib; assert len(list(csv.DictReader(pathlib.Path('_run/workspace/output/findings.csv').open()))) == 1\""
+        command: "python3 -c \"import csv,pathlib; assert len(list(csv.DictReader(pathlib.Path('_run/workspace/output/findings.csv').open()))) == 1\""
       rationale: "feed 只有一期；一行就够（多了不算错，只是不必）"
 
 limits: {max_rounds: 3}

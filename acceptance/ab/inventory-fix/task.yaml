@@ -19,7 +19,7 @@ constraints:
       spec:
         # ★ 必须写死解释器：壳跑判据时 subprocess.run(shell=True) 不激活 venv。
         check: shell_command
-        command: "cd _run/workspace/input && /mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -m pytest tests/test_inventory.py -q"
+        command: "cd _run/workspace/input && python3 -m pytest tests/test_inventory.py -q"
       rationale: "全部测试必须通过（起点是红的，原样交回拿不到分）"
     - id: C-tests-frozen
       kind: frozen_files

@@ -47,21 +47,21 @@ constraints:
       target: output/jd-matrix.md
       spec:
         check: shell_command
-        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import pathlib,re; t=pathlib.Path('_run/workspace/output/jd-matrix.md').read_text(encoding='utf-8'); ls=[l for l in t.splitlines() if l.startswith('|')]; assert len(ls)>=8, f'表格行太少({len(ls)})，要求至少覆盖 6 家公司'; print('ok', len(ls))\""
+        command: "python3 -c \"import pathlib,re; t=pathlib.Path('_run/workspace/output/jd-matrix.md').read_text(encoding='utf-8'); ls=[l for l in t.splitlines() if l.startswith('|')]; assert len(ls)>=8, f'表格行太少({len(ls)})，要求至少覆盖 6 家公司'; print('ok', len(ls))\""
       rationale: "JD 矩阵必须是一张真表（表头+分隔+至少 6 行公司），不是散文"
     - id: C-interview-bank-has-questions
       kind: custom
       target: output/interview-bank.md
       spec:
         check: shell_command
-        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import pathlib,re; t=pathlib.Path('_run/workspace/output/interview-bank.md').read_text(encoding='utf-8'); q=re.findall(r'^\\s*(?:\\d+[.、)]|[-*])\\s+.{6,}', t, re.M); assert len(q)>=25, f'题目条数不足({len(q)})，要求至少 25 道'; print('ok', len(q))\""
+        command: "python3 -c \"import pathlib,re; t=pathlib.Path('_run/workspace/output/interview-bank.md').read_text(encoding='utf-8'); q=re.findall(r'^\\s*(?:\\d+[.、)]|[-*])\\s+.{6,}', t, re.M); assert len(q)>=25, f'题目条数不足({len(q)})，要求至少 25 道'; print('ok', len(q))\""
       rationale: "题库至少 25 道题（材料里真题远超这个数）"
     - id: C-roadmap-is-staged
       kind: custom
       target: output/roadmap.md
       spec:
         check: shell_command
-        command: "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/.venv/bin/python -c \"import pathlib,re; t=pathlib.Path('_run/workspace/output/roadmap.md').read_text(encoding='utf-8'); h=re.findall(r'^#{2,3}\\s+\\S', t, re.M); assert len(h)>=5, f'阶段标题不足({len(h)})，要求至少 5 段'; assert len(t)>=2000, f'攻略太短({len(t)}字)'; print('ok', len(h), len(t))\""
+        command: "python3 -c \"import pathlib,re; t=pathlib.Path('_run/workspace/output/roadmap.md').read_text(encoding='utf-8'); h=re.findall(r'^#{2,3}\\s+\\S', t, re.M); assert len(h)>=5, f'阶段标题不足({len(h)})，要求至少 5 段'; assert len(t)>=2000, f'攻略太短({len(t)}字)'; print('ok', len(h), len(t))\""
       rationale: "攻略要有至少 5 个阶段且正文不少于 2000 字 —— 这是这份交付物的主件"
 
 content_checks:
