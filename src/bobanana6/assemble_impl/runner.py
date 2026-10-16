@@ -100,7 +100,7 @@ from ..sources import (
     form_for,
     forms_for,
 )
-from .produce import artifact_from_disk
+from .produce import artifact_from_disk, constraint_applies_to
 from .runtime import (
     BlockDeclined,
     BlockRuntime,
@@ -1056,6 +1056,59 @@ class Runner:
         )
         return tuple(contract.sources) + expanded
 
+    def _bound_checks(
+        self,
+        subtask: Subtask,
+        context: CheckContext,
+        *,
+        split_report: SplitReport,
+    ) -> BoundChecks:
+        """The ``check.*`` tools for one block, including the read-only self-check data.
+
+        ★ ``check.local`` cannot own the three things it needs: the **declared**
+        constraints (never the compiled bundle's synthesized ``AUTO-*`` copies),
+        the one belonging rule, and a reader for the block's product as it sits on
+        disk *before* submission. Wiring them here is the injection point; drop it
+        and ``check.local`` falls back to its fail-closed ``None`` -- which is
+        exactly the state that made the tool useless (it returned the verdict,
+        which does not exist yet).
+        """
+        declared = (*self.document.hard, *self.document.soft)
+        workspace = self.workspace
+
+        def current_product() -> Candidate | None:
+            """The deliverable as it sits on disk right now, or ``None`` (never raises)."""
+            if workspace is None:
+                return None
+            path = Path(workspace) / subtask.output
+            if not path.is_file():
+                return None
+            try:
+                artifact = artifact_from_disk(subtask.output, path)
+            except (OSError, ValueError):
+                # 读不回 ≠ 不存在：让检查器照实说"没有产物"，不要在这里杀块。
+                return None
+            return Candidate(subtask_id=subtask.id, source_id=subtask.id, artifacts=(artifact,))
+
+        def private_context() -> CheckContext:
+            # ★ A fresh ``RecordedEvidence`` per call: the self-check must not be
+            #   able to append to the judge's evidence (``BlockJudge.verify`` reads
+            #   ``evidence.last()``). This is what keeps ``check.local`` read-only
+            #   with respect to the verdict.
+            return replace(context, custom_checks=self._custom_checks())
+
+        return BoundChecks(
+            block=subtask.id,
+            verdict=None,
+            provenance_report=None,
+            split_report=split_report,
+            constraints=declared,
+            applies_to=constraint_applies_to,
+            subtask=subtask,
+            local_context=private_context,
+            product=current_product,
+        )
+
     def _custom_checks(self) -> Mapping[str, Callable[..., Any]]:
         """The ``custom`` checks this host is willing to run (see services/checks.py)."""
         from ..services import (
@@ -1168,11 +1221,8 @@ class Runner:
                         for point in piece_provenance.get(name, ())
                     ],
                 }
-        checks = BoundChecks(
-            block=subtask.id,
-            verdict=None,
-            provenance_report=None,
-            split_report=self._split_report_for(plan, bundle, ontology),
+        checks = self._bound_checks(
+            subtask, context, split_report=self._split_report_for(plan, bundle, ontology)
         )
         return build_toolset(
             plan=plan,

@@ -12,11 +12,15 @@ decides whether a block passed -- that is ``core/kernel.py``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..core.checkers import check_kind
+from ..core.checkers.base import CheckContext
 from ..core.model import (
+    Candidate,
+    Constraint,
     Ontology,
     Snapshot,
     SourceRef,
@@ -188,18 +192,161 @@ class BoundSources(SourceTools):
         return snapshot
 
 
+#: ``check.local`` keeps at most this many characters of any one constraint's
+#: judge sentence. A judge command's stdout is unbounded; a self-check that floods
+#: the block's context costs more than the reading is worth.
+CHECK_LOCAL_DETAIL_LIMIT = 400
+
+#: What a machine detail (a shell command, a regex, ...) is replaced with before
+#: it could reach the block.
+WITHHELD_DETAIL = "<machine detail withheld>"
+
+
+def _spec_strings(spec: Any) -> tuple[str, ...]:
+    """Every non-empty string nested anywhere in a constraint ``spec``.
+
+    Used only to *withhold* machine detail from ``check.local``: a value the
+    contract declared in ``spec`` (``command`` / a regex / a nested
+    ``columns[].pattern`` / ...) is never echoed back, so the block cannot learn
+    to satisfy the checker instead of the rule. Recursion covers mappings inside
+    sequences, not just sequences of strings.
+    """
+    found: list[str] = []
+    if isinstance(spec, str):
+        if spec:
+            found.append(spec)
+    elif isinstance(spec, Mapping):
+        for value in spec.values():
+            found.extend(_spec_strings(value))
+    elif isinstance(spec, (list, tuple, set, frozenset)):
+        for item in spec:
+            found.extend(_spec_strings(item))
+    return tuple(found)
+
+
+def _check_local_detail(constraint: Constraint, facts: Sequence[str]) -> str:
+    """The judge's own sentence, machine detail withheld and length-bounded."""
+    detail = "; ".join(str(fact) for fact in facts)
+    for machine in _spec_strings(constraint.spec):
+        detail = detail.replace(machine, WITHHELD_DETAIL)
+    # A judge command prints freely; collapse whitespace and cap the length so one
+    # verbose checker cannot take over the block's context.
+    detail = " ".join(detail.split())
+    if len(detail) > CHECK_LOCAL_DETAIL_LIMIT:
+        detail = detail[:CHECK_LOCAL_DETAIL_LIMIT] + "…"
+    return detail
+
+
 @dataclass(frozen=True)
 class BoundChecks(CheckTools):
-    """``check.*`` tools. The verdict comes from ``services.checks.BlockJudge``."""
+    """``check.*`` tools. The verdict comes from ``services.checks.BlockJudge``.
+
+    ``local`` is *not* that verdict: it is a read-only self-check the block may
+    run before submitting (see :meth:`local`). ``check.provenance`` /
+    ``assemble_dryrun`` keep their existing, unrelated payloads.
+    """
 
     block: str
     verdict: Any = None
     provenance_report: Any = None
     split_report: Any = None
     plan: SplitPlan | None = None
+    #: ★ The **contract-declared** constraints (``document.hard + document.soft``)
+    #: -- the same source ``produce._constraints_entry`` reads, never
+    #: ``judge.bundle`` (which carries the synthesized ``AUTO-*`` / ``C-*@T-xx``
+    #: retarget copies that no contract declared).
+    constraints: tuple[Constraint, ...] = ()  # blame: fail-closed — 省略即"拿不到契约声明的约束"⇒自查答 null，方向保守
+    #: The one belonging rule (``produce.constraint_applies_to``), injected so
+    #: this module reuses it instead of growing a second copy. ``None`` = not
+    #: wired ⇒ ``local`` is fail-closed (``None``).
+    applies_to: Callable[[Constraint, Subtask], bool] | None = None  # blame: fail-closed — 省略即"归属规则没接上"⇒自查答 null，绝不猜
+    subtask: Subtask | None = None  # blame: fail-closed — 省略即"不知道本块是谁"⇒自查答 null
+    #: A **fresh** check context per call -- its own ``RecordedEvidence``, so a
+    #: self-check can never append to the judge's evidence stream. ``None`` =
+    #: not wired ⇒ ``local`` is fail-closed.
+    local_context: Callable[[], CheckContext] | None = None  # blame: fail-closed — 省略即"没有隔离的判据上下文"⇒自查答 null（绝不共用判官的证据流）
+    #: Lazily reads the block's current product (before it is submitted). ``None``
+    #: = no product reader wired; a missing on-disk deliverable is reported by the
+    #: checkers themselves rather than passed off as green.
+    product: Callable[[], Candidate | None] | None = None  # blame: fail-closed — 省略即"读不到产物"⇒判据照实报缺失，不当通过
 
     def local(self) -> Any:
-        return self.verdict
+        """★ Read-only self-check: what the declared constraints say about this block now.
+
+        A block calls this *before* it submits, and the judge's ``verdict`` does
+        not exist yet -- returning it answered ``null`` at exactly the moment the
+        block needed an answer. This recomputes the constraints the judge will
+        apply, against the block's current product, and reports each one:
+
+            ``id``       the declared constraint name (e.g. ``C-length``)
+            ``expects``  the contract's own ``rationale`` -- the same sentence the
+                         brief already shows the block (same source, one path)
+            ``passed``   does that one constraint hold right now
+            ``detail``   the judge's own sentence, machine detail withheld and
+                         truncated to ``CHECK_LOCAL_DETAIL_LIMIT`` characters
+
+        Three properties are load-bearing:
+
+        * **Only declared constraints.** The source is ``self.constraints``
+          (declared hard/soft), never the synthesized ``AUTO-*`` / ``C-*@T-xx``
+          copies in ``judge.bundle``; belonging reuses ``constraint_applies_to``.
+        * **Never a verdict.** Nothing here writes ``verdict``, rejects a
+          candidate, or changes any judgment -- this is advice the block asked for.
+        * **No machine detail.** Every string found in the constraint's ``spec``
+          (the shell command, a regex, ...) is replaced before it reaches the
+          block, so the block sees the judge's human sentence only.
+
+        Side effect, named: a ``custom``/``shell_command`` constraint can only be
+        answered by running it, so this runs the contract's own judge command --
+        the same command, in the same cwd, the judge runs anyway; nothing
+        model-supplied is executed, and a fresh evidence recorder per call keeps
+        the judge's gate untouched (``BlockJudge.verify`` reads ``evidence.last()``).
+
+        Fail-closed: no declared constraints, none that belong to this block, or
+        an unwired contract/context ⇒ ``None`` (the pre-change shape).
+        """
+        if (
+            not self.constraints
+            or self.subtask is None
+            or self.applies_to is None
+            or self.local_context is None
+        ):
+            return None
+        applicable = [
+            constraint
+            for constraint in self.constraints
+            if self.applies_to(constraint, self.subtask)
+        ]
+        if not applicable:
+            return None
+        candidate = self.product() if self.product is not None else None
+        if candidate is None:
+            # No product on disk yet: the checkers still answer honestly (a shell
+            # command reports the missing file; a content check reports no artifact).
+            candidate = Candidate(subtask_id=self.subtask.id, source_id=self.subtask.id)
+        context = self.local_context()
+        rows: list[dict[str, Any]] = []
+        for constraint in applicable:
+            try:
+                outcome = check_kind(constraint, candidate, context)
+                passed = bool(outcome.ok)
+                facts: Sequence[str] = outcome.facts
+            except Exception as exc:  # noqa: BLE001 - a broken self-check must not kill the block
+                passed = False
+                facts = (f"self-check raised {type(exc).__name__}: {exc}",)
+            rows.append(
+                {
+                    "id": constraint.id,
+                    "expects": constraint.rationale,
+                    "passed": passed,
+                    "detail": _check_local_detail(constraint, facts),
+                }
+            )
+        return {
+            "block": self.block,
+            "applies_to": str(self.subtask.output or ""),
+            "constraints": rows,
+        }
 
     def provenance(self) -> Any:
         return self.provenance_report

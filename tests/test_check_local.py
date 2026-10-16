@@ -1,0 +1,326 @@
+"""★ `check.local`: the self-check a block runs *before* it submits.
+
+The tool used to ``return self.verdict`` -- and the verdict does not exist until
+after submission, so the one moment a block needs it (deciding whether to send)
+is exactly the moment it answered ``null``. It now recomputes the contract's own
+constraints against the block's current product, read-only, and reports each one.
+
+What is pinned here:
+
+1. the production path (``run_task``) really wires the self-check data in;
+2. a constraint that does not belong to this block never appears;
+3. the reply carries the judge's human sentence, never ``spec.command`` / a regex;
+4. without a contract the reply is ``null`` (the pre-change shape);
+5. two-arm proof: an unsatisfying product ⇒ that constraint ``passed=false`` with
+   a non-empty ``detail``; make it satisfy ⇒ the same constraint turns ``true``;
+6. the wiring is load-bearing: drop any injected piece ⇒ ``null`` (tests 1/5 go red);
+7. a failed block's ``commit.json`` records *why* (constraint id + detail).
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+from acceptance.harness import run_task
+from bobanana6.assemble_impl.produce import constraint_applies_to
+from bobanana6.core.checkers.base import CheckContext, fail
+from bobanana6.core.model import Constraint, ModelResponse, Subtask
+from bobanana6.services.tools import BoundChecks
+from tests.test_convert_three import _tool_call
+
+# --------------------------------------------------------------------------- #
+# unit fixtures: a block whose only constraint runs a "judge command"
+# --------------------------------------------------------------------------- #
+
+
+def _constraint(constraint_id: str, target: str, command: str, rationale: str = "a rule") -> Constraint:
+    return Constraint(
+        id=constraint_id,
+        kind="custom",
+        target=target,
+        spec={"check": "shell_command", "command": command},
+        rationale=rationale,
+    )
+
+
+def _block(output: str = "output/out.txt") -> Subtask:
+    return Subtask(id="T-01", goal="g", inputs=(), output=output, contract_ref="c", axis="source", mode="write")
+
+
+def _fake_shell(*_args, **_kwargs):
+    """A custom check that never runs a process: it echoes the command into facts."""
+
+    def run(constraint, candidate, context):  # type: ignore[no-untyped-def]
+        return fail(constraint, f"{constraint.spec.get('command')!r} exited 1", "FAIL: the human reason")
+
+    return {"shell_command": run}
+
+
+def _bound(constraints, *, applies=True, context=True, subtask=None):  # type: ignore[no-untyped-def]
+    return BoundChecks(
+        block="T-01",
+        constraints=tuple(constraints),
+        applies_to=constraint_applies_to if applies else None,
+        subtask=subtask if subtask is not None else _block(),
+        local_context=(lambda: CheckContext(custom_checks=_fake_shell())) if context else None,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ② belonging: only constraints that concern this block
+# --------------------------------------------------------------------------- #
+
+
+def test_check_local_reports_only_the_constraints_that_belong_to_this_block() -> None:
+    own = _constraint("C-own", "output/out.txt", "python3 check.py")
+    other_product = _constraint("C-elsewhere", "output/other.txt", "python3 check.py")
+    other_block = _constraint("C-T02", "T-02", "python3 check.py")
+
+    result = _bound((own, other_product, other_block)).local()
+
+    assert result is not None
+    assert result["applies_to"] == "output/out.txt"
+    assert [row["id"] for row in result["constraints"]] == ["C-own"]
+    assert set(result["constraints"][0]) == {"id", "expects", "passed", "detail"}
+
+
+def test_a_wildcard_constraint_applies_to_every_block() -> None:
+    result = _bound((_constraint("C-star", "*", "python3 check.py"),)).local()
+    assert result is not None
+    assert [row["id"] for row in result["constraints"]] == ["C-star"]
+
+
+# --------------------------------------------------------------------------- #
+# ③ no machine detail, bounded output
+# --------------------------------------------------------------------------- #
+
+
+def test_check_local_never_echoes_the_command_or_a_regex() -> None:
+    command = "grep -oE 'L[0-9]+' out.txt"
+    result = _bound((_constraint("C-regex", "output/out.txt", command),)).local()
+
+    assert result is not None
+    rendered = json.dumps(result, ensure_ascii=False)
+    assert command not in rendered
+    assert "L[0-9]+" not in rendered  # the regex inside the command is withheld too
+    assert "<machine detail withheld>" in rendered
+    assert "FAIL: the human reason" in rendered
+    assert len(result["constraints"][0]["detail"]) <= 401  # 400 + the ellipsis
+
+
+def test_machine_detail_nested_in_a_spec_is_withheld_too() -> None:
+    """★ 审计找到的洞：清单里嵌字典（``columns[].pattern``）也要一起抹掉。"""
+    constraint = Constraint(
+        id="C-nested",
+        kind="custom",
+        target="output/out.txt",
+        spec={
+            "check": "shell_command",
+            "command": "python3 check.py",
+            "columns": [{"name": "amount", "dtype": "str", "pattern": "^A[0-9]+$"}],
+        },
+        rationale="r",
+    )
+
+    def run(constraint, candidate, context):  # type: ignore[no-untyped-def]
+        return fail(constraint, f"judge said: {constraint.spec}")
+
+    checks = BoundChecks(
+        block="T-01",
+        constraints=(constraint,),
+        applies_to=constraint_applies_to,
+        subtask=_block(),
+        local_context=lambda: CheckContext(custom_checks={"shell_command": run}),
+    )
+    rendered = json.dumps(checks.local(), ensure_ascii=False)
+    assert "python3 check.py" not in rendered
+    assert "^A[0-9]+$" not in rendered
+    assert "amount" not in rendered
+
+
+def test_a_verbose_judge_sentence_is_truncated() -> None:
+    from bobanana6.core.checkers.base import ok
+    from bobanana6.services.tools import CHECK_LOCAL_DETAIL_LIMIT
+
+    def run(constraint, candidate, context):  # type: ignore[no-untyped-def]
+        return ok(constraint, "x" * (CHECK_LOCAL_DETAIL_LIMIT * 3))
+
+    checks = BoundChecks(
+        block="T-01",
+        constraints=(_constraint("C-long", "output/out.txt", "python3 check.py"),),
+        applies_to=constraint_applies_to,
+        subtask=_block(),
+        local_context=lambda: CheckContext(custom_checks={"shell_command": run}),
+    )
+    detail = checks.local()["constraints"][0]["detail"]
+    assert detail.endswith("…")
+    assert len(detail) == CHECK_LOCAL_DETAIL_LIMIT + 1
+
+
+# --------------------------------------------------------------------------- #
+# ④ / ⑥ fail-closed and the injection point
+# --------------------------------------------------------------------------- #
+
+
+def test_check_local_is_null_when_nothing_is_declared_or_wired() -> None:
+    assert BoundChecks(block="T-01").local() is None  # no contract at all
+    assert _bound(()).local() is None  # declared, but none apply to this block
+    assert _bound((_constraint("C-own", "output/out.txt", "python3 check.py"),), applies=False).local() is None
+    assert _bound((_constraint("C-own", "output/out.txt", "python3 check.py"),), context=False).local() is None
+
+
+# --------------------------------------------------------------------------- #
+# end-to-end: the production assembly point really injects the self-check
+# --------------------------------------------------------------------------- #
+
+
+def _selfcheck_task(
+    tmp_path: Path, *, name: str, extra_constraints: str = "", with_constraint: bool = True
+) -> Path:
+    """A one-block task whose contract declares a shell-command constraint."""
+    task = tmp_path / name
+    (task / "input" / "data").mkdir(parents=True, exist_ok=True)
+    (task / "input" / "data" / "seed.txt").write_text("draft\n", encoding="utf-8")
+    (task / "ontology.yaml").write_text(
+        'domain: text\nversion: "2026.1"\nconcepts:\n  text: {label: body, kind: attribute}\n',
+        encoding="utf-8",
+    )
+    (task / "check_len.py").write_text(
+        "import pathlib, sys\n"
+        "p = pathlib.Path('_run/workspace/output/out.txt')\n"
+        "if not p.is_file():\n"
+        "    sys.exit('FAIL: output/out.txt is not on disk')\n"
+        "n = len(p.read_text(encoding='utf-8').strip())\n"
+        "if n < 20:\n"
+        "    sys.exit(f'FAIL: only {n} chars, need 20')\n"
+        "print(f'ok chars={n}')\n",
+        encoding="utf-8",
+    )
+    declared = (
+        "constraints:\n"
+        "  hard:\n"
+        "    - id: C-len\n"
+        "      kind: custom\n"
+        "      target: output/out.txt\n"
+        '      spec: {check: shell_command, command: "python3 check_len.py"}\n'
+        '      rationale: "the product must be at least 20 characters"\n'
+        + extra_constraints
+        if with_constraint
+        else ""
+    )
+    (task / "task.yaml").write_text(
+        "task_id: selfcheck\n"
+        "goal: write a body\n"
+        "version: 1\n"
+        "deliverables:\n"
+        "  - {name: output/out.txt, schema: {text: str}}\n"
+        "sources:\n"
+        "  - {ref: seed, locator: input/data/seed.txt}\n"
+        + declared,
+        encoding="utf-8",
+    )
+    return task
+
+
+def _selfcheck_payloads(messages) -> list[dict]:  # type: ignore[no-untyped-def]
+    found: list[dict] = []
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "constraints" in payload:
+            found.append(payload)
+    return found
+
+
+class _SelfCheckClient:
+    """turn 0 write short → 1 check.local → 2 write long → 3 check.local → 4 submit."""
+
+    def __init__(self, long_body: str) -> None:
+        self.turn = 0
+        self.seen: list[dict] = []
+        self.long_body = long_body
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        self.seen.extend(_selfcheck_payloads(messages))
+        turn = self.turn
+        self.turn += 1
+        if turn == 0:
+            return ModelResponse(tool_calls=(_tool_call("w0", "files.write", {"path": "output/out.txt", "content": "short"}),))
+        if turn == 1:
+            return ModelResponse(tool_calls=(_tool_call("c1", "check.local", {}),))
+        if turn == 2:
+            return ModelResponse(tool_calls=(_tool_call("w1", "files.write", {"path": "output/out.txt", "content": self.long_body}),))
+        if turn == 3:
+            return ModelResponse(tool_calls=(_tool_call("c2", "check.local", {}),))
+        return ModelResponse(text=json.dumps({"ref": "seed", "text": self.long_body}))
+
+
+#: 长到满足 `check_len.py`（>=20 字符），但仍是领域无关的一句占位文本。
+_LONG = "this body is long enough to satisfy the declared rule."
+
+
+def test_the_production_run_wires_check_local_and_proves_both_arms(tmp_path: Path) -> None:
+    """★ ⑤ 两臂 + ⑥ 注入点：不满 → false/有 detail；改到满足 → true。
+
+    走的是**生产装配点**（`run_task`），不是手工拼 `BoundChecks`：删掉
+    `runner._bound_checks` 的注入，这个测试立刻红。
+    """
+    task = _selfcheck_task(tmp_path, name="selfcheck-arms")
+    client = _SelfCheckClient(_LONG)
+    run_task(task, client=client, env={}, workspace=True, max_calls=6)
+
+    assert client.seen, "check.local was never called (or always answered null)"
+    assert len(client.seen) >= 2, client.seen
+
+    first = {row["id"]: row for row in client.seen[0]["constraints"]}
+    second = {row["id"]: row for row in client.seen[-1]["constraints"]}
+    assert set(first) == {"C-len"} and set(second) == {"C-len"}
+
+    assert first["C-len"]["passed"] is False
+    assert first["C-len"]["detail"], "an unsatisfying row must carry the judge's sentence"
+    assert "FAIL" in first["C-len"]["detail"]
+    assert first["C-len"]["expects"] == "the product must be at least 20 characters"
+
+    assert second["C-len"]["passed"] is True
+    # ★ never the machine detail
+    rendered = json.dumps(client.seen, ensure_ascii=False)
+    assert "python3 check_len.py" not in rendered
+
+
+def test_a_task_without_declared_constraints_still_answers_null(tmp_path: Path) -> None:
+    """★ ④ 缺省行为不变：没有任何声明约束 ⇒ `check.local` 仍是 `null`。
+
+    合成的 `AUTO-*` presence（`judge.bundle` 里有）**不算**声明约束，不进这个返回。
+    """
+    task = _selfcheck_task(tmp_path, name="selfcheck-none", with_constraint=False)
+
+    class _Client:
+        def __init__(self) -> None:
+            self.turn = 0
+            self.reply = ""
+
+        def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+            for message in messages:
+                if message.get("role") == "tool" and message.get("tool_call_id") == "c1":
+                    self.reply = str(message.get("content"))
+            turn = self.turn
+            self.turn += 1
+            if turn == 0:
+                return ModelResponse(tool_calls=(_tool_call("c1", "check.local", {}),))
+            return ModelResponse(text=json.dumps({"ref": "seed", "text": _LONG}))
+
+    client = _Client()
+    run_task(task, client=client, env={}, workspace=True, max_calls=4)
+    assert client.reply.strip() == "null", client.reply
