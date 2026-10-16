@@ -546,14 +546,16 @@ class Runner:
                 declined_evidence["input_gaps"] = gap_note
             # ★★ 判定失败 ≠ 产物不存在：它可能只是信封没封好，活早就干完了。
             artifact = self._disk_artifact(subtask)
+            # ★ 记理由（★ 只加记录，判定一个字不动）：declined 也是"没通过"，
+            #   原来"产物在盘上"这条路径写空串 —— 与 failed 一边修好、一边留空
+            #   是同一种"归不了因"。具名拒的 code 就是它的 exit_reason。
+            commit_summary = f"declined: {declined.exit_reason}"
             if artifact is not None:
                 declined_evidence["artifact_on_disk"] = subtask.output
                 declined_detail["artifact_on_disk"] = subtask.output
                 handoff_base = self._disk_handoff(subtask, "declined", runtime)
-                commit_summary = ""
             else:
                 handoff_base = None
-                commit_summary = f"declined: {declined.exit_reason}"
             return _BlockOutcome(
                 subtask=subtask,
                 status="declined",
@@ -588,18 +590,17 @@ class Runner:
             # ★★ 判定失败 ≠ 产物不存在（见 `_publish_disk_artifact`）：产物照样给下游，
             #   但 `verdicts` 仍是 ok=False —— 两件事独立，绝不因为它在盘上就改成通过。
             artifact = self._disk_artifact(subtask)
+            # ★ 失败理由进 commit（★ 只加记录，判定一个字不动）：原来"产物在盘上"
+            #   这条路径写的是空串 —— 而它恰恰是最需要理由的一类失败（活干完了、
+            #   只是信封没封好）。空 summary 让下一个读的人学不到、也归不了因。
+            commit_summary = self._failed_commit_summary(failed.exit_reason, failure_evidence)
             if artifact is not None:
                 failure_evidence["artifact_on_disk"] = subtask.output
                 failure_detail["artifact_on_disk"] = subtask.output
                 handoff_base = self._disk_handoff(subtask, "failed", runtime)
-                commit_summary = ""
             else:
                 # ★ 盘上没有产物，但这个块**跑过** —— 照样留一个 commit（规格 §2 第1层）。
-                rejected = failure_evidence.get("rejected_by")
                 handoff_base = None
-                commit_summary = f"failed: {failed.exit_reason}" + (
-                    f"; rejected_by={'/'.join(str(one) for one in rejected)}" if rejected else ""
-                )
             return _BlockOutcome(
                 subtask=subtask,
                 status="failed",
@@ -683,6 +684,13 @@ class Runner:
                 # ★ `#44`: 检查器一致声明的原因（目前只有"判据命令自己没跑起来" ⇒ tool）
                 #   原文照录 —— 归因层读声明，不去猜字符串。
                 gate_detail["cause"] = verdict.cause
+        # ★ 失败理由进 commit（★ 只加记录，判定一个字不动）：模型自己写的 summary
+        #   保留；判失败时，把**判据 id + 判据自己那句话**也记进去 —— 空字符串
+        #   让下一个读的人学不到东西，也归不了因。
+        commit_summary = candidate.summary
+        if not verdict.ok:
+            reason = self._verdict_commit_summary(verdict)
+            commit_summary = f"{reason}\n{commit_summary}" if commit_summary.strip() else reason
         return _BlockOutcome(
             subtask=subtask,
             status="ok",
@@ -695,7 +703,7 @@ class Runner:
             handoff_base=handoff_base,
             trace_paths=trace_paths,
             commit_verdict="ok" if verdict.ok else "failed",
-            commit_summary=candidate.summary,
+            commit_summary=commit_summary,
             runtime=runtime,
             event_log=event_log,
             gate_ok=verdict.ok,
@@ -1649,6 +1657,41 @@ class Runner:
                 if constraint_id in withheld.failed:
                     evidence[constraint_id] = fact
         return evidence
+
+    @staticmethod
+    def _failed_commit_summary(exit_reason: str, evidence: Mapping[str, Any]) -> str:
+        """A non-empty ``commit.json`` summary for a block that failed to submit.
+
+        The artifact-on-disk failure path used to record ``""`` -- and that is the
+        failure that matters most: the work was done, only the envelope was not.
+        The empty summary taught the next reader nothing and made the failure
+        unattributable. This keeps the ``failed: <exit>; rejected_by=...`` prefix
+        the no-artifact path already had and appends each rejected constraint's
+        own fact (judge id + the sentence the judge printed).
+        """
+        parts = [f"failed: {exit_reason}"]
+        rejected = [one for one in str(evidence.get("rejected_by") or "").split(", ") if one]
+        if rejected:
+            parts.append(f"rejected_by={', '.join(rejected)}")
+            for constraint_id in rejected:
+                fact = evidence.get(constraint_id)
+                if fact:
+                    parts.append(f"{constraint_id}: {fact}")
+        return "; ".join(parts)
+
+    @staticmethod
+    def _verdict_commit_summary(verdict: Verdict) -> str:
+        """Why a judged block failed, as ``<constraint id>: <facts>`` lines.
+
+        The judge is the party that declares the rejection, so its own ids and
+        facts are written into the trace verbatim (never re-derived downstream).
+        """
+        lines = [f"failed: {', '.join(str(one) for one in verdict.failed) or 'unspecified'}"]
+        for constraint_id in verdict.failed:
+            fact = verdict.evidence.get(constraint_id)
+            if fact:
+                lines.append(f"{constraint_id}: {fact}")
+        return "\n".join(lines)
 
     def _block_rows(self, plan: SplitPlan) -> tuple[Mapping[str, Any], ...]:
         return tuple(
