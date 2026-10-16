@@ -31,6 +31,17 @@ def required_refs(artifact: Artifact) -> tuple[str, ...]:
     return tuple(refs)
 
 
+#: Human sentence for the self-check's third state: this check's input is built
+#: at block end, so a product that sits on disk before submission cannot be
+#: judged by it. Declared by the checker at its own failure point (only it knows
+#: *why* it failed); read only by the read-only self-check. Judgment never reads
+#: it -- ``ok`` / ``facts`` / ``cause`` are unchanged.
+PENDING_INPUT = (
+    "此刻验不了：这条核的是坐标（产物每一行指回哪份快照），它们在交答案、块末对账时才生成，"
+    "磁盘上的产物还没带它们；现在量到的覆盖度恒为 0.0000，不代表没过。交答案时判定会照常做。"
+)
+
+
 def same_quantity(left: object, right: object, concept: str, ontology: Ontology | None) -> bool:
     """Whether two values are the same *quantity*, allowing a declared conversion.
 
@@ -278,7 +289,11 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
             detail += f"; {mismatches[0]}"
         if holes:
             detail += f"; declared-derived columns were NOT content-checked here: {list(holes)!r}"
-        return fail(constraint, detail)
+        # ★ Declare *why* this failed: an absent input (block-end reconciliation)
+        #   is not a product failure. Judgment keeps ok=False and the same facts;
+        #   only the read-only self-check reads `pending_input`.
+        pending = PENDING_INPUT if not candidate.provenance else ""
+        return fail(constraint, detail, pending_input=pending)
     checked = f"coverage {coverage:.4f} >= required {minimum}"
     if holes:
         # ★ 过了也不许含糊：这一格只证明"引用能重放"，没证明"算得对"。

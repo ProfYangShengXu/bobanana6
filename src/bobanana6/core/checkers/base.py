@@ -73,6 +73,13 @@ class CheckOutcome:
     #: 目前只有一种：判据命令【自己】没跑起来（解释器/包缺失）⇒ ``"tool"``。
     #: 这是"谁来『说』自己的错"那条纪律的具体化：检查器知道，就由它声明。
     cause: str = ""
+    #: ★ 同一条纪律的另一面：这一条**不是"没过"**，而是它要读的输入此刻还不在
+    #: 候选里（生产者在块末对账时才生成，例如 `Candidate.provenance` / `claims`）。
+    #: 由检查器在**它自己**的失败点上声明（只有它知道失败是不是缺输入引起的），
+    #: 空串 = 普通结果。判定器**不读**它 —— ``ok`` / ``facts`` / ``cause`` 一字不变，
+    #: 判什么拒什么完全不动；只有只读自查（`services.tools.BoundChecks.local`）读它，
+    #: 把这一条报成第三态 `status="unverified"` 而不是 ``passed=false``。
+    pending_input: str = ""  # blame: fail-closed — 省略即"不是缺输入"⇒照常报失败，绝不静默变第三态
 
 
 Checker = Callable[[Constraint, Candidate, CheckContext], CheckOutcome]
@@ -88,8 +95,14 @@ def ok(constraint: Constraint, *facts: str, divergences: tuple[Disagreement, ...
     )
 
 
-def fail(constraint: Constraint, *facts: str, cause: str = "") -> CheckOutcome:
-    return CheckOutcome(constraint_id=constraint.id, ok=False, facts=tuple(facts), cause=cause)
+def fail(constraint: Constraint, *facts: str, cause: str = "", pending_input: str = "") -> CheckOutcome:  # blame: fail-closed — 省略 cause/pending_input 即"检查器没声明"⇒按普通失败走，不静默变第三态
+    return CheckOutcome(
+        constraint_id=constraint.id,
+        ok=False,
+        facts=tuple(facts),
+        cause=cause,
+        pending_input=pending_input,
+    )
 
 
 def artifact_for(constraint: Constraint, candidate: Candidate) -> Artifact | None:

@@ -460,6 +460,8 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     "check.local": (
         "何时用：★ 你准备交答案之前，让它按契约声明的约束逐条自查当前的产物 —— "
         "每条给 名字 / 要求 / 现在过不过 / 判据自己那句话。"
+        "「现在过不过」有三种：过 / 真的没过 / 此刻还验不了（那条的输入要等交答案时才产生，"
+        "它会说明为什么、什么时候才能验 —— 这种别去改产物）。"
         "比交上去被拒、再重来一遍便宜得多。"
         "输入：无。"
         "何时不用：产物还没成形时不必调（还没东西可判）。"
@@ -496,7 +498,7 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
              group="task", description=_TOOL_DESCRIPTIONS["task.upstream_all"]),
     ToolSpec("task.contract", (), "interface contract",
              group="task", description=_TOOL_DESCRIPTIONS["task.contract"]),
-    ToolSpec("check.local", (), "per-constraint self-check: id/expects/passed/detail", "subtask",
+    ToolSpec("check.local", (), "per-constraint self-check: id/expects/status/detail", "subtask",
              group="check", description=_TOOL_DESCRIPTIONS["check.local"]),
     ToolSpec("check.provenance", (), "provenance report", "subtask",
              group="check", description=_TOOL_DESCRIPTIONS["check.provenance"]),

@@ -281,7 +281,9 @@ class BoundChecks(CheckTools):
             ``id``       the declared constraint name (e.g. ``C-length``)
             ``expects``  the contract's own ``rationale`` -- the same sentence the
                          brief already shows the block (same source, one path)
-            ``passed``   does that one constraint hold right now
+            ``status``   ``passed`` / ``failed`` / ``unverified`` -- three states
+            ``passed``   ``True`` (it holds now) / ``False`` (the check ran and
+                         said no) / ``None`` (not decidable yet, i.e. ``unverified``)
             ``detail``   the judge's own sentence, machine detail withheld and
                          truncated to ``CHECK_LOCAL_DETAIL_LIMIT`` characters
 
@@ -295,6 +297,16 @@ class BoundChecks(CheckTools):
         * **No machine detail.** Every string found in the constraint's ``spec``
           (the shell command, a regex, ...) is replaced before it reaches the
           block, so the block sees the judge's human sentence only.
+
+        And one distinction this report must keep: **"cannot be checked yet" is
+        not "failed".** ``status="unverified"`` is a third state -- the check ran
+        and did not pass, but it declared (``CheckOutcome.pending_input``, set at
+        its own failure point) that the input it reads is not on hand yet: the
+        producer builds it at block end, e.g. the citation points. Its ``detail``
+        says why and when it will be checked. The third state can never swallow a
+        real failure -- only a check that itself attributes its failure to a
+        missing input is reported this way, and the judge still fails such a row
+        at submission.
 
         Side effect, named: a ``custom``/``shell_command`` constraint can only be
         answered by running it, so this runs the contract's own judge command --
@@ -327,19 +339,37 @@ class BoundChecks(CheckTools):
         context = self.local_context()
         rows: list[dict[str, Any]] = []
         for constraint in applicable:
+            reason = ""
             try:
                 outcome = check_kind(constraint, candidate, context)
-                passed = bool(outcome.ok)
+                ok_now = bool(outcome.ok)
                 facts: Sequence[str] = outcome.facts
+                # ★ The check declares *why* it failed. If its input is not on
+                #   hand yet (produced at block end), that is the third state, not
+                #   a failure. An exception, a pass, or a failure the check did
+                #   not attribute to a missing input stays passed/failed.
+                if not ok_now:
+                    reason = outcome.pending_input
             except Exception as exc:  # noqa: BLE001 - a broken self-check must not kill the block
-                passed = False
+                ok_now = False
                 facts = (f"self-check raised {type(exc).__name__}: {exc}",)
+            if reason:
+                status, passed = "unverified", None
+                detail = _check_local_detail(constraint, (reason,))
+            else:
+                status, passed = ("passed" if ok_now else "failed"), ok_now
+                detail = _check_local_detail(constraint, facts)
             rows.append(
                 {
                     "id": constraint.id,
                     "expects": constraint.rationale,
+                    # ``status`` is the authoritative three-valued field (the same
+                    # vocabulary the completion gate already uses); ``passed``
+                    # stays for compatibility -- ``None`` exactly when the row is
+                    # not decidable yet. Both are set in this one place.
+                    "status": status,
                     "passed": passed,
-                    "detail": _check_local_detail(constraint, facts),
+                    "detail": detail,
                 }
             )
         return {

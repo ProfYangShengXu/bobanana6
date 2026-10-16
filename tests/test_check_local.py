@@ -29,7 +29,7 @@ sys.path.insert(0, str(REPO))
 from acceptance.harness import run_task
 from bobanana6.assemble_impl.produce import constraint_applies_to
 from bobanana6.core.checkers.base import CheckContext, fail
-from bobanana6.core.model import Constraint, ModelResponse, Subtask
+from bobanana6.core.model import Artifact, Candidate, Constraint, ModelResponse, Subtask
 from bobanana6.services.tools import BoundChecks
 from tests.test_convert_three import _tool_call
 
@@ -61,13 +61,45 @@ def _fake_shell(*_args, **_kwargs):
     return {"shell_command": run}
 
 
-def _bound(constraints, *, applies=True, context=True, subtask=None):  # type: ignore[no-untyped-def]
+def _bound(constraints, *, applies=True, context=True, subtask=None, product=None, now=None):  # type: ignore[no-untyped-def]
     return BoundChecks(
         block="T-01",
         constraints=tuple(constraints),
         applies_to=constraint_applies_to if applies else None,
         subtask=subtask if subtask is not None else _block(),
-        local_context=(lambda: CheckContext(custom_checks=_fake_shell())) if context else None,
+        local_context=(lambda: CheckContext(custom_checks=_fake_shell(), now=now)) if context else None,
+        product=product,
+    )
+
+
+def _provenance(constraint_id: str = "C-provenance", target: str = "output/out.txt") -> Constraint:
+    """A real ``kind: provenance`` constraint -- the shape that motivated the third state."""
+    return Constraint(
+        id=constraint_id,
+        kind="provenance",
+        target=target,
+        spec={"min_coverage": 0.6},
+        rationale="every value must point back to a snapshot",
+    )
+
+
+def _corroboration(constraint_id: str = "C-corroboration", field: str = "amount") -> Constraint:
+    """A second kind with the same property: its input travels in the answer, not on disk."""
+    return Constraint(
+        id=constraint_id,
+        kind="corroboration",
+        target="*",
+        spec={"field": field},
+        rationale="enough independent sources must agree",
+    )
+
+
+def _text_product(text: str = "line one\nline two\n"):
+    """The block's product as ``runner.current_product`` sees it: disk only, no citations."""
+    return lambda: Candidate(
+        subtask_id="T-01",
+        source_id="T-01",
+        artifacts=(Artifact(name="output/out.txt", text=text),),
     )
 
 
@@ -86,7 +118,7 @@ def test_check_local_reports_only_the_constraints_that_belong_to_this_block() ->
     assert result is not None
     assert result["applies_to"] == "output/out.txt"
     assert [row["id"] for row in result["constraints"]] == ["C-own"]
-    assert set(result["constraints"][0]) == {"id", "expects", "passed", "detail"}
+    assert set(result["constraints"][0]) == {"id", "expects", "status", "passed", "detail"}
 
 
 def test_a_wildcard_constraint_applies_to_every_block() -> None:
@@ -172,6 +204,134 @@ def test_check_local_is_null_when_nothing_is_declared_or_wired() -> None:
     assert _bound(()).local() is None  # declared, but none apply to this block
     assert _bound((_constraint("C-own", "output/out.txt", "python3 check.py"),), applies=False).local() is None
     assert _bound((_constraint("C-own", "output/out.txt", "python3 check.py"),), context=False).local() is None
+
+
+# --------------------------------------------------------------------------- #
+# the third state: "cannot be checked yet" is not "failed"
+# --------------------------------------------------------------------------- #
+
+
+def test_a_check_whose_input_does_not_exist_yet_is_not_reported_as_failed() -> None:
+    """★ The decisive distinction: citation points are produced at block end.
+
+    The check runs and its coverage reads 0.0000, but that zero is not a finding
+    -- the input it would be computed from is not on the disk product. Reporting
+    it as ``passed=false`` is the bug this pins down.
+    """
+    row = _bound((_provenance(),), product=_text_product()).local()["constraints"][0]
+
+    assert row["status"] == "unverified"
+    assert row["passed"] is None
+    assert row["detail"], "an unverified row must still say why"
+    assert "验不了" in row["detail"], "the detail must be a human sentence, in words"
+    assert "coverage 0.0000" not in row["detail"], "the misleading judge sentence must be gone"
+
+
+def test_the_third_state_is_keyed_on_what_the_check_reads_not_on_its_name() -> None:
+    """★ 判据是「输入此刻在不在」这个一般性质，不是某条约束的名字/某道题。"""
+    # The same check under a name no task.yaml ever wrote: still the third state.
+    for constraint_id in ("C-provenance", "C-whatever-this-contract-calls-it"):
+        row = _bound((_provenance(constraint_id),), product=_text_product()).local()["constraints"][0]
+        assert row["status"] == "unverified", constraint_id
+        assert row["passed"] is None, constraint_id
+
+    # A different kind with the same property (its input travels in the answer)
+    # answers the same way -- so this is not a provenance special case.
+    claim_row = _bound((_corroboration(),), product=_text_product()).local()["constraints"][0]
+    assert claim_row["status"] == "unverified"
+    assert claim_row["passed"] is None
+
+
+def test_every_kind_whose_input_is_built_at_block_end_defers() -> None:
+    """★ 同一性质在别的 kind 上也成立（不是给 C-provenance 开的后门）。"""
+    coverage = Constraint(
+        id="C-cov",
+        kind="coverage",
+        target="output/out.txt",
+        spec={"required_sources": ["notes"]},
+        rationale="every required source must be covered",
+    )
+    cov_row = _bound((coverage,), product=_text_product()).local()["constraints"][0]
+    assert cov_row["status"] == "unverified"
+    assert cov_row["passed"] is None
+
+    freshness = Constraint(
+        id="C-fresh", kind="freshness", target="output/out.txt", spec={}, rationale="snapshots must be fresh"
+    )
+    fresh_row = _bound((freshness,), product=_text_product(), now="2026-01-01T00:00:00").local()["constraints"][0]
+    assert fresh_row["status"] == "unverified"
+    assert fresh_row["passed"] is None
+
+
+def test_a_malformed_constraint_is_reported_as_failed_not_deferred() -> None:
+    """★ 审计 finding：缺输入 ≠ 契约本身写坏了。后者必须照旧 ``failed``。
+
+    这里既证明第三态没有吞掉真失败，也证明它没有把检查器**自己的**校验错误
+    （`min_coverage` / `spec.field`）误报成"此刻验不了"。
+    """
+    bad_prov = Constraint(
+        id="C-bad-prov",
+        kind="provenance",
+        target="output/out.txt",
+        spec={"min_coverage": 2},
+        rationale="r",
+    )
+    prov_row = _bound((bad_prov,), product=_text_product()).local()["constraints"][0]
+    assert prov_row["status"] == "failed" and prov_row["passed"] is False
+    assert "min_coverage" in prov_row["detail"]
+
+    bad_corr = Constraint(
+        id="C-bad-corr", kind="corroboration", target="output/out.txt", spec={}, rationale="r"
+    )
+    corr_row = _bound((bad_corr,), product=_text_product()).local()["constraints"][0]
+    assert corr_row["status"] == "failed" and corr_row["passed"] is False
+    assert "spec.field" in corr_row["detail"]
+
+
+def test_a_real_failure_is_never_swallowed_by_the_third_state() -> None:
+    """★ A failure with its input on hand stays ``failed`` -- the whole point."""
+    # A judge-run custom check fails, and its input (the product file) is there.
+    failed = _bound(
+        (_constraint("C-fail", "output/out.txt", "python3 check.py"),), product=_text_product()
+    ).local()["constraints"][0]
+    assert failed["status"] == "failed"
+    assert failed["passed"] is False
+    assert "FAIL" in failed["detail"]
+
+    # Provenance on an EMPTY product: there really is nothing to trace -> false.
+    empty = _bound(
+        (_provenance(),),
+        product=lambda: Candidate(
+            subtask_id="T-01", source_id="T-01", artifacts=(Artifact(name="output/out.txt"),)
+        ),
+    ).local()["constraints"][0]
+    assert empty["status"] == "failed"
+    assert empty["passed"] is False
+
+    # No product at all: "not found" is actionable (write the file) -> false.
+    missing = _bound((_provenance(),), product=lambda: None).local()["constraints"][0]
+    assert missing["status"] == "failed"
+    assert missing["passed"] is False
+
+
+def test_judgment_still_fails_a_candidate_whose_provenance_input_is_absent() -> None:
+    """★ 判定语义一字不动：同一个候选，自查报 unverified，判定器照样 fail。
+
+    检查器只在 ``CheckOutcome.pending_input`` 上**多写一句说明**；``ok`` / ``facts``
+    与改前逐字相同，判定器也从不读那个字段。
+    """
+    from bobanana6.core.checkers import check_kind
+
+    candidate = Candidate(
+        subtask_id="T-01",
+        source_id="T-01",
+        artifacts=(Artifact(name="output/out.txt", text="line one\nline two\n"),),
+    )
+    outcome = check_kind(_provenance(), candidate, CheckContext())
+
+    assert outcome.ok is False
+    assert any("coverage" in fact for fact in outcome.facts), outcome.facts
+    assert outcome.pending_input, "the checker must name the absent input for the self-check"
 
 
 # --------------------------------------------------------------------------- #
@@ -289,14 +449,71 @@ def test_the_production_run_wires_check_local_and_proves_both_arms(tmp_path: Pat
     assert set(first) == {"C-len"} and set(second) == {"C-len"}
 
     assert first["C-len"]["passed"] is False
+    assert first["C-len"]["status"] == "failed"
     assert first["C-len"]["detail"], "an unsatisfying row must carry the judge's sentence"
     assert "FAIL" in first["C-len"]["detail"]
     assert first["C-len"]["expects"] == "the product must be at least 20 characters"
 
     assert second["C-len"]["passed"] is True
+    assert second["C-len"]["status"] == "passed"
     # ★ never the machine detail
     rendered = json.dumps(client.seen, ensure_ascii=False)
     assert "python3 check_len.py" not in rendered
+
+
+#: A real ``kind: provenance`` constraint appended after the custom one.
+_PROV_CONSTRAINT = (
+    "    - id: C-prov\n"
+    "      kind: provenance\n"
+    "      target: output/out.txt\n"
+    "      spec: {min_coverage: 0.6}\n"
+    '      rationale: "every value must point back to a snapshot"\n'
+)
+
+
+class _SatisfyingClient:
+    """turn 0 write a satisfying body → 1 check.local → 2 submit."""
+
+    def __init__(self, body: str) -> None:
+        self.turn = 0
+        self.body = body
+        self.seen: list[dict] = []
+
+    def complete(self, messages, tools, max_tokens, **kw):  # type: ignore[no-untyped-def]
+        self.seen.extend(_selfcheck_payloads(messages))
+        turn = self.turn
+        self.turn += 1
+        if turn == 0:
+            return ModelResponse(
+                tool_calls=(_tool_call("w0", "files.write", {"path": "output/out.txt", "content": self.body}),)
+            )
+        if turn == 1:
+            return ModelResponse(tool_calls=(_tool_call("c1", "check.local", {}),))
+        return ModelResponse(text=json.dumps({"ref": "seed", "text": self.body}))
+
+
+def test_a_product_that_satisfies_everything_reports_no_failure(tmp_path: Path) -> None:
+    """★ 决定性验收：全部满足的产物 ⇒ 没有任何一条被报成失败。
+
+    这是本次要修掉的核心：C-prov 的输入（坐标）要到交答案才产生，自查此刻量不到，
+    但它不是"没过"。``status`` 因此必须是第三态，而不是 ``failed``。
+    """
+    task = _selfcheck_task(tmp_path, name="selfcheck-all-pass", extra_constraints=_PROV_CONSTRAINT)
+    client = _SatisfyingClient(_LONG)
+    run_task(task, client=client, env={}, workspace=True, max_calls=5)
+
+    assert client.seen, "check.local was never called"
+    rows = {row["id"]: row for row in client.seen[-1]["constraints"]}
+    assert set(rows) == {"C-len", "C-prov"}
+
+    # The custom check really holds (its input, the file, is on disk).
+    assert rows["C-len"]["status"] == "passed" and rows["C-len"]["passed"] is True
+    # The provenance check cannot be decided yet -- third state, with a reason.
+    assert rows["C-prov"]["status"] == "unverified" and rows["C-prov"]["passed"] is None
+    assert rows["C-prov"]["detail"] and "验不了" in rows["C-prov"]["detail"]
+
+    # ★ and the decisive claim: nothing is reported as a failure.
+    assert [row["id"] for row in client.seen[-1]["constraints"] if row["status"] == "failed"] == []
 
 
 def test_a_task_without_declared_constraints_still_answers_null(tmp_path: Path) -> None:

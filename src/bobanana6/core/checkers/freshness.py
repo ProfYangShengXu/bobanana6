@@ -13,6 +13,16 @@ from .base import CheckContext, CheckOutcome, fail, ok
 
 KIND = "freshness"
 
+#: Human sentence for the self-check's third state: the snapshot refs this check
+#: ages are read off the candidate's citations, which the producer builds at
+#: block end -- a pre-submission product carries none, so "unverifiable" here
+#: means "not yet", not "failed". Declared by the checker at its own failure
+#: point; read only by the read-only self-check. Judgment never reads it.
+PENDING_INPUT = (
+    "此刻验不了：这条要按快照时间判断新旧，而它引用的快照坐标在交答案、块末对账时才挂上去；"
+    "磁盘上的产物还没带它们，所以现在说不清新旧。交答案时判定会照常做。"
+)
+
 
 def _parse(value: str) -> datetime | None:
     try:
@@ -30,7 +40,13 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
 
     referenced = sorted({p.snapshot_ref for p in candidate.provenance})
     if not referenced:
-        return fail(constraint, "no snapshots referenced; freshness is unverifiable")
+        # ★ The refs are attached at block end; absent here is "not yet", not
+        #   "failed". Judgment still fails; only the self-check reads this.
+        return fail(
+            constraint,
+            "no snapshots referenced; freshness is unverifiable",
+            pending_input=PENDING_INPUT,
+        )
 
     facts: list[str] = []
     for ref in referenced:
