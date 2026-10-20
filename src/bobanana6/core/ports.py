@@ -412,12 +412,18 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     "shell.run": (
         "何时用：你要跑一条 shell 命令 —— 看目录、查文件、跑一个已经落成文件的脚本。"
         "输入：command = 命令；workdir = 工作目录；"
-        "timeout = 秒（★ 默认 60、上限 600，不够要显式给）；background = 后台跑。"
+        "timeout = 秒（★ 默认 60、上限 600，不够要显式给）；background = 后台跑；"
+        "expect = 可选，一个【必须出现在 stdout+stderr 里】的字符串。"
+        "★★★ 给了 expect：输出里没有这个串 ⇒ 工具结果直接失败（exit_code 置 1、"
+        "verified=false、reason 说清缺什么），即使命令自己的退出码是 0。"
+        "退出码是命令的，不是验收结论 —— `cat test.py` 也能退 0。"
+        "跑测试/验收命令时总是给 expect（例：expect=\"5/5 passed\"）。"
         "★ 要算数据：先用 `files.write` 把程序写成【文件】，再 `python3 <文件>` 跑它；"
         "不要把一大段代码内联进命令（heredoc / `-c`）—— 内联的脚本下一轮没得改，"
         "只能整份重抄。改脚本用 `files.patch`。"
         "★ 输出太长时正文只留【头 + 尾】两段，中间省掉多少会说清；被截时完整输出落盘，"
-        "路径在返回的 `full_output_path` 里。"
+        "路径在返回的 `full_output_path` 里。expect 断言在【换页前】对全量输出做，"
+        "所以中间段里的串也算数。"
         "何时不用：产物是一份短文件时用 files.write。"
         "★ 产出的文件与 files.write 同等记账。"
     ),
@@ -584,7 +590,7 @@ _BASE_TOOL_SPECS: tuple[ToolSpec, ...] = (
         ("command",),
         "exit code + stdout/stderr of a shell command run inside the workspace",
         "workspace cwd",
-        optional=("background", "timeout", "workdir"),
+        optional=("background", "timeout", "workdir", "expect"),
         group="exec",
         description=_TOOL_DESCRIPTIONS["shell.run"],
     ),

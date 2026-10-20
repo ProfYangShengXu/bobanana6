@@ -1,0 +1,69 @@
+# L1 最小验证：单块、单交付物、有【声明体量】的文字题
+#
+# 为什么这个形状能预测真题：
+#   agent-jd-research 是 11 块、要 4–5 万字 ⇒ 平均每块 4–5 千字。
+#   这题就一块、要 ≥4000 字 —— 与真题的【单块字数目标】同量级。
+#   它便宜（一轮几分钟），但压的是同一批机制：
+#     ① 能不能在 60 轮预算内写出 4 千字的正文（不是骨架、不是脚本生成）
+#     ② 正文能不能带上坐标（用没用到读到的材料）
+#     ③ 产物落点对不对（真题里翻过车的：多写一层 workspace/）
+#     ④ 会不会在 shell 里打转（lec9:453 那种死法）
+task_id: text-volume-l1
+goal: >
+  基于给定的压测报告，写一份可直接交给同事的《推理服务部署建议》，
+  长度不少于 4000 字。
+
+  写法要求：
+  - 结论要成篇（有判断、有取舍、有适用边界），不是要点罗列；
+  - **每一条实质性的结论后面要标注它的来源行号，写法是 `L<数字>`**
+    （例如：经济并发点落在 8 附近 `L21`）—— 行号指你读到的材料里的行；
+  - 不要用循环填空的方式生成正文。
+
+version: 1
+
+deliverables:
+  - name: output/brief.md
+    schema: {text: str}
+    min_chars: 4000
+
+sources:
+  # ★ 相对【任务目录】写（跑题时 harness 会 chdir 到 task.yaml 所在目录）
+  - {ref: notes, locator: notes.md}
+
+constraints:
+  hard:
+    - id: C-write
+      kind: custom
+      target: output/brief.md
+      spec:
+        check: shell_command
+        command: "python3 check_write.py"
+      rationale: "产物写在 output/brief.md，且必须是成篇的文字：至少 8 个段落，每段不少于 80 字。只写标题、提纲、或一句话结论都不算。"
+    - id: C-length
+      kind: custom
+      target: output/brief.md
+      spec:
+        check: shell_command
+        command: "python3 check_length.py"
+      rationale: "体量目标：去掉空白与 Markdown 记号后，正文有效字符不少于 4000。"
+    - id: C-cites
+      kind: custom
+      target: output/brief.md
+      spec:
+        check: shell_command
+        command: "python3 check_cites.py"
+      rationale: "每一条实质结论后面都要标它的来源行号，写法是 `L<数字>`（例如 `L23`）。全文至少 12 处，且至少落在 6 个【不同的】行号上；行号必须落在材料真实行数之内。"
+    - id: C-provenance
+      kind: provenance
+      target: output/brief.md
+      spec: {min_coverage: 0.6}
+      rationale: "溯源覆盖率不少于 0.6：每条实质结论都要能指回材料里的具体一行。"
+
+blind:
+  - "本文只覆盖单机单实例的压测，多机张量并行没有数据"
+
+limits: {max_rounds: 3}
+
+notes: |
+  L1 最小验证题。判据只压四件事：写出来了 / 够长 / 有坐标 / 落对地方。
+  ★ 判据本身【不含】任何关于"怎么写"的约束 —— 那归系统提示管。

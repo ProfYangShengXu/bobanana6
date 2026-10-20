@@ -605,6 +605,7 @@ class BoundWorkspace:
         background: bool = False,
         timeout: float | str | None = None,
         workdir: str = "",
+        expect: str = "",  # blame: fail-open — opt-in assertion: omitted = the pre-change behavior (no assertion); the fail-closed path is the contract-level `execution` kind
     ) -> Mapping[str, Any]:
         """Run a shell command with its cwd **inside** the workspace (Hermes `terminal`).
 
@@ -613,9 +614,21 @@ class BoundWorkspace:
         is spilled to `full_output_path` (workspace-relative, excluded from deliverables).
         ★ A timeout kills the **whole process tree**, not just the shell (`start_new_session`
         + `killpg`) -- the shell's grandchildren are what otherwise survive.
+
+        ★★ ``expect`` (optional): the marker the caller says proves the command did
+        what it was supposed to do. It is matched against the **full** stdout+stderr
+        *before* paging, so a marker in the omitted middle still counts. When it is
+        absent, ``exit_code`` is forced to 1 and ``verified``/``reason`` are added --
+        an exit status is the command's, never the acceptance conclusion
+        (``cat test.py`` exits 0 while testing nothing). No ``expect`` = no change:
+        the result is byte-for-byte the pre-change shape.
         """
         if not isinstance(command, str) or not command.strip():
             raise WorkspaceError("command must be a non-empty string")
+        if expect and background:
+            raise WorkspaceError(
+                "expect cannot be used with background=true: a background job returns no output to assert on"
+            )
         # ★ `shell.run` 的 workdir 也走同一条重复前缀判据：在这一层（cwd 就在工作区里）
         #   再写一次目录名 = 迷路了。它不是写区判定（cwd 不必在写区里），只是前缀；
         #   放在 `_note` / `_require_root` **之前**：拒就是拒，工作区一个字节都不碰。
@@ -653,19 +666,30 @@ class BoundWorkspace:
             raise
         stdout = stdout or ""
         stderr = stderr or ""
+        command_exit = process.returncode
+        # ★ 断言在**换页之前**、对**全量** stdout+stderr 做：marker 落在被省略的中间段
+        #   也算数（只对补丁后返回的预览做 substring 会假红）。
+        verified = (expect in (stdout + stderr)) if expect else None
         out_head, out_omitted, out_tail = _head_tail_page(stdout)
         err_head, err_omitted, err_tail = _head_tail_page(stderr)
         truncated = out_omitted is not None or err_omitted is not None
         if not truncated:
             # ★ 反向：没超预算 ⇒ **逐字原样**，连键序都与改前一致（值一个不动、不落盘）。
-            return {
+            #   只有给了 expect 才多出 verified / reason；默认路径一个键都不加。
+            answer: dict[str, Any] = {
                 "background": False,
-                "exit_code": process.returncode,
+                "exit_code": command_exit,
                 "cwd": str(cwd),
-                "stdout": stdout,
-                "stderr": stderr,
-                "truncated": False,
             }
+            if expect:
+                answer["verified"] = verified
+                if not verified:
+                    answer["exit_code"] = 1
+                    answer["reason"] = _expectation_reason(expect, command_exit, stdout, stderr)
+            answer["stdout"] = stdout
+            answer["stderr"] = stderr
+            answer["truncated"] = False
+            return answer
         # ★★ 截断时元数据键排在正文**之前**：上下文压缩按**头部**截 2000 字符
         #   （`agentloop/compress.py::truncate_tool_results`），排在几 KB 预览之后的
         #   `full_output_path` 会被整段砍掉（上一轮 #71 的同一形态）。键序 = JSON 字面顺序。
@@ -674,26 +698,37 @@ class BoundWorkspace:
         if not where:
             # ★★ 落盘失败就**不销毁**：宁可把全量正文给它，也不留一份"截了却取不回"的输出
             #    （照上一个回合删掉的那个"先落盘再跑"工具的同一守卫）。如实报错，命令照跑（硬边界⑦）。
-            return {
+            answer = {
                 "background": False,
-                "exit_code": process.returncode,
+                "exit_code": command_exit,
                 "cwd": str(cwd),
-                "stdout": stdout,
-                "stderr": stderr,
-                "truncated": False,
-                "full_output_error": self._shell_spill_failures[-1],
             }
-        answer: dict[str, Any] = {
+            if expect:
+                answer["verified"] = verified
+                if not verified:
+                    answer["exit_code"] = 1
+                    answer["reason"] = _expectation_reason(expect, command_exit, stdout, stderr)
+            answer["stdout"] = stdout
+            answer["stderr"] = stderr
+            answer["truncated"] = False
+            answer["full_output_error"] = self._shell_spill_failures[-1]
+            return answer
+        answer = {
             "background": False,
-            "exit_code": process.returncode,
+            "exit_code": command_exit,
             # ★★ 绝对路径，不是 `"."`（实测：模型靠它定位自身时得到的 `"."` 毫无信息）：
             #   每一轮返回都给模型一次校准机会 —— "我现在站在哪里"。不改任何判据。
             "cwd": str(cwd),
-            "truncated": True,
-            "full_output_path": where,
-            "full_output_lines": len(full.splitlines()),
-            "full_output_bytes": len(full.encode("utf-8")),
         }
+        if expect:
+            answer["verified"] = verified
+            if not verified:
+                answer["exit_code"] = 1
+                answer["reason"] = _expectation_reason(expect, command_exit, stdout, stderr)
+        answer["truncated"] = True
+        answer["full_output_path"] = where
+        answer["full_output_lines"] = len(full.splitlines())
+        answer["full_output_bytes"] = len(full.encode("utf-8"))
         answer["stdout"] = _render_page(out_head, out_omitted, out_tail, where)
         answer["stderr"] = _render_page(err_head, err_omitted, err_tail, where)
         return answer
@@ -764,6 +799,20 @@ def _timeout(raw: float | str | None) -> float:
     if value > MAX_TIMEOUT_S:
         raise WorkspaceError(f"timeout must be <= {MAX_TIMEOUT_S}s, got {value}")
     return value
+
+
+def _expectation_reason(expect: str, command_exit: int, stdout: str, stderr: str) -> str:
+    """Why an `expect` assertion failed -- and why exit 0 is not a counter-argument.
+
+    The tail is included because a failing test suite's verdict is at the **end**
+    of the log, and the model has to be able to tell what it actually ran.
+    """
+    tail = "\n".join((stdout + stderr).splitlines()[-8:]).strip()
+    detail = (
+        f"stdout+stderr did not contain {expect!r}; the command's own exit code was "
+        f"{command_exit} -- an exit code is not acceptance evidence"
+    )
+    return detail + (f"; output tail: {tail[-600:]}" if tail else "; output was empty")
 
 
 def _full_shell_output(stdout: str, stderr: str) -> str:

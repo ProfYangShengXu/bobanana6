@@ -37,10 +37,10 @@ def run(kind: str, spec: dict, *, target: str = "out.csv", cand=None, ctx=None):
     return check_kind(item, cand if cand is not None else candidate(artifacts=(artifact(),)), ctx or context())
 
 
-def test_registry_covers_all_fifteen_kinds() -> None:
-    assert len(CHECKS) == 15
+def test_registry_covers_all_sixteen_kinds() -> None:
+    assert len(CHECKS) == 16
     assert set(CHECKS) == set(JUDGMENT_ORDER)
-    assert len(JUDGMENT_ORDER) == 15
+    assert len(JUDGMENT_ORDER) == 16
 
 
 def test_unknown_kind_fails_closed() -> None:

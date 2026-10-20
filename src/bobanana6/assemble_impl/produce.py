@@ -657,8 +657,13 @@ def task_nature(contract: TaskContract, bundle: ConstraintBundle, subtask: Subta
     acceptance = [
         constraint.rationale
         for constraint in applicable
-        if constraint.kind == "custom"
-        and constraint.spec.get("check") == SHELL_COMMAND_CHECK
+        if (
+            # ★ `execution` is the same promise as `custom`+`shell_command`: a
+            #   command will decide whether this block is done. The block must be
+            #   told *that*, in the contract author's own words.
+            constraint.kind == "execution"
+            or (constraint.kind == "custom" and constraint.spec.get("check") == SHELL_COMMAND_CHECK)
+        )
         and constraint.rationale.strip()
     ]
     frozen = sorted(

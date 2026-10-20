@@ -1,0 +1,144 @@
+{
+  "task": {
+    "task_id": "text-volume-l1",
+    "goal": "基于给定的压测报告，写一份可直接交给同事的《推理服务部署建议》， 长度不少于 4000 字。\n写法要求： - 结论要成篇（有判断、有取舍、有适用边界），不是要点罗列； - **每一条实质性的结论后面要标注它的来源行号，写法是 `L<数字>`**\n  （例如：经济并发点落在 8 附近 `L21`）—— 行号指你读到的材料里的行；\n- 不要用循环填空的方式生成正文。\n",
+    "notes": "L1 最小验证题。判据只压四件事：写出来了 / 够长 / 有坐标 / 落对地方。\n★ 判据本身【不含】任何关于\"怎么写\"的约束 —— 那归系统提示管。\n",
+    "deliverables": [
+      {
+        "name": "output/brief.md",
+        "required": true,
+        "schema": {
+          "text": "str"
+        }
+      }
+    ]
+  },
+  "plan": {
+    "shape": "star",
+    "round": 1,
+    "version": 1,
+    "blocks": [
+      "T-01"
+    ],
+    "recon_evidence": "",
+    "costs": {
+      "merge": 0.0,
+      "execute": 10.0
+    }
+  },
+  "recon": {
+    "source_ids": [
+      "notes"
+    ],
+    "findings": [
+      "notes: file"
+    ]
+  },
+  "snapshots": [
+    {
+      "ref": "notes",
+      "source_kind": "file",
+      "backend": "",
+      "degraded": false,
+      "captured_at": "2026-10-16T01:39:16.504615+08:00",
+      "body_path": "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6/acceptance/ab/text-volume-l1/_run/snapshots/d8f677617cabf665aaeb4904d66115c4.md"
+    }
+  ],
+  "blocks_report": [
+    {
+      "subtask": "T-01",
+      "ok": false,
+      "failed": [
+        "runtime"
+      ],
+      "evidence": {
+        "exit": "fix_constraint",
+        "errors": "produce: CandidateFormatError: the answer does not say which snapshot it came from: 'ref' is missing (top-level keys it did send: ['done']); produce: CandidateFormatError: the answer does not say which snapshot it came from: 'ref' is missing (top-level keys it did send: ['done'])",
+        "artifact_on_disk": "output/brief.md"
+      },
+      "soft_scores": {},
+      "artifacts": [],
+      "source_id": ""
+    }
+  ],
+  "assembly": {
+    "passed": false,
+    "failed_blocks": [
+      "T-01"
+    ],
+    "coverage": {
+      "blocks": "0/1",
+      "pieces": "1"
+    }
+  },
+  "convergence": {
+    "decision": "arbitrate",
+    "note": "no block produced a candidate"
+  },
+  "capability_blocks": [
+    {
+      "block": "T-01",
+      "dimension": "source",
+      "needs": [
+        "compute",
+        "write_deliverable"
+      ],
+      "partition": "deliverable:output/brief.md"
+    }
+  ],
+  "capability_matching": {
+    "evaluated": true,
+    "assignments": [
+      {
+        "block": "T-01",
+        "worker": "worker:writer",
+        "surplus": []
+      }
+    ],
+    "issues": []
+  },
+  "metrics": {
+    "tool.calls": 3,
+    "tool.call_accuracy": 1.0,
+    "tool.argument_correctness": 1.0,
+    "tool.task_success_rate": 1.0,
+    "tool.failure_recovery_rate": 0.0,
+    "text.tool_calls": 0,
+    "text.tool_call_chars": 0,
+    "delivery": "not evaluated (no labelled outcomes were supplied)",
+    "blame_actions": {
+      "model": [
+        "switch_worker",
+        "replenish_semantics",
+        "rearrange_context"
+      ],
+      "tool": [
+        "switch_source",
+        "repair_tool",
+        "taint"
+      ],
+      "context": [
+        "fix_constraint"
+      ],
+      "constraint": [
+        "relax_constraint"
+      ]
+    }
+  },
+  "exit_reason": "failed",
+  "attribution": {
+    "failure": "assembly failed on 1 block(s)",
+    "blame": "model",
+    "confidence": "likely",
+    "experiment": "trace",
+    "actions": [
+      "switch_worker",
+      "replenish_semantics",
+      "rearrange_context"
+    ],
+    "evidence": [
+      "produce_failure(T-01)",
+      "produce_failure(T-01)"
+    ]
+  }
+}

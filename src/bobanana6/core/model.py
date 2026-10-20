@@ -94,7 +94,9 @@ __all__ = [
     "is_missing",
 ]
 
-#: The fourteen constraint kinds from the spec.
+#: The constraint kinds this kernel can dispatch (the spec's set plus the kinds
+#: this repo added; the count is intentionally not repeated here -- a guard
+#: keeps this set equal to the checker registry).
 KNOWN_KINDS: frozenset[str] = frozenset(
     {
         "schema",
@@ -110,6 +112,10 @@ KNOWN_KINDS: frozenset[str] = frozenset(
         "unit_consistency",
         "definition_pin",
         "code_valid",
+        #: ★ 2026-10-17: the artifact must **behave** -- run one declared command
+        #: and require one marker in its stdout. Static kinds cannot tell
+        #: "complete-looking" from "actually runs".
+        "execution",
         "custom",
         #: ★ `#33`: 冻结的载体在装配期还是不是原文（代码类任务的"测试文件被改"就靠它）。
         "frozen_files",

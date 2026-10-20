@@ -311,7 +311,12 @@ class Runner:
         # ★ `#44`: 第四道门 —— 判据命令必须能在**这个环境**里跑起来。跑不起来（解释器/包/
         #   `cd` 目标缺失）⇒ 具名拒 + **0 次模型调用**，而不是跑完整轮之后把它记成"判据太严"
         #   （`壳问题三连-首轮AB暴露-20261005.md` §2）。只查环境，不碰命令的输入文件。
-        judge_problems = judge_environment_problems(bundle.hard + bundle.soft, cwd=Path.cwd())
+        judge_problems = judge_environment_problems(
+            bundle.hard + bundle.soft,
+            # ★ Execution commands run with the **workspace** as cwd (that is where
+            #   the deliverable is); preflight must judge the same directory.
+            cwd=Path(self.workspace) if self.workspace is not None else Path.cwd(),
+        )
         if judge_problems:
             detail = "; ".join(f"{code}: {problem}" for code, problem in judge_problems)
             raise RunRefused(
@@ -1118,15 +1123,25 @@ class Runner:
         )
 
     def _custom_checks(self) -> Mapping[str, Callable[..., Any]]:
-        """The ``custom`` checks this host is willing to run (see services/checks.py)."""
+        """The ``custom`` / ``execution`` checks this host is willing to run (see services/checks.py)."""
         from ..services import (
+            EXECUTION_CHECK,
             SHELL_COMMAND_CHECK,
             RecordedEvidence,
+            execution_check,
             shell_command_check,
         )
 
         evidence = RecordedEvidence()
-        return {SHELL_COMMAND_CHECK: shell_command_check(evidence, self.epoch)}
+        checks: dict[str, Callable[..., Any]] = {
+            SHELL_COMMAND_CHECK: shell_command_check(evidence, self.epoch)
+        }
+        # ★ `execution` needs a cwd where the deliverable lives. No workspace =
+        #   nothing to run the contract's command against, so the runner stays
+        #   unregistered and the checker fails closed ("never ran" is not "passed").
+        if self.workspace is not None:
+            checks[EXECUTION_CHECK] = execution_check(cwd=Path(self.workspace))
+        return checks
 
     def _frozen_files(self, snapshots: Mapping[str, Snapshot]) -> dict[str, tuple[str, str]]:
         """★ `#33`: 冻结载体 vs 工作区里那份 —— 只算两个摘要，判定在 `core`。

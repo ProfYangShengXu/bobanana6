@@ -124,6 +124,10 @@ LAYER_KINDS: Mapping[str, tuple[str, ...]] = {
         "concept_ref",
         "freshness",
         "invariant",
+        #: ★ 2026-10-17: a code task's acceptance is per-block ("this block's
+        #: artifact must run"). Snapshot replay has no command runner, so the
+        #: checker fails closed by name there -- never a silent pass.
+        "execution",
         "custom",
     ),
     LAYER_ASSEMBLY: ("relation", "corroboration", "coverage", "code_valid", "unit_consistency"),

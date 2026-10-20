@@ -37,11 +37,16 @@ from ..agentloop.gate import (
 from ..core.checkers.base import CheckContext, CheckOutcome, fail, ok
 from ..core.kernel import admit
 from ..core.model import Candidate, Constraint, ConstraintBundle, Subtask, Verdict
+from .workspace import _kill_tree, _reap
 
 __all__ = [
     "BlockJudge",
+    "DEFAULT_EXECUTION_TIMEOUT_S",
+    "EXECUTION_CHECK",
+    "MAX_EXECUTION_TIMEOUT_S",
     "RecordedEvidence",
     "command_unrunnable",
+    "execution_check",
     "judge_environment_problems",
     "shell_command_check",
     "verdict_violations",
@@ -49,6 +54,16 @@ __all__ = [
 
 #: The name a host registers to let a ``custom`` constraint run a shell command.
 SHELL_COMMAND_CHECK = "shell_command"
+
+#: The name a host registers in ``CheckContext.custom_checks`` for the
+#: ``execution`` constraint (``core/checkers/execution.py`` is the dispatcher).
+EXECUTION_CHECK = "execution"
+
+#: Contract commands are human-authored acceptance suites; 300s is the spec's
+#: example and long enough for a local code test, short enough to fail a hang.
+DEFAULT_EXECUTION_TIMEOUT_S = 300.0
+#: A ceiling, not a hint: a contract typo must not pin a judge forever.
+MAX_EXECUTION_TIMEOUT_S = 900.0
 
 #: ★ `#44`: 判据命令【自己】没跑起来时的**结构化**证据（两条，都不猜字符串）：
 #:   · POSIX 的 126（找到但不可执行）/ 127（找不到）；
@@ -126,7 +141,10 @@ def judge_environment_problems(
     """
     problems: list[tuple[str, str]] = []
     for constraint in constraints:
-        if constraint.kind != "custom" or constraint.spec.get("check") != SHELL_COMMAND_CHECK:
+        # ★ Both kinds run a contract-authored command; a missing interpreter or
+        #   `-m` module is the same preflight problem for either.
+        is_shell = constraint.kind == "custom" and constraint.spec.get("check") == SHELL_COMMAND_CHECK
+        if constraint.kind != "execution" and not is_shell:
             continue
         command = constraint.spec.get("command")
         if not isinstance(command, str) or not command:
@@ -269,6 +287,97 @@ def shell_command_check(
             #   is not evidence that this command succeeded.
             return fail(constraint, *facts, "exit status is not attributable to a single command")
         return ok(constraint, *facts)
+
+    return run
+
+
+def _execution_timeout(raw: Any, *, default: float) -> float:
+    """`spec.timeout_s`: positive seconds, capped. Bad values are a failing fact."""
+    if raw is None:
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"spec.timeout_s must be a positive number of seconds, got {raw!r}")
+    value = float(raw)
+    if value <= 0:
+        raise ValueError(f"spec.timeout_s must be > 0, got {raw!r}")
+    if value > MAX_EXECUTION_TIMEOUT_S:
+        raise ValueError(f"spec.timeout_s must be <= {MAX_EXECUTION_TIMEOUT_S:g}, got {raw!r}")
+    return value
+
+
+def execution_check(
+    *,
+    cwd: Path | str,
+    timeout_s: float = DEFAULT_EXECUTION_TIMEOUT_S,  # blame: fail-closed — a command that never returns is bounded at 300s, not allowed to hang the judge
+) -> Callable[[Constraint, Candidate, CheckContext], CheckOutcome]:
+    """Build the host half of ``kind: execution`` (the command actually runs here).
+
+    ★ The verdict is **the marker in stdout**, nothing else. The exit code is
+    reported as a fact so a human can see it, but it never decides: `cat test.py`
+    exits 0 while testing nothing, and a suite can print its summary and still
+    exit nonzero. This is the whole point of the kind -- ``expect_stdout`` is the
+    only evidence, so "the command finished" cannot be mistaken for "it passed".
+
+    ★ ``cwd`` must be the **block workspace** (where the deliverable is), not the
+    process cwd -- the contract's command is usually relative
+    (``python3 test_dns.py dns_server.py``) and the harness chdirs to the task
+    directory, not the workspace.
+
+    ★ Timeout kills the **whole process group** (a test runner starts a server
+    child; killing only the shell leaves it on the port) and reports a timeout as
+    its own fact, not as "the tests failed".
+    """
+
+    def run(constraint: Constraint, candidate: Candidate, context: CheckContext) -> CheckOutcome:
+        command = str(constraint.spec.get("command", ""))  # blame: fail-closed — cannot reach here without a non-empty command (core checks the shape first)
+        marker = str(constraint.spec.get("expect_stdout", ""))  # blame: fail-closed — core refuses an empty marker before the runner is called
+        try:
+            seconds = _execution_timeout(constraint.spec.get("timeout_s"), default=timeout_s)
+        except ValueError as exc:
+            return fail(constraint, str(exc))
+        try:
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                # Own process group so a timeout can collect the whole tree.
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return fail(constraint, f"the execution command could not start: {exc}", cause="tool")
+        try:
+            stdout, stderr = process.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired as exc:
+            _kill_tree(process)
+            _reap(process)  # never block on a grandchild that escaped the group
+            partial = exc.stdout or ""
+            if isinstance(partial, bytes):  # text=True should give str; stay defensive
+                partial = partial.decode("utf-8", "replace")
+            tail = "\n".join(partial.splitlines()[-5:]).strip()
+            return fail(
+                constraint,
+                f"execution timed out after {seconds:g}s",
+                "timed_out=true: the command did not finish, so this is neither a pass nor a test failure",
+                f"partial output tail: {tail[-400:] or '<empty>'}",
+            )
+        stdout = stdout or ""
+        stderr = stderr or ""
+        facts = [
+            f"{command!r} exited {process.returncode} "
+            "(the command's own exit code; it is not acceptance evidence)"
+        ]
+        if marker in stdout:
+            return ok(constraint, *facts, f"stdout contains the required marker {marker!r}")
+        tail = "\n".join((stdout + stderr).splitlines()[-8:]).strip()
+        return fail(
+            constraint,
+            *facts,
+            f"stdout does not contain the required marker {marker!r}",
+            f"output tail: {tail[-600:] or '<empty>'}",
+        )
 
     return run
 

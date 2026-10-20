@@ -1,0 +1,12 @@
+# text-volume-l1 题的本体：一份技术报告 → 一份成篇的说明文。
+#
+# ★ 刻意保持【领域无关的最小形状】：只有"产物的文本"这一个概念。
+#   探针要压的是"写不写得长、有没有坐标、落点对不对"这套机制，
+#   不该顺带压本体建模能力（那是另一条线的事）。
+domain: technical-brief
+version: "2026.1"
+
+concepts:
+  text: {label: 产物文本, kind: attribute}
+
+calendar: {timezone: Asia/Shanghai}

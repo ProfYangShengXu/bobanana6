@@ -1,0 +1,78 @@
+# L2 最小验证：多块形状（2 读 + 1 合并），压的是【装配】那条路
+#
+# 为什么必须有 L2（实测依据）：
+#   L1 是 star 形状（一块既读又写），表现很好 —— 16.5KB、77 条不重复行、
+#   102 处坐标、只用了 2 次 shell。而真题是读→合并的多块形状，病出在那条路上
+#   （真题 T-01：28 次 shell、16 连击数同一个文件、零产物）。
+#   ⇒ 单块过 ≠ 多块过。
+#
+# L2 与 L1 的关系：同一把尺子（字数 / 坐标 / 成篇 / 落点），
+# 多出来的只有两件：【两份材料要各自被读】与【合并块的上游必须真的到】。
+task_id: text-volume-l2
+goal: >
+  基于两份压测报告，写一份《推理服务与检索链路部署建议》，
+  长度不少于 12000 字。
+
+  写法要求：
+  - 结论要成篇（有判断、有取舍、有适用边界），不是要点罗列；
+  - **每一条实质性的结论后面要标注它的来源与行号，写法是 `A:L<数字>` 或 `B:L<数字>`**
+    （A = 第一份材料，B = 第二份材料；行号指你读到的材料里的行）；
+  - 两份材料都要用上，不要只写其中一份；
+  - 不要用循环填空的方式生成正文。
+
+version: 1
+
+deliverables:
+  - name: output/brief.md
+    schema: {text: str}
+    min_chars: 12000
+
+sources:
+  # ★ 相对【任务目录】写（跑题时 harness 会 chdir 到 task.yaml 所在目录）
+  - {ref: part-a, locator: part-a.md}
+  - {ref: part-b, locator: part-b.md}
+
+constraints:
+  hard:
+    - id: C-write
+      kind: custom
+      target: output/brief.md
+      spec:
+        check: shell_command
+        command: "python3 check_write.py"
+      rationale: "产物写在 output/brief.md，且必须是成篇的文字：至少 8 个段落，每段不少于 80 字。只写标题、提纲、或一句话结论都不算。"
+    - id: C-length
+      kind: custom
+      target: output/brief.md
+      spec:
+        check: shell_command
+        command: "python3 check_length_l2.py"
+      rationale: "契约声明了体量目标：少于 12000 字不算写完"
+    - id: C-cites
+      kind: custom
+      target: output/brief.md
+      spec:
+        check: shell_command
+        command: "python3 check_cites_l2.py"
+      rationale: "两份材料都要用上，且每条结论要能指回具体行"
+    - id: C-assembled
+      kind: custom
+      target: output/brief.md
+      spec:
+        check: shell_command
+        command: "python3 check_assembled.py"
+      rationale: "合并块必须真的拿到了两个读块的产物——上游断粮是真题实测过的病"
+    - id: C-provenance
+      kind: provenance
+      target: output/brief.md
+      spec: {min_coverage: 0.6}
+      rationale: "溯源覆盖率不少于 0.6：每条实质结论都要能指回材料里的具体一行。"
+
+blind:
+  - "本文只覆盖单机单实例；多机张量并行与多语言语料没有数据"
+
+limits: {max_rounds: 3}
+
+notes: |
+  L2 最小验证题。比 L1 多压的只有两件：两份材料各自被读、合并块的上游真的到。
+  ★ 判据本身【不含】任何关于"怎么写"的约束 —— 那归系统提示管。

@@ -414,7 +414,7 @@ def test_known_kinds_and_dispatch_table_agree() -> None:
     from bobanana6.core.checkers import CHECKS as dispatched
     from bobanana6.core.model import KNOWN_KINDS
 
-    assert len(dispatched) == 15, "the dispatch table must not silently shrink"
+    assert len(dispatched) == 16, "the dispatch table must not silently shrink"
     assert set(KNOWN_KINDS) == set(dispatched)
 
 

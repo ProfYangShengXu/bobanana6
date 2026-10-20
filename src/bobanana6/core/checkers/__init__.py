@@ -21,6 +21,7 @@ from . import (
     coverage,
     custom,
     definition_pin,
+    execution,
     freshness,
     frozen,
     invariant,
@@ -49,6 +50,7 @@ CHECKS: dict[str, Checker] = {
     definition_pin.KIND: definition_pin.check,
     code_valid.KIND: code_valid.check,
     frozen.KIND: frozen.check,
+    execution.KIND: execution.check,
     custom.KIND: custom.check,
 }
 
@@ -67,6 +69,7 @@ JUDGMENT_ORDER: tuple[str, ...] = (
     "definition_pin",
     "code_valid",
     "frozen_files",
+    "execution",
     "custom",
 )
 

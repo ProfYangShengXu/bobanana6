@@ -17,6 +17,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -52,6 +53,21 @@ __all__ = [
     "deliverables_payload",
     "snapshot_payload",
 ]
+
+
+class ExpectationNotMet(WorkspaceError):
+    """``shell.run``'s own output assertion failed.
+
+    The command did run, so the *tool* is not broken: it just did not produce the
+    evidence the caller said it proves. The registry still answers with the full
+    structured result (``exit_code`` / ``verified`` / ``reason`` / output), not a
+    bare exception string -- the model has to be able to see what it ran.
+    """
+
+    def __init__(self, message: str, result: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.tool_payload = dict(result)
+
 
 #: How a call's arguments reach a handler.
 Handler = Callable[[Mapping[str, Any]], str]
@@ -228,12 +244,23 @@ class ToolRegistry:
             try:
                 content = tool.handler(arguments)
             except Exception as exc:  # noqa: BLE001 - a broken tool is visible, never a silent success
+                # ★ A tool may fail *with a payload* (`shell.run`'s expect assertion):
+                #   the caller has to see exit_code/verified/reason, so the failure
+                #   stays structured while the result is still ok=False. Without this
+                #   branch the marker would be a silent pass (`verified` was only a
+                #   field in the JSON, and ToolRegistry.execute returns ok=True
+                #   whenever the handler does not raise).
+                payload = getattr(exc, "tool_payload", None)
                 results.append(
                     ToolResult(
                         call_id=call.call_id,
                         ok=False,
-                        content=f"{type(exc).__name__}: {exc}",
-                        error_type=type(exc).__name__,
+                        content=(
+                            json.dumps(payload, ensure_ascii=False, default=str)
+                            if payload is not None
+                            else f"{type(exc).__name__}: {exc}"
+                        ),
+                        error_type="expectation_not_met" if payload is not None else type(exc).__name__,
                         # ★ §7⑫: read the layer off the exception when it declares
                         #   one (``SourceError.blame = "tool"``). An unlabelled
                         #   third-party exception declares nothing, and attribution
@@ -635,16 +662,51 @@ def build_registry(
         problem = inline_script_problem(command)
         if problem:
             raise WorkspaceError(problem)
-        return payload(
-            dict(
+        # ★★ `expect`: the optional output assertion (change 1). An empty marker is
+        #   contained in every string, so it is refused rather than treated as "no
+        #   assertion" -- a silent always-pass is the failure mode this exists for.
+        expect = ""
+        if "expect" in args and args["expect"] is not None:
+            raw = args["expect"]
+            if not isinstance(raw, str) or not raw.strip():
+                raise WorkspaceError(
+                    "expect must be a non-empty string: it is the marker that proves the command did the work"
+                )
+            expect = raw
+        try:
+            result = dict(
                 _workspace().run(
                     command,
                     background=str(args.get("background", "")).strip().lower() in ("true", "1", "yes"),
                     timeout=args.get("timeout") or None,
                     workdir=str(args.get("workdir", "")),
+                    expect=expect,
                 )
             )
-        )
+        except subprocess.TimeoutExpired:
+            if not expect:
+                raise
+            # ★ A timeout is neither a pass nor a "test says no": say which one it is.
+            raise ExpectationNotMet(
+                f"the command timed out before the expected marker {expect!r} appeared",
+                {
+                    "background": False,
+                    "exit_code": 124,
+                    "verified": False,
+                    "timed_out": True,
+                    "command": command,
+                    "reason": (
+                        f"timed out before the output contained {expect!r}; "
+                        "a timeout is neither a pass nor a test failure"
+                    ),
+                },
+            ) from None
+        if result.get("verified") is False:
+            raise ExpectationNotMet(
+                str(result.get("reason", "") or "expectation not met"),  # blame: fail-closed — no reason means a named generic failure, never a pass
+                result,
+            )
+        return payload(result)
 
     def _traces() -> Any:
         """★ 与 `_workspace()` 同一条规则：**不广告就不该被调用**（拿不到的能力不硬撑）。"""
