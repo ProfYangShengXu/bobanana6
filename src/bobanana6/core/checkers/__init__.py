@@ -25,6 +25,7 @@ from . import (
     freshness,
     frozen,
     invariant,
+    item_coverage,
     presence,
     provenance,
     relation,
@@ -52,6 +53,7 @@ CHECKS: dict[str, Checker] = {
     frozen.KIND: frozen.check,
     execution.KIND: execution.check,
     custom.KIND: custom.check,
+    item_coverage.KIND: item_coverage.check,
 }
 
 JUDGMENT_ORDER: tuple[str, ...] = (
@@ -71,6 +73,10 @@ JUDGMENT_ORDER: tuple[str, ...] = (
     "frozen_files",
     "execution",
     "custom",
+    #: ★ The fifth gate runs **last**: every cheaper shape/value/provenance error
+    #: is reported before "you left a row out", so a block is not asked to add
+    #: rows to a product whose columns are still wrong.
+    "item_coverage",
 )
 
 

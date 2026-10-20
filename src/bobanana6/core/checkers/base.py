@@ -51,6 +51,13 @@ class CheckContext:
     #: ★ `#33`: `ref -> (冻结时的摘要, 工作区里那份的摘要)`，由外侧算好（core 不读盘）。
     #: 缺一项 = 那一份没被观测过 —— `frozen_files` 判据会具名失败，不静默通过。
     frozen_files: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+    #: ★ 2026-10-20: `deliverable -> the checklist frozen before the work began`.
+    #: Read by `item_coverage` only. It travels on the context rather than on the
+    #: candidate because the checklist is produced by the **shell** (a pre-scan
+    #: over the source material) and a block neither sees nor writes it -- the
+    #: block must not be able to influence its own denominator.
+    #: 缺一个 target = 这一份没被冻住 ⇒ `item_coverage` 具名拒，不静默通过。
+    checklists: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     #: ★ `deliverable -> {field: the carrier that field declares}`. This is the
     #: channel a field declaration's ``source{ref,locator}`` travels on. Judgment
     #: semantics do not read it yet: a checker that compared a citation against the

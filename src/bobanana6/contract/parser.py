@@ -43,6 +43,7 @@ from ..core.model import (
 __all__ = [
     "ContractDocument",
     "ContractParseError",
+    "CoverageSpec",
     "compile_bundle",
     "parse_contract",
     "parse_contract_file",
@@ -67,6 +68,9 @@ _TOP_LEVEL_KEYS = frozenset(
         # ★ 内容检查的两个维度（来源 + 可见性）。声明的东西**必须有读者** ——
         #   见 `tests/test_ci_content.py::test_every_declared_top_level_key_has_a_reader`。
         "content_checks",
+        # ★ 2026-10-20: 块内覆盖（第五道门）。声明了它 ⇒ 壳在切分之前跑一次预扫描、
+        #   把项集冻住、并在块的 brief 里加上覆盖义务。★ 可选：不声明即一行不变。
+        "coverage",
     }
 )
 _CONSTRAINT_KEYS = frozenset({"id", "kind", "target", "spec", "rationale"})
@@ -144,6 +148,30 @@ class ContentChecks:
 
 
 @dataclass(frozen=True)
+class CoverageSpec:
+    """块内覆盖（第五道门）的声明。
+
+    ★ `axis` 是这次唯一的**新概念**：这份产物要逐项交代的"项"是什么
+      （公司 / 题 / 阶段 / 需求点 / 错误码 / 关键事实）。它必须是**材料里客观存在**的
+      东西，不是模型主观划分的 —— 否则分母就是模型自己编的，覆盖判定没有意义。
+
+    ★ `deliverable` 回答"这份清单管哪份产物"。规格里的写法是一份产物配一段
+      `coverage`；一道题有多份产物时，不点名就等于让壳替作者猜分母 —— 猜错会
+      把"题库里少了两道题"记到"JD 矩阵"头上。所以多产物时不点名**具名拒**。
+    """
+
+    deliverable: str
+    axis: str
+    source: str
+    alias: tuple[str, ...] = ()
+    threshold: float = 0.65
+    #: 独立数出来的项数下界（`0` = 让壳去独立数一遍）。★ 这是本实现加的可选项，
+    #: 只用来**收紧**清单可信性判定：给了就用它做 `len(checklist) >= expected*0.8`
+    #: 的下界；不给就由预扫描的第二遍枚举给出。它不是"覆盖率阈值"，两件事别混。
+    expected_count: int = 0
+
+
+@dataclass(frozen=True)
 class ContractDocument:
     """The declarative half: a task plus constraints that are not yet per-block."""
 
@@ -160,6 +188,10 @@ class ContractDocument:
     limits: Limits = DEFAULT_LIMITS
     #: ★ 内容检查的两个维度：来源（从哪来）+ 可见性（可不可见）。见 `ContentChecks`。
     content_checks: ContentChecks = field(default_factory=ContentChecks)
+    #: ★ 2026-10-20: 块内覆盖。`None` = 这道题没声明 ⇒ **不跑预扫描，行为完全不变**
+    #: （向后兼容的那一侧）。声明了就必须成形成功，否则 `coverage_malformed` 具名拒。
+    #: ★ 一条声明一项目标产物；一道题可以有多条（JD 矩阵按"公司"、题库按"题"）。
+    coverage: tuple[CoverageSpec, ...] = ()
 
 
 def _fail(source: str, path: str, message: str, rule: str) -> None:
@@ -524,10 +556,11 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
             f"{statement!r} is not a declared source; known refs: {sorted(item.ref for item in sources)!r}",
             "statement",
         )
+    deliverables = _deliverables(data, source, declared_sources=frozenset(item.ref for item in sources))
     contract = TaskContract(
         task_id=data["task_id"],
         goal=data["goal"],
-        deliverables=_deliverables(data, source, declared_sources=frozenset(item.ref for item in sources)),
+        deliverables=deliverables,
         sources=sources,
         notes=notes,
         sources_share_state=share_state,
@@ -542,7 +575,218 @@ def parse_contract(text: str, *, source: str = "<string>") -> ContractDocument:
         unmapped=_unmapped(data, source),
         limits=_limits(data, source),
         content_checks=_content_checks(data, source),
+        coverage=_coverage(
+            data,
+            source,
+            declared_sources=frozenset(item.ref for item in sources),
+            deliverable_names=frozenset(item.name for item in deliverables),
+        ),
     )
+
+
+#: `coverage` 段认哪些键。`expected_count` 是本实现加的可选旁路（见 `CoverageSpec`）。
+_COVERAGE_KEYS = frozenset({"deliverable", "axis", "source", "alias", "threshold", "expected_count"})
+
+#: 第五道门的失败码。约束 id 以它开头 ⇒ 它直接出现在 `Verdict.failed` 里。
+COVERAGE_FAILURE_CODE = "coverage_missing"
+
+
+def _coverage_entry(
+    raw: Any,
+    where: str,
+    *,
+    source: str,
+    declared_sources: frozenset[str],
+    deliverable_names: frozenset[str],
+    default_deliverable: str,
+) -> CoverageSpec:
+    """One `coverage` entry. Every failure is named `coverage_malformed`, never defaulted."""
+    if not isinstance(raw, Mapping):
+        _fail(
+            source,
+            where,
+            "coverage must be a mapping (deliverable / axis / source / alias / threshold)",
+            "coverage_malformed",
+        )
+    unknown = sorted(set(raw) - _COVERAGE_KEYS)
+    if unknown:
+        _fail(source, where, f"unknown keys {unknown!r}", "coverage_malformed")
+
+    deliverable = raw.get("deliverable", default_deliverable)
+    if not isinstance(deliverable, str) or not deliverable.strip():
+        _fail(
+            source,
+            f"{where}.deliverable",
+            "deliverable must name one of the declared deliverables",
+            "coverage_malformed",
+        )
+    deliverable = deliverable.strip()
+    if deliverable not in deliverable_names:
+        _fail(
+            source,
+            f"{where}.deliverable",
+            f"{deliverable!r} is not a declared deliverable; known: {sorted(deliverable_names)!r}",
+            "coverage_malformed",
+        )
+
+    axis = raw.get("axis")
+    if not isinstance(axis, str) or not axis.strip():
+        _fail(
+            source,
+            f"{where}.axis",
+            "axis must be a non-empty string naming what this deliverable accounts for item by item",
+            "coverage_malformed",
+        )
+    ref = raw.get("source")
+    if not isinstance(ref, str) or not ref.strip():
+        _fail(source, f"{where}.source", "source must name one of the declared source refs", "coverage_malformed")
+    if ref not in declared_sources:
+        _fail(
+            source,
+            f"{where}.source",
+            f"{ref!r} is not a declared source; known refs: {sorted(declared_sources)!r}",
+            "coverage_malformed",
+        )
+
+    raw_alias = raw.get("alias", ())
+    if raw_alias is None:
+        raw_alias = ()
+    if isinstance(raw_alias, str):
+        _fail(
+            source,
+            f"{where}.alias",
+            "alias must be a list of strings (write `alias: [公司]`), not a bare string",
+            "coverage_malformed",
+        )
+    if not isinstance(raw_alias, (list, tuple)):
+        _fail(source, f"{where}.alias", "alias must be a list of strings", "coverage_malformed")
+    alias: list[str] = []
+    for position, entry in enumerate(raw_alias):
+        if not isinstance(entry, str) or not entry.strip():
+            _fail(
+                source,
+                f"{where}.alias[{position}]",
+                "every alias must be a non-empty string",
+                "coverage_malformed",
+            )
+        alias.append(entry.strip())
+
+    raw_threshold = raw.get("threshold", 0.65)
+    if isinstance(raw_threshold, bool) or not isinstance(raw_threshold, (int, float)):
+        _fail(source, f"{where}.threshold", "threshold must be a number in (0, 1]", "coverage_malformed")
+    threshold = float(raw_threshold)
+    if not 0.0 < threshold <= 1.0:
+        _fail(
+            source,
+            f"{where}.threshold",
+            f"threshold must be in (0, 1], got {threshold!r}",
+            "coverage_malformed",
+        )
+
+    raw_expected = raw.get("expected_count", 0)
+    if isinstance(raw_expected, bool) or not isinstance(raw_expected, int) or raw_expected < 0:
+        _fail(
+            source,
+            f"{where}.expected_count",
+            "expected_count must be a non-negative integer (0 = count it independently)",
+            "coverage_malformed",
+        )
+
+    return CoverageSpec(
+        deliverable=deliverable,
+        axis=axis.strip(),
+        source=ref,
+        alias=tuple(alias),
+        threshold=threshold,
+        expected_count=raw_expected,
+    )
+
+
+def _coverage(
+    data: Mapping[str, Any],
+    source: str,
+    *,
+    declared_sources: frozenset[str],
+    deliverable_names: frozenset[str],
+) -> tuple[CoverageSpec, ...]:
+    """解析 `coverage` 段。**不声明 = 不跑预扫描**，返回值就是空元组。
+
+    接受的形状（两种都写成规格里的样子）：
+
+        coverage:                       # 一道题只有一份产物时，可以省略 deliverable
+          axis: company
+          source: hunt
+
+        coverage:                       # 多份产物：每条点名管谁
+          - {deliverable: output/jd-matrix.md, axis: company, source: hunt}
+          - {deliverable: output/interview-bank.md, axis: 题目, source: hunt}
+
+    ★ 规矩和 `content_checks` 那条一样：**声明了就必须成形成功**。
+      `axis` / `source` 缺一个 ⇒ 具名拒 `coverage_malformed` —— 绝不"按常识补一个"。
+      补出来的 `axis` 会是一个模型没见过的分母，整份覆盖判定都成了自娱自乐。
+    ★ `source` 必须指向**已声明**的来源：从一份不存在（或打不开）的材料里枚举项集，
+      得到的清单没有任何依据，比没有清单更坏。
+    ★ 多份产物而不点名 ⇒ 也具名拒：猜错会把"题库少两道题"记到"JD 矩阵"头上。
+    """
+    raw = data.get("coverage")
+    if raw is None:
+        return ()  # blame: fail-closed — 未声明即不跑预扫描：既有契约一个字不改，行为逐字不变
+    if isinstance(raw, Mapping):
+        entries: list[Any] = [raw]
+    elif isinstance(raw, (list, tuple)):
+        entries = list(raw)
+    else:
+        _fail(
+            source,
+            "$.coverage",
+            "coverage must be a mapping or a list of mappings",
+            "coverage_malformed",
+        )
+    if not entries:
+        _fail(source, "$.coverage", "coverage is declared but empty", "coverage_malformed")
+
+    if len(deliverable_names) == 1:
+        only = next(iter(deliverable_names))
+        default_deliverable = only
+    elif len(entries) == 1 and len(deliverable_names) != 1:
+        default_deliverable = ""
+    else:
+        default_deliverable = ""
+
+    specs: list[CoverageSpec] = []
+    for position, entry in enumerate(entries):
+        where = "$.coverage" if isinstance(raw, Mapping) else f"$.coverage[{position}]"
+        if not default_deliverable and not (
+            isinstance(entry, Mapping) and isinstance(entry.get("deliverable"), str) and entry.get("deliverable")
+        ):
+            _fail(
+                source,
+                where,
+                "this task declares several deliverables, so every coverage entry must name `deliverable`",
+                "coverage_malformed",
+            )
+        specs.append(
+            _coverage_entry(
+                entry,
+                where,
+                source=source,
+                declared_sources=declared_sources,
+                deliverable_names=deliverable_names,
+                default_deliverable=default_deliverable,
+            )
+        )
+    seen: dict[str, str] = {}
+    for spec in specs:
+        previous = seen.get(spec.deliverable)
+        if previous is not None:
+            _fail(
+                source,
+                "$.coverage",
+                f"two coverage entries both claim {spec.deliverable!r}; one deliverable has one checklist",
+                "coverage_malformed",
+            )
+        seen[spec.deliverable] = spec.axis
+    return tuple(specs)
 
 
 def _invariant(entry: Mapping[str, Any], *, source: str, path: str) -> dict[str, Any]:
@@ -726,6 +970,30 @@ def compile_bundle(document: ContractDocument, plan: SplitPlan) -> ConstraintBun
     for constraint in document.hard:
         covered.add(constraint.target)
     hard: list[Constraint] = list(document.hard)
+    #: ★ 2026-10-20: 声明了 `coverage` ⇒ 为那份产物合成一条 `item_coverage` 硬约束。
+    #: 它**不改四道门中的任何一道**：这是校验器注册表里的第 17 个 kind，
+    #: 和新加的其它 kind 走同一条分派路径。清单本身不在这里 —— 清单由壳在预扫描后
+    #: 挂到 `CheckContext.checklists` 上（块拿不到分母，正是这个机制的全部意思）。
+    for spec in document.coverage:
+        hard.append(
+            Constraint(
+                #: ★ 失败码就是 id 本身：一块被判"漏了项"时，`Verdict.failed` 里出现的就是
+                #: 这串 `coverage_missing:<产物>`，报告不用再翻译一次。后缀保证一题多份产物时
+                #: id 仍唯一（`ConstraintBundle` 要求 id 唯一）。
+                id=f"{COVERAGE_FAILURE_CODE}:{spec.deliverable}",
+                kind="item_coverage",
+                target=spec.deliverable,
+                spec={
+                    "axis": spec.axis,
+                    "alias": list(spec.alias),
+                    "threshold": spec.threshold,
+                },
+                rationale=(
+                    f"this deliverable must account for every item on the frozen checklist "
+                    f"(axis={spec.axis!r}); a missing item is a named failure, not a lower score"
+                ),
+            )
+        )
     for subtask in plan.subtasks:
         if subtask.id in covered or subtask.output in covered:
             continue
@@ -733,17 +1001,4 @@ def compile_bundle(document: ContractDocument, plan: SplitPlan) -> ConstraintBun
             Constraint(
                 id=f"AUTO-{subtask.id}",
                 kind="presence",
-                target=subtask.id,
-                spec={"min_rows": 1},
-                rationale="every block needs at least one decidable constraint (split.verifiable)",
-            )
-        )
-    return ConstraintBundle(
-        task_id=plan.task_id,
-        version=max(document.version, plan.version),
-        hard=tuple(hard),
-        soft=document.soft,
-        blind=document.blind,
-        unmapped=document.unmapped,
-        limits=document.limits,
-    )
+                target=sub

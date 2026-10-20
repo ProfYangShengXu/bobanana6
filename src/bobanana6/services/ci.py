@@ -129,6 +129,10 @@ LAYER_KINDS: Mapping[str, tuple[str, ...]] = {
         #: checker fails closed by name there -- never a silent pass.
         "execution",
         "custom",
+        #: ★ 2026-10-20: the checklist is per deliverable and is judged on the
+        #: block that produces it, so it belongs to the block layer, not to the
+        #: assembly layer (assembly re-judges "did the pieces fit together").
+        "item_coverage",
     ),
     LAYER_ASSEMBLY: ("relation", "corroboration", "coverage", "code_valid", "unit_consistency"),
 }

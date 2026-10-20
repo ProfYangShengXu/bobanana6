@@ -20,7 +20,7 @@ and nothing else, so any *other* leak still fails.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -51,7 +51,9 @@ __all__ = [
     "AgentRuntimePort",
     "ArbiterPort",
     "CheckTools",
+    "Checklist",
     "ConstraintSource",
+    "CoveragePort",
     "DecomposerPort",
     "EscalationPort",
     "OntologyPort",
@@ -201,6 +203,44 @@ class ResearchPort(Protocol):
     """
 
     def research(self, question: ResearchQuestion, budget: ResearchBudget) -> tuple[Snapshot, ...]: ...
+
+
+@dataclass(frozen=True)
+class Checklist:
+    """一次预扫描的产出：**动手之前**就定稿的项集，外加它的可信度依据。
+
+    ★ 为什么不是 `tuple[str, ...]`：判定要用的不只是"有哪几项"，还有
+      "这几项凭什么算数" —— 来源里每一句都查得到（`ungrounded` 为空）、
+      以及一个**独立数出来**的项数下界（`expected`）。三样缺一样，
+      清单就可以被缩短成让自己好过的样子，整个机制退化成更精致的假绿。
+    """
+
+    items: tuple[str, ...]
+    #: 独立于 `items` 数出来的项数（第二次枚举）。`0` = 没拿到独立读数。
+    expected: int = 0
+    #: 轴（`axis`）：这份产物要逐项交代的"项"是什么。
+    axis: str = ""
+
+
+@runtime_checkable
+class CoveragePort(Protocol):
+    """把【一份材料的原文】变成【一份可打勾的清单】。
+
+    ★ 与 `SourcePort` / `ResearchPort` 的分工（三者都只有一层，谁也不套谁）：
+
+        SourcePort    "东西在哪，去取回来"                  → fetch(ref)
+        ResearchPort  "不知道在哪，先找出来，再冻住"        → research(...)
+        CoveragePort  "材料已经在手上，里面出现了哪些 X"    → enumerate(...)
+
+    ★★ **它跑在壳里，不在块里。** 和 ResearchPort 同一条：壳负责造材料，
+       块只负责用。理由不是洁癖 —— 清单一旦由块自己产，块就能按"我已经写了
+       什么"反推一份短清单，分母跟着产物走，覆盖判定就没有意义了。
+
+    ★ 拿不到清单是**正常返回**（空 `items`），不是异常：这块产物的判定会因此
+      具名拒（`checklist_undecided`），而"拒"比"拿一份不可信的清单去判"更诚实。
+    """
+
+    def enumerate(self, axis: str, snapshot: Snapshot, alias: Sequence[str] = ()) -> Checklist: ...
 
 
 @runtime_checkable

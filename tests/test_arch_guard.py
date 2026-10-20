@@ -414,7 +414,10 @@ def test_known_kinds_and_dispatch_table_agree() -> None:
     from bobanana6.core.checkers import CHECKS as dispatched
     from bobanana6.core.model import KNOWN_KINDS
 
-    assert len(dispatched) == 16, "the dispatch table must not silently shrink"
+    #: ★ 这个数是**棘轮**，不是装饰：只许往上加，不许悄悄减。
+    #: 16 -> 17 是 2026-10-20 显式加了第五道门 `item_coverage`（清单逐项覆盖），
+    #: 不是某条 checker 掉了之后顺手改的数字。
+    assert len(dispatched) == 17, "the dispatch table must not silently shrink"
     assert set(KNOWN_KINDS) == set(dispatched)
 
 

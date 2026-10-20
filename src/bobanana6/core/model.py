@@ -108,6 +108,12 @@ KNOWN_KINDS: frozenset[str] = frozenset(
         "corroboration",
         "freshness",
         "coverage",
+        #: ★ 2026-10-20: the fifth gate. ``coverage`` above asks "did this product
+        #: cite the sources it was required to cite"; ``item_coverage`` asks a
+        #: different question -- "清单上的 N 项，产物里交代了几项" -- and its
+        #: denominator is a checklist frozen from the source material **before**
+        #: the work started. Two names because they are two judgments.
+        "item_coverage",
         "concept_ref",
         "unit_consistency",
         "definition_pin",
