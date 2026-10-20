@@ -319,6 +319,9 @@ class BlockRuntime:
     epoch: Callable[[], float] = time.monotonic
     #: Structured-output support, learned once per run and shared by every block.
     response_format: ResponseFormatSupport = field(default_factory=ResponseFormatSupport)
+    #: ★★ 2026-10-20 第五道门：这一次跑冻住的清单文件，并进"谁都不许写"的路径集合。
+    #: 空元组 = 这道题没声明 `coverage` ⇒ `frozen_paths` 与改前逐字相同。
+    frozen_extra: tuple[str, ...] = ()  # blame: fail-closed — 省略即"没有冻住的清单"，不凭空宣称一条不许写的路径
     last_candidate: Candidate | None = None
     last_judge: BlockJudge | None = None
     #: ★★ 过程级信息交换（ARTEX 机制 ②）：整个 run **共用一份**过程记录 ——
@@ -359,6 +362,11 @@ class BlockRuntime:
             sorted(
                 {deliverable.name for deliverable in self.contract.deliverables}
                 | {source.locator for source in self.contract.sources if source.locator}
+                #: ★★ 2026-10-20 第五道门：这一次跑**动手之前**冻住的清单文件。
+                #: 它们不在块的工作区里（`<run>/checklist/` 与 `<run>/workspace/` 是兄弟），
+                #: 所以这条登记是**说明 + 双保险**：谁都不许写的东西要能说出来，
+                #: 而且任何试图写下去的路径都会被同一条 `may_write` 拒。
+                | set(self.frozen_extra)
             )
         )
         ledger = WorkspaceLedger(root=self.workspace, region=region)

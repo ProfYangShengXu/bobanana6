@@ -1261,7 +1261,14 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "B24-unreadable-carrier-not-a-gate",
         "assemble_impl/runner.py",
+        # ★ 锚点必须唯一，而且必须**只**锁住这一处。原来只写 `raise RunRefused(`
+        #   （16 空格缩进），runner 里任何同缩进的同族语句都会让它变成 N 处 ⇒
+        #   预检直接判红，还错报成"树里带着上一次的变异"。2026-10-20 加第五道门时
+        #   真的撞上了（新增 4 条同缩进 `raise RunRefused(`）。带上上一行注释，
+        #   锚点就只指向"读不回来的载体"这一处。
+        "                #   就不是具名的 sources 门，而是一路冒到顶层的未捕获异常。\n"
         "                raise RunRefused(\n",
+        "                #   就不是具名的 sources 门，而是一路冒到顶层的未捕获异常。\n"
         "                raise  # mutation: let the carrier error escape as a generic failure\n",
         "tests/test_acceptance.py::test_an_unreadable_frozen_carrier_is_a_named_gate",
         "an unreadable carrier is no longer reported at a named gate",

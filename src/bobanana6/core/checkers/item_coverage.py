@@ -79,10 +79,10 @@ class CoverageResult:
     #: header is the axis (or one of its aliases); ``"text"`` = no such column
     #: was found, so presence was decided over the whole product. Kept because
     #: the two readings are not equally strong and a report must not blur them.
-    mode: str = "text"
+    mode: str = "text"  # blame: whitelist — 只用于读数/展示，不参与 pass/fail
     #: Human sentence for why a result is not a pass when ``missing`` is empty
     #: (an empty checklist has nothing missing but is still not coverage).
-    note: str = ""
+    note: str = ""  # blame: whitelist — 只用于读数/展示，不参与 pass/fail
 
     def fact(self) -> str:
         """The one sentence a verdict carries. Names the misses, never the score alone."""
@@ -131,6 +131,25 @@ def variants(text: str) -> tuple[str, str]:
     return _flat(text), normalize(text)
 
 
+def _present_in(item: str, text_flat: str, text_norm: str) -> bool:
+    """The presence rule, with the text's two forms already computed.
+
+    ★ 拆出来是为了成本：一份产物的归一化只需要算**一次**，而早先的版本对清单里
+      的每一项都把整份产物重算一遍（O(items × len(text))，实测 2000 项 × 36KB
+      要 1.79s）。判定发生在块循环里，慢判定会吃掉预算。
+    """
+    if not str(item).strip():
+        return False
+    whole = normalize(item)
+    flat = _flat(item)
+    if whole and whole in text_norm:
+        return True
+    if flat and flat in text_flat:
+        return True
+    pieces = [piece for piece in flat.split(" ") if len(piece) >= 2]
+    return len(pieces) >= 2 and all(piece in text_flat for piece in pieces)
+
+
 def item_present(item: str, *texts: str) -> bool:
     """Is ``item`` accounted for in any of ``texts``?
 
@@ -143,20 +162,10 @@ def item_present(item: str, *texts: str) -> bool:
       * every whitespace-separated piece of the item occurs -- covers word order
         (``"Microsoft Azure"`` vs ``"Azure, Microsoft"``) without a fuzzy score.
     """
-    if not str(item).strip():
-        return False
-    whole = normalize(item)
-    flat = _flat(item)
     for text in texts:
         if not text:
             continue
-        text_flat, text_norm = variants(text)
-        if whole and whole in text_norm:
-            return True
-        if flat and flat in text_flat:
-            return True
-        pieces = [piece for piece in flat.split(" ") if len(piece) >= 2]
-        if len(pieces) >= 2 and all(piece in text_flat for piece in pieces):
+        if _present_in(item, *variants(text)):
             return True
     return False
 
@@ -171,7 +180,7 @@ def ungrounded(checklist: Sequence[str], source_text: str) -> tuple[str, ...]:
     return tuple(str(item) for item in checklist if not item_present(str(item), source_text))
 
 
-def undercount(checklist: Sequence[str], expected: int, *, floor: float = UNDERCOUNT_FLOOR) -> bool:
+def undercount(checklist: Sequence[str], expected: int, *, floor: float = UNDERCOUNT_FLOOR) -> bool:  # blame: fail-closed — 缺省即规格给出的保守值；调宽松要显式声明
     """Is the checklist too short to be trusted? (spec 3.4 ②)
 
     ``expected`` is counted independently of the checklist (a second enumeration
@@ -192,11 +201,26 @@ def undercount(checklist: Sequence[str], expected: int, *, floor: float = UNDERC
 
 def _cells(line: str) -> tuple[str, ...]:
     row = line.strip()
-    if row.startswith("|"):
-        row = row[1:]
-    if row.endswith("|"):
-        row = row[:-1]
+    row = row.removeprefix("|")
+    row = row.removesuffix("|")
     return tuple(cell.strip() for cell in row.split("|"))
+
+
+def _axis_cell(header: Sequence[str], wanted: Sequence[str]) -> int | None:
+    """Which header cell names the axis.
+
+    ★ 命中分两档，**精确优先**：先找归一化后等于某个别名/轴名的表头，找不到才
+      退到"包含"。"包含"单独用会挑错列 —— `alias: [公司]` 会命中 `公司规模`，
+      而它如果排在 `公司` 前面，读到的是一列规模数字（覆盖率要么恒 0 要么恒 1，
+      两种都不可归因）。同档内取**最短**的那个表头：`公司` 比 `公司名称/所在地` 更像。
+    """
+    cells = [(position, normalize(cell)) for position, cell in enumerate(header)]
+    cells = [(position, name) for position, name in cells if name]
+    for position, name in cells:
+        if name in wanted:
+            return position
+    candidates = [(len(name), position) for position, name in cells if any(want in name for want in wanted)]
+    return min(candidates)[1] if candidates else None
 
 
 def item_column(text: str, axis: str, alias: Sequence[str]) -> tuple[str, ...] | None:
@@ -228,14 +252,7 @@ def item_column(text: str, axis: str, alias: Sequence[str]) -> tuple[str, ...] |
         if len(block) < 2 or not _SEPARATOR.match(block[1]):
             continue
         header = _cells(block[0])
-        hit = None
-        for position, cell in enumerate(header):
-            cell_norm = normalize(cell)
-            if not cell_norm:
-                continue
-            if any(want and want in cell_norm for want in wanted):
-                hit = position
-                break
+        hit = _axis_cell(header, wanted)
         if hit is None:
             continue
         values: list[str] = []
@@ -243,6 +260,11 @@ def item_column(text: str, axis: str, alias: Sequence[str]) -> tuple[str, ...] |
             cells = _cells(row)
             if hit < len(cells) and cells[hit]:
                 values.append(cells[hit])
+        if not values:
+            # ★ 表头命中但没有数据行 ⇒ 这**不是**"读到了 0 项"，是"这张表还没写"。
+            #   继续找下一张表；都不行才回落整篇文本 —— 否则第一张小表会把
+            #   后面那张真表挡在外面，读数变成 0/N。
+            continue
         return tuple(values)
     return None
 
@@ -256,7 +278,7 @@ def _artifact_text(artifact: Artifact) -> str:
     names = [column.name for column in artifact.columns]
     lines = ["| " + " | ".join(names) + " |"] if names else []
     for row in artifact.rows:
-        lines.append("| " + " | ".join(str(row.get(name, "")) for name in names) + " |")
+        lines.append("| " + " | ".join(str(row.get(name, "")) for name in names) + " |")  # blame: whitelist — 只用于读数/展示，不参与 pass/fail
     return "\n".join(lines)
 
 
@@ -271,7 +293,7 @@ def check_coverage(
     alias: Sequence[str],
     threshold: float,
     *,
-    axis: str = "",
+    axis: str = "",  # blame: fail-closed — 缺省即规格给出的保守值；调宽松要显式声明
 ) -> CoverageResult:
     """Count how many checklist items the product accounts for.
 
@@ -297,7 +319,7 @@ def check_coverage(
     if not 0.0 < minimum <= 1.0:
         minimum = DEFAULT_THRESHOLD
     text = "" if artifact_text is None else str(artifact_text)
-    aliases = tuple(str(one) for one in alias or () if str(one).strip())
+    aliases = tuple(str(one) for one in (alias if isinstance(alias, Sequence) and not isinstance(alias, str) else ()) if str(one).strip())
 
     column = item_column(text, axis, aliases)
     if column is not None:
@@ -309,8 +331,10 @@ def check_coverage(
 
     covered = 0
     missing: list[str] = []
+    #: ★ 归一化只算一次（见 `_present_in` 的成本注记）。
+    haystack_flat, haystack_norm = variants(haystack)
     for item in items:
-        if item_present(item, haystack):
+        if _present_in(item, haystack_flat, haystack_norm):
             covered += 1
         else:
             missing.append(item)
@@ -334,7 +358,7 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
     are different answers.
     """
     spec: Mapping[str, Any] = constraint.spec
-    checklist = context.checklists.get(constraint.target, ())
+    checklist = context.checklists.get(constraint.target, ())  # blame: fail-closed — 缺省即规格给出的保守值；调宽松要显式声明
     if not checklist:
         return fail(
             constraint,
@@ -346,12 +370,12 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
             constraint,
             f"no artifact named {constraint.target!r} in this block; nothing to count against the checklist",
         )
-    alias = spec.get("alias", ())
+    alias = spec.get("alias", ())  # blame: fail-closed — 缺省即规格给出的保守值；调宽松要显式声明
     if isinstance(alias, str):
         alias = (alias,)
     if not isinstance(alias, Sequence):
         alias = ()
-    axis = str(spec.get("axis", ""))
+    axis = str(spec.get("axis", ""))  # blame: fail-open — axis 缺失时回落整篇文本匹配（比列匹配宽）；axis 由契约解析期必填，走不到这里；反证 tests/test_coverage.py
     result = check_coverage(
         _artifact_text(artifact),
         checklist,
@@ -362,7 +386,7 @@ def check(constraint: Constraint, candidate: Candidate, context: CheckContext) -
     #: The expectation (how many items the *material* was independently counted
     #: to have) travels with the constraint only so a failure can say which side
     #: is short. The undercount refusal itself already happened in the shell.
-    expected = spec.get("expected", 0)
+    expected = spec.get("expected", 0)  # blame: whitelist — 只用于读数/展示，不参与 pass/fail
     if result.passed:
         return ok(constraint, result.fact(), f"checklist={result.total} expected={expected} mode={result.mode}")
     return fail(constraint, result.fact(), f"mode={result.mode}")

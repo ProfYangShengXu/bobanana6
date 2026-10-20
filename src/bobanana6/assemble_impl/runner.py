@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -38,6 +39,7 @@ from ..agentloop.attribution import (
     actions_for,
     attribute,
 )
+from ..agentloop.brief import render_coverage_obligation
 from ..agentloop.events import EventLog
 from ..agentloop.metrics import text_tool_call_metrics, tool_metrics
 from ..contract import SOURCE_KIND_RESEARCH, ContractDocument
@@ -73,6 +75,8 @@ from ..core.model import (
 )
 from ..core.ontology import validate_ontology
 from ..core.ports import (
+    Checklist,
+    CoveragePort,
     DecomposerPort,
     OntologyPort,
     ResearchPort,
@@ -100,6 +104,7 @@ from ..sources import (
     form_for,
     forms_for,
 )
+from ..sources.prefetch import checklist_problems, read_materials_text
 from ..sources.research import ResearchNeedsAuthorization, ResearchUnavailable
 from .produce import artifact_from_disk, constraint_applies_to
 from .runtime import (
@@ -122,6 +127,11 @@ _DECISION_ORDER: tuple[ConvergeDecision, ...] = (
     ConvergeDecision.RECORD_CONFLICT,
     ConvergeDecision.ARBITRATE,
 )
+
+
+#: ★ 2026-10-20 第五道门：「冻住的清单」在工作区里的**台账**（工作区相对路径）。
+#: 它进 `frozen_paths`，于是块写不了它；清单正文本身在 `<run>/checklist/`（写区之外）。
+FROZEN_MANIFEST = ".bobanana6/checklist.json"
 
 
 class RunRefused(RuntimeError):
@@ -157,6 +167,9 @@ class RunResult:
     #: ★ A06: sources that could not be fetched. The run continued without them and
     #: this is where that is written down -- a degraded run has to say so.
     fetch_failures: Mapping[str, str] = field(default_factory=dict)
+    #: ★ 2026-10-20 第五道门：这一跑**实际用的分母**（`deliverable -> items`）。
+    #: 它必须在结果里，否则报告说"缺 15 项"时，没人能回答"这 15 项是哪份清单"。
+    checklists: Mapping[str, tuple[str, ...]] = field(default_factory=dict)  # blame: whitelist — 结果里带出这一跑的分母供报告复核，不参与判定
     reports: ReportBundle | None = None
 
     @property
@@ -251,6 +264,14 @@ class Runner:
     researcher: ResearchPort | None = None  # blame: fail-closed — None ⇒ 声明了研究来源就【具名拒】，不静默跳过
     #: 一次检索花多少。缺省即 `ResearchBudget` 的保守值（8 份 / 扩 1 层 / 4MB）。
     research_budget: ResearchBudget = field(default_factory=ResearchBudget)  # blame: fail-closed — 缺省走 ResearchBudget 自己的保守值，不在这里另写一套
+    #: ★★ 2026-10-20 第五道门：预扫描入口（`core/ports.py::CoveragePort`）。
+    #: ``None`` 而契约声明了 `coverage` ⇒ **具名拒**（`checklist_unavailable`）：
+    #: 不跑预扫描就没有分母，而"没有分母"绝不能读成"全覆盖"。
+    coverage_port: CoveragePort | None = None  # blame: fail-closed — None ⇒ 声明了 coverage 就具名拒，不静默跳过
+    #: 本次 run 冻住的清单：`deliverable -> items`。判定器从 `CheckContext` 读它。
+    checklists: dict[str, tuple[str, ...]] = field(default_factory=dict)  # blame: fail-closed — 空字典 = 这道题没声明 coverage（第五道门不跑）
+    #: 本次 run 的清单落盘位置（`<run>/checklist/*.json`）。空串 = 还没有 run 目录。
+    checklist_dir: Path | None = None  # blame: whitelist — 只记录清单落盘目录，不参与判定
 
     # -- the pipeline ------------------------------------------------------ #
 
@@ -263,6 +284,10 @@ class Runner:
         # ★ 同一条纪律：上一轮的取回失败不许带进这一轮（否则 SOURCES.md/拒绝理由
         #   会引用上一轮研究失败的现场）。`fetch_failures` 之前漏了这一步。
         self.fetch_failures = {}
+        # ★ 同一条纪律：上一轮冻住的清单不许带进这一轮 —— 那会让这一轮拿上一轮
+        #   材料算出来的分母去判这一轮的产物（换题不换分母 = 假绿）。
+        self.checklists = {}
+        self.checklist_dir = None
         survey_note = f"{len(contract.sources)} declared sources"
         from ..core.model import InputSurvey
 
@@ -329,6 +354,16 @@ class Runner:
                 tuple(code for code, _problem in judge_problems),
             )
 
+        # 3.5 ★★ 第五道门：预扫描 + 冻结清单。
+        #   **在派块之前**，而且**只在壳里**跑：清单是判定的分母，分母不能由干活的那一方
+        #   决定（块一参与，它就能按"我已经写了什么"反推一份短清单）。
+        #   三道读数在这里落地：① 接地（每项都在材料里查得到）；
+        #   ② 独立计数（另跑一遍从头数）；③ 冻住（落盘 + 摘要，事后改不了）。
+        self._prefetch_checklists(contract, plan, snapshots)
+        #: 冻住的清单文件登记进这一跑的"谁都不许写"清单（串行路径的 runtime 在这里补；
+        #: 并发路径由 `_new_block_runtime` 补）。
+        self.runtime.frozen_extra = self._checklist_paths()
+
         # 4. run the blocks.
         context = CheckContext(
             ontology=ontology,
@@ -342,6 +377,8 @@ class Runner:
             now=self.now,
             limits=self.limits,
             custom_checks=self._custom_checks(),
+            #: ★ 冻住的清单只在这里进判定器。空 = 这道题没声明 coverage（第五道门不跑）。
+            checklists=dict(self.checklists),
         )
         self.runtime.context = context
         pieces: dict[str, Any] = {}
@@ -488,6 +525,7 @@ class Runner:
             outcome=outcome,
             exit_reason=self.exit_reason,
             fetch_failures=dict(self.fetch_failures),
+            checklists=dict(self.checklists),
             reports=reports,
         )
 
@@ -516,6 +554,12 @@ class Runner:
         读的输入全是调用方传进来的**快照**；写入共享状态的动作全部在 ``_merge``
         里由调用方**串行**做。这样第二步的调度器可以安全地并发跑多个 ``_run_one``。
         """
+        #: ★★ 第五道门：把这一块的覆盖义务织进它的 brief。只读 `self.checklists`
+        #: （在 `run()` 里已经定稿并冻住），所以并发安全；没有清单的块拿到空串，
+        #: `produce.py` 因此**一个字节都不加**（既有任务逐字不变）。
+        obligation = self._coverage_instruction(subtask)
+        if obligation:
+            subtask = replace(subtask, coverage_instruction=obligation)
         #: ★★ 输入缺失**不再短路**（旧前置门：一件没到就 0 次调用、记 inputs_unavailable）。
         #:   实测代价（13f，8 块）：T-01 的答案信封不合法 ⇒ T-02..T-08 **全部**停工，
         #:   八个块实际只跑过 1 个。第一道工序填错工单，后面七道陪葬。
@@ -902,7 +946,25 @@ class Runner:
                 "runtime_factory must return an isolated BlockRuntime "
                 "(own traces + own event_log), not share the runner's"
             )
+        #: ★ 并发路径的 runtime 是工厂新造的，它没见过这次 run 冻住的清单路径 ——
+        #: 在这里补上，写区守卫才对每一块都成立（不是只有串行那块）。
+        runtime.frozen_extra = self._checklist_paths()
         return runtime
+
+    def _checklist_paths(self) -> tuple[str, ...]:
+        """The frozen-checklist **ledger**, as a workspace-relative path.
+
+        ★★ 这里只能给工作区相对路径。`frozen_paths` 的每一条都会被
+          `services/workspace.py::_normalized()` 按工作区相对路径归一，绝对路径会
+          直接抛 `WorkspaceError` —— 于是一块想写自己的草稿（写区之外的合法动作）
+          就整跑 abort，而报文指向一个模型从没碰过的路径。
+        ★ 清单正文在 `<run>/checklist/`（工作区之外），靠"`..` 被拒 + 写区之外"挡住；
+          工作区里的这份台账才是 `frozen_paths` 真正保护、也真正说得出口的东西。
+        """
+        if self.checklist_dir is None or self.workspace is None:
+            return ()
+        manifest = Path(self.workspace) / FROZEN_MANIFEST
+        return (FROZEN_MANIFEST,) if manifest.is_file() else ()
 
     @staticmethod
     def _inputs_ready(
@@ -1091,6 +1153,224 @@ class Runner:
         for locator, reason in getattr(self.researcher, "last_errors", {}).items():
             self.fetch_failures[f"{source.ref}:{locator}"] = str(reason)[:200]
         return {snapshot.ref: snapshot for snapshot in found}
+
+    # -- the fifth gate: pre-scan, freeze, hand over ------------------------ #
+
+    def _run_root(self) -> Path:
+        """Where `<run>/checklist/` goes. Derived, never guessed."""
+        if self.report_dir is not None:
+            return Path(self.report_dir).parent
+        if self.workspace is not None:
+            return Path(self.workspace).parent
+        return Path.cwd()
+
+    def _prefetch_checklists(
+        self,
+        contract: TaskContract,
+        plan: SplitPlan,
+        snapshots: Mapping[str, Snapshot],
+    ) -> None:
+        """Enumerate every declared axis **before** a worker exists, and freeze it.
+
+        Three things are deliberately separate here, because the measurement says
+        any one of them alone is worth nothing:
+
+          预扫描（枚举）  只有它 ⇒ 就是 +F（0.35）：材料在上下文里，但没有"必须用"的义务
+          覆盖义务        只有它 ⇒ 清单不可信：模型按写出来的结果反推清单
+          冻住            只有它 ⇒ 有清单不用，还是 +F
+        """
+        specs = self.document.coverage
+        if not specs:
+            return
+        if self.coverage_port is None:
+            raise RunRefused(
+                "coverage",
+                "this task declares `coverage`, but no pre-scan port is wired into this deployment "
+                "-- without a pre-scan there is no denominator, and 'no denominator' must not read as full coverage",
+                ("checklist_unavailable",),
+            )
+        outputs = {block.output for block in plan.subtasks}
+        frozen_entries: dict[str, Any] = {}
+        for spec in specs:
+            if spec.deliverable not in outputs:
+                raise RunRefused(
+                    "coverage",
+                    f"coverage names deliverable {spec.deliverable!r}, but no block in the plan produces it",
+                    ("checklist_target_missing",),
+                )
+            materials = self._coverage_materials(spec.source, snapshots)
+            if not materials:
+                raise RunRefused(
+                    "coverage",
+                    f"coverage.source {spec.source!r} has no frozen snapshot, so the {spec.axis!r} "
+                    "checklist cannot be enumerated from it",
+                    ("checklist_source_missing",),
+                )
+            try:
+                # ★ 材料按**复数**交下去：研究类来源的 `<ref>` 是检索清单（种子地址表），
+                #   真材料是 `<ref>:1..N`。只喂清单，枚举器从地址表里数公司只能数出 0 家。
+                checklist: Checklist = self.coverage_port.enumerate(spec.axis, materials, spec.alias)
+                # ★ 同一份材料再取一次文本做接地校验（不是另一条读取路径：同一个函数）。
+                source_text, _read_truncated = read_materials_text(materials)
+            except Exception as exc:
+                raise RunRefused(
+                    "coverage",
+                    f"the pre-scan for {spec.deliverable!r} did not complete: {type(exc).__name__}: {exc}",
+                    ("checklist_unavailable",),
+                ) from exc
+            expected = max(spec.expected_count, int(getattr(checklist, "expected", 0) or 0))
+            items = tuple(getattr(checklist, "items", ()) or ())
+            codes = checklist_problems(items, source_text, expected)
+            if codes:
+                detail = ", ".join(codes)
+                raise RunRefused(
+                    "coverage",
+                    f"the {spec.axis!r} checklist for {spec.deliverable!r} is not trustworthy "
+                    f"({detail}): {len(items)} items grounded, {expected} counted independently "
+                    "-- refusing to judge a product against it",
+                    codes,
+                )
+            self.checklists[spec.deliverable] = items
+            payload = self._freeze_checklist(spec, items, expected, contract, checklist)
+            frozen_entries[spec.deliverable] = payload
+            #: ★ 枚举器编过的项、材料被截断 —— 两件都**不拦**（剔掉/照用），
+            #:   但都留下事件读数。它们正是"清单为什么短"的两个具体解释。
+            self.event_log.record(
+                kind="gate_check",
+                task_id=contract.task_id,
+                worker_id="runner",
+                at=self.epoch(),
+                ok=True,
+                detail={
+                    "gate": "coverage",
+                    "deliverable": spec.deliverable,
+                    "checklist": len(items),
+                    "expected": expected,
+                    "invented": list(getattr(checklist, "invented", ()) or ()),
+                    "truncated": bool(getattr(checklist, "truncated", False) or _read_truncated),
+                },
+            )
+        self._write_frozen_manifest(contract, frozen_entries)
+
+    @staticmethod
+    def _coverage_materials(source_ref: str, snapshots: Mapping[str, Snapshot]) -> list[Snapshot]:
+        """The material(s) one coverage source expands to.
+
+        ★ 研究来源在契约里只声明"要找什么"，找到的材料是 `<ref>:1..N`；`<ref>` 自己
+          是**检索清单**（ref / 信任层 / 地址的表格）。枚举项集要的是材料，不是清单。
+          所以先收 `<ref>:*`，一份都没有才退回 `<ref>` 本身（载体来源：它就是材料）。
+        """
+        expanded = [snapshot for ref, snapshot in sorted(snapshots.items()) if ref.startswith(f"{source_ref}:")]
+        if expanded:
+            return expanded
+        found = snapshots.get(source_ref)
+        return [found] if found is not None else []
+
+    def _freeze_checklist(
+        self,
+        spec,
+        items: tuple[str, ...],
+        expected: int,
+        contract: TaskContract,
+        checklist: Checklist,
+    ) -> dict[str, Any]:
+        """Write `<run>/checklist/<deliverable>.json`, then **read it back** and verify.
+
+        ★ 落盘是"冻住"的可核对形态：清单在块动手**之前**就已经是一份带摘要的文件。
+          读回复核让 `digest` 有真正的读者 —— 只写不验的摘要等于装饰。
+        ★ 写不进去是**具名门**（`checklist_unfreezable`），不是一句裸 OSError：
+          只读挂载/权限错误要让归因停在 coverage 这一层。
+        """
+        digest = hashlib.sha256("\n".join(items).encode("utf-8")).hexdigest()
+        payload = {
+            "task_id": contract.task_id,
+            "deliverable": spec.deliverable,
+            "axis": spec.axis,
+            "source": spec.source,
+            "alias": list(spec.alias),
+            "threshold": spec.threshold,
+            "expected": expected,
+            "total": len(items),
+            "items": list(items),
+            "invented": list(getattr(checklist, "invented", ()) or ()),
+            "truncated": bool(getattr(checklist, "truncated", False)),
+            "frozen_at": self.now,
+            "digest": digest,
+        }
+        safe = spec.deliverable.replace("/", "__").replace("\\", "__")
+        try:
+            directory = self._run_root() / "checklist"
+            directory.mkdir(parents=True, exist_ok=True)
+            self.checklist_dir = directory
+            path = directory / f"{safe}.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            written = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise RunRefused(
+                "coverage",
+                f"the frozen checklist for {spec.deliverable!r} cannot be written to disk "
+                f"({type(exc).__name__}: {exc}); refusing to judge against a checklist nobody can audit",
+                ("checklist_unfreezable",),
+            ) from exc
+        if written.get("digest") != digest or tuple(written.get("items", ())) != items:  # blame: fail-closed — 读回的东西缺字段就判'不能审计'，不当作空清单
+            raise RunRefused(
+                "coverage",
+                f"the frozen checklist for {spec.deliverable!r} does not round-trip "
+                "(what landed on disk is not what the judge will use)",
+                ("checklist_unfreezable",),
+            )
+        return payload
+
+    def _write_frozen_manifest(self, contract: TaskContract, entries: Mapping[str, Any]) -> None:
+        """Record the freeze inside the **workspace**, where the write barrier lives.
+
+        ★ 为什么不把 `<run>/checklist/*.json` 本身塞进 `frozen_paths`：那个目录不在
+          工作区里，而 `frozen_paths` 的每一条都会被 `_normalized()` 当作**工作区相对
+          路径**归一 —— 绝对路径会让它抛 `WorkspaceError`，于是一块想写自己的草稿
+          （写区之外的那个合法动作）就整跑 abort。同一件事有两层：清单文件在写区之外
+          （`..` 已被拒），而这份**清单台账**在工作区里，由 `frozen_paths` 真正挡住。
+        """
+        if self.workspace is None or not entries:
+            return
+        manifest = self.workspace / FROZEN_MANIFEST
+        try:
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "task_id": contract.task_id,
+                        "frozen_at": self.now,
+                        "checklists": {
+                            deliverable: {
+                                "digest": payload["digest"],
+                                "total": payload["total"],
+                                "expected": payload["expected"],
+                                "axis": payload["axis"],
+                                "source": payload["source"],
+                                "path": "checklist/" + deliverable.replace("/", "__") + ".json",
+                            }
+                            for deliverable, payload in sorted(entries.items())
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise RunRefused(
+                "coverage",
+                f"the frozen checklist manifest cannot be written into the workspace "
+                f"({type(exc).__name__}: {exc})",
+                ("checklist_unfreezable",),
+            ) from exc
+
+    def _coverage_instruction(self, subtask: Subtask) -> str:
+        """The obligation text for one block, or ``""`` when nothing was frozen for it."""
+        items = self.checklists.get(subtask.output)
+        if not items:
+            return ""
+        return render_coverage_obligation(items)
 
     def _authorized(
         self, contract: TaskContract, snapshots: Mapping[str, Snapshot]

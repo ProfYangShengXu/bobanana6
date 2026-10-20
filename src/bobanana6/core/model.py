@@ -645,6 +645,14 @@ class Subtask:
     #: `append` 续写）、脚本只用于要算的东西、每条说法带坐标、每段回读尾巴。
     #: 空 = 壳没给产出指令（契约未声明 `min_chars` / 不是写块）⇒ 一个字都不加。
     write_instruction: str = ""  # external:assemble_impl —— 块提示装配点把它放进 system（块后缀）。# blame: fail-closed — 缺省即"没有产出指令"
+    #: ★★ 2026-10-20: 本块的**覆盖义务**（壳渲染好的一段话：清单全文 + 三条义务）。
+    #: ★ 它不是 `read_instruction` / `write_instruction` 的第三个兄弟，区别在**来源**：
+    #:   那两个由切分预算推出来，这一段由**预扫描**在动手之前冻住的清单渲染出来
+    #:   （`sources/prefetch.py` 枚举 → 壳冻结 → `agentloop/brief.py` 渲染）。
+    #: ★ 读者是 `assemble_impl/produce.py`：它把这段作为**紧随 brief 的独立 user 行**交出去
+    #:   （不是塞进 brief 的 JSON —— 那是转义后的 `\n`，实测有效的措辞必须按原样被读到）。
+    #: 空 = 这份产物没声明 `coverage` ⇒ 一个字都不加（既有读数逐字不变）。
+    coverage_instruction: str = ""  # external:assemble_impl —— 块提示装配点把它放进 brief。# blame: fail-closed — 缺省即"没有覆盖义务"，不凭空给一份清单
 
     def __post_init__(self) -> None:
         _require_non_empty(self.id, "Subtask.id must not be empty")

@@ -52,9 +52,10 @@ from .core.model import DEFAULT_LIMITS, Budget
 from .core.ports import LLMClient, OntologyPort, SourcePort
 from .decompose import BlockBudget, Decomposer, RoundBudget
 from .ontology import load_ontology_file
-from .sources.research import LinkExpandingResearch
 from .sources import LocatorFetcher, SnapshotFileReader, SnapshotStore, SourceLedger
 from .sources.form import forms_for
+from .sources.prefetch import PrefetchCoverage
+from .sources.research import LinkExpandingResearch
 
 __all__ = ["App", "build_app", "main"]
 
@@ -227,6 +228,10 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
             ledger=ledger,
             captured_at=_now_iso(),
         ),
+        # ★★ 2026-10-20 第五道门：预扫描入口。**只在壳里**枚举项集 ——
+        #   清单是判定的分母，不能让干活的那一方决定它。
+        #   契约没声明 `coverage` 时它一次都不会被调用（既有任务零成本、零字节变化）。
+        coverage_port=PrefetchCoverage(client=client),
         now=_now_iso(),
         epoch=time.monotonic,
         limits=DEFAULT_LIMITS,

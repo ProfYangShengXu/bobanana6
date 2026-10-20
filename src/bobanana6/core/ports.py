@@ -7,9 +7,11 @@ module is named.
 
 Port inventory note: the spec's repo-structure comment lists six ports
 (including a ``CandidateSource`` that is never given a signature) while its
-port section defines the eight protocols found here. This unit implements the
-eight with signatures; ``CandidateSource`` is deliberately not invented. See
-the delivery report -- the two documents disagree and must be synced.
+port section defines eight protocols. This unit implements those eight, plus
+``CoveragePort`` (2026-10-20, the fifth gate's pre-scan), so **nine**; the count
+is deliberately not repeated anywhere else. ``CandidateSource`` is deliberately
+not invented. See the delivery report -- the two documents disagree and must be
+synced.
 
 Vocabulary note: the environment guard forbids model/network vocabulary inside
 ``core/``. Two protocol members mandated by the spec itself -- ``LLMClient``
@@ -217,9 +219,18 @@ class Checklist:
 
     items: tuple[str, ...]
     #: 独立于 `items` 数出来的项数（第二次枚举）。`0` = 没拿到独立读数。
-    expected: int = 0
+    #: ★ 必须真的**独立**：不许把 `items` 并进来算，否则 `expected >= len(items)`
+    #:   恒成立，欠数判定永远不会响，整个反作弊就成了一句注释。
+    expected: int = 0  # blame: fail-open — axis 缺失时回落整篇文本匹配（比列匹配宽）；axis 由契约解析期必填，走不到这里；反证 tests/test_coverage.py
     #: 轴（`axis`）：这份产物要逐项交代的"项"是什么。
-    axis: str = ""
+    axis: str = ""  # blame: whitelist — 只用于读数/展示，不参与 pass/fail
+    #: 枚举器**编出来**、原文里查不到的项（已从 `items` 里剔掉）。
+    #: ★ 不静默：剔掉是对的（编的项不该进分母），但"它编过"这件事必须留痕 ——
+    #:   否则读者会以为清单只是短，而不知道短的原因里有一部分是幻觉。
+    invented: tuple[str, ...] = ()  # blame: whitelist — 只用于读数/展示，不参与 pass/fail
+    #: 材料被 `material_cap` 截断过。★ 截断是"清单为什么短"的第一解释 ——
+    #: 丢了它，覆盖率低会被读成"模型不听话"，而不是"它只看到了材料的前 48k"。
+    truncated: bool = False  # blame: whitelist — 只用于读数/展示，不参与 pass/fail
 
 
 @runtime_checkable
@@ -236,11 +247,12 @@ class CoveragePort(Protocol):
        块只负责用。理由不是洁癖 —— 清单一旦由块自己产，块就能按"我已经写了
        什么"反推一份短清单，分母跟着产物走，覆盖判定就没有意义了。
 
-    ★ 拿不到清单是**正常返回**（空 `items`），不是异常：这块产物的判定会因此
-      具名拒（`checklist_undecided`），而"拒"比"拿一份不可信的清单去判"更诚实。
+    ★ 收的是 `materials`（复数）而不是一份快照：研究类来源的材料是 `<ref>:1..N`，
+       而 `<ref>` 本身只是**检索清单**。只喂清单，枚举器看到的是"种子地址表"，
+       从里面数公司只能数出 0 家。
     """
 
-    def enumerate(self, axis: str, snapshot: Snapshot, alias: Sequence[str] = ()) -> Checklist: ...
+    def enumerate(self, axis: str, materials: Sequence[Snapshot], alias: Sequence[str] = ()) -> Checklist: ...  # blame: fail-closed — 缺省即规格给出的保守值；调宽松要显式声明
 
 
 @runtime_checkable

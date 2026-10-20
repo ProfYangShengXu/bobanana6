@@ -37,8 +37,9 @@ from bobanana6.core.model import (
 from bobanana6.core.ports import ToolSet
 
 
-def test_known_kinds_is_exactly_sixteen() -> None:
-    assert len(KNOWN_KINDS) == 16
+def test_known_kinds_counts_do_not_silently_shrink() -> None:
+    # ★ 16 -> 17（2026-10-20 第五道门 `item_coverage`）。棘轮：只许加，不许悄悄减。
+    assert len(KNOWN_KINDS) == 17
 
 
 def test_frozen_value_object_rejects_assignment() -> None:

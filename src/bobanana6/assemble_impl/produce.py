@@ -1897,6 +1897,16 @@ class LoopIOImpl(LoopIO):
             },
             {"role": "user", "content": json.dumps(brief, ensure_ascii=False)},
         ]
+        #: ★★ 2026-10-20 第五道门：覆盖义务。**紧随 brief 的独立 user 行**，不塞进上面那坨
+        #: JSON。两个理由都不是审美：
+        #:   ① 措辞是实测有效的版本（清单 0.35 → 0.75），塞进 JSON 会变成一串转义的 `\n`，
+        #:      对小子模型来说那是"另一段机器串"，不是三条看得懂的义务；
+        #:   ② 它必须是**本块的**内容（清单按产物不同），所以不进 system 的恒定前缀；
+        #:      `prompt()` 每轮重建 head，压缩只动 `state.messages` ⇒ 这一行不会被丢掉。
+        #: 空串 = 这份产物没声明 coverage ⇒ 一个字节都不加（既有读数逐字不变）。
+        obligation = self.subtask.coverage_instruction
+        if obligation:
+            head.append({"role": "user", "content": obligation})
         delivered = self._delivered_inputs()
         if delivered:
             # ★ 不能被当成 briefing：它前面有一句人话，所以它不是一条以 "{" 开头的

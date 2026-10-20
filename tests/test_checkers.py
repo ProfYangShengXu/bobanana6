@@ -37,10 +37,11 @@ def run(kind: str, spec: dict, *, target: str = "out.csv", cand=None, ctx=None):
     return check_kind(item, cand if cand is not None else candidate(artifacts=(artifact(),)), ctx or context())
 
 
-def test_registry_covers_all_sixteen_kinds() -> None:
-    assert len(CHECKS) == 16
+def test_registry_covers_every_declared_kind() -> None:
+    # ★ 16 -> 17（2026-10-20 第五道门 `item_coverage`）。这个数是棘轮：只许加，不许悄悄减。
+    assert len(CHECKS) == 17
     assert set(CHECKS) == set(JUDGMENT_ORDER)
-    assert len(JUDGMENT_ORDER) == 16
+    assert len(JUDGMENT_ORDER) == 17
 
 
 def test_unknown_kind_fails_closed() -> None:

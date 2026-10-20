@@ -163,12 +163,12 @@ class CoverageSpec:
     deliverable: str
     axis: str
     source: str
-    alias: tuple[str, ...] = ()
-    threshold: float = 0.65
+    alias: tuple[str, ...] = ()  # blame: fail-closed — 认不出别名只会少算命中，方向收紧
+    threshold: float = 0.65  # blame: fail-closed — 缺省 0.65 是实测的通过线；调高才放宽，缺省不放宽
     #: 独立数出来的项数下界（`0` = 让壳去独立数一遍）。★ 这是本实现加的可选项，
     #: 只用来**收紧**清单可信性判定：给了就用它做 `len(checklist) >= expected*0.8`
     #: 的下界；不给就由预扫描的第二遍枚举给出。它不是"覆盖率阈值"，两件事别混。
-    expected_count: int = 0
+    expected_count: int = 0  # blame: fail-closed — 0 不是'不查'，是'由独立枚举给下界'（比作者手填更严）
 
 
 @dataclass(frozen=True)
@@ -191,7 +191,7 @@ class ContractDocument:
     #: ★ 2026-10-20: 块内覆盖。`None` = 这道题没声明 ⇒ **不跑预扫描，行为完全不变**
     #: （向后兼容的那一侧）。声明了就必须成形成功，否则 `coverage_malformed` 具名拒。
     #: ★ 一条声明一项目标产物；一道题可以有多条（JD 矩阵按"公司"、题库按"题"）。
-    coverage: tuple[CoverageSpec, ...] = ()
+    coverage: tuple[CoverageSpec, ...] = ()  # blame: fail-closed — 空元组 = 未声明 ⇒ 不跑预扫描，行为逐字不变
 
 
 def _fail(source: str, path: str, message: str, rule: str) -> None:
@@ -648,7 +648,7 @@ def _coverage_entry(
             "coverage_malformed",
         )
 
-    raw_alias = raw.get("alias", ())
+    raw_alias = raw.get("alias", ())  # blame: fail-closed — 认不出别名只会少算命中，方向收紧
     if raw_alias is None:
         raw_alias = ()
     if isinstance(raw_alias, str):
@@ -671,7 +671,7 @@ def _coverage_entry(
             )
         alias.append(entry.strip())
 
-    raw_threshold = raw.get("threshold", 0.65)
+    raw_threshold = raw.get("threshold", 0.65)  # blame: fail-closed — 缺省 0.65 是实测的通过线；调高才放宽
     if isinstance(raw_threshold, bool) or not isinstance(raw_threshold, (int, float)):
         _fail(source, f"{where}.threshold", "threshold must be a number in (0, 1]", "coverage_malformed")
     threshold = float(raw_threshold)
@@ -683,7 +683,7 @@ def _coverage_entry(
             "coverage_malformed",
         )
 
-    raw_expected = raw.get("expected_count", 0)
+    raw_expected = raw.get("expected_count", 0)  # blame: fail-closed — 0 不是'不查'，是'由独立枚举给下界'
     if isinstance(raw_expected, bool) or not isinstance(raw_expected, int) or raw_expected < 0:
         _fail(
             source,
@@ -1001,4 +1001,17 @@ def compile_bundle(document: ContractDocument, plan: SplitPlan) -> ConstraintBun
             Constraint(
                 id=f"AUTO-{subtask.id}",
                 kind="presence",
-                target=sub
+                target=subtask.id,
+                spec={"min_rows": 1},
+                rationale="every block needs at least one decidable constraint (split.verifiable)",
+            )
+        )
+    return ConstraintBundle(
+        task_id=plan.task_id,
+        version=max(document.version, plan.version),
+        hard=tuple(hard),
+        soft=document.soft,
+        blind=document.blind,
+        unmapped=document.unmapped,
+        limits=document.limits,
+    )
