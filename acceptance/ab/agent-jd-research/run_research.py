@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO = Path("/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6")
+REPO = Path(os.environ.get("BB6_REPO") or "/mnt/c/Users/45140/OneDrive/Desktop/项目/bobanana6")
 TASK = REPO / "acceptance" / "ab" / "agent-jd-research"
 OUTPUT = TASK / "_run" / "workspace" / "output"
 

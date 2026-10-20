@@ -30,15 +30,36 @@ deliverables:
 sources:
   - {ref: instruction, locator: input/instruction.md}
   # ★★ 研究来源：`question` 是要找什么，`seeds` 是**起点不是范围**。
-  #   以下四个都是实测从本机（WSL 侧）curl 返回 200 的地址。
-  - ref: hunt
+  #   每个来源默认展开 8 份材料（ResearchBudget.max_sources / max_depth=1 往外扩），
+  #   5 个方向 ⇒ 约 40 份材料 ⇒ 约 40 个读块。
+  #   ★ 五个方向分开是为了让材料分散在不同主题上 —— 一个 question 探 40 份会全挤在
+  #     同一个主题里，后面那些重复度极高。
+  - ref: hunt-jd
     kind: research
-    question: "2026 年大厂 AI Agent 岗与 LLM 应用岗的招聘要求、真实面试考点、以及转型准备路径"
+    question: "2026 年大厂（字节/腾讯/阿里/百度/美团/快手/小红书/华为）AI Agent 岗与 LLM 应用岗的招聘要求、技能栈与职级"
     seeds:
       - "https://raw.githubusercontent.com/harrisliangsu/ai-agent-engineer-handbook/main/interview-prep/jd-requirements.md"
+  - ref: hunt-interview
+    kind: research
+    question: "AI Agent 岗与 LLM 应用岗的真实面经与面试考点：会问什么、答到什么深度算过"
+    seeds:
       - "https://raw.githubusercontent.com/AAAAhuihui/agent/main/%E5%AD%97%E8%8A%82%E8%B7%B3%E5%8A%A8/%E7%9C%9F%E5%AE%9E%E9%9D%A2%E7%BB%8F-%E7%89%9B%E5%AE%A2%E5%AE%9E%E5%BD%95.md"
-      - "https://raw.githubusercontent.com/AAAAhuihui/agent/main/Agent%E5%B7%A5%E7%A8%8B%E5%B8%88%E5%AD%A6%E4%B9%A0%E8%B7%AF%E7%BA%BF%E5%9B%BE.md"
       - "https://notes.kamacoder.com/interview/llm/20260506bytedance.html"
+  - ref: hunt-path
+    kind: research
+    question: "从传统后端/算法转 AI Agent 工程的准备路径与学习路线：分几个阶段、每阶段学什么"
+    seeds:
+      - "https://raw.githubusercontent.com/AAAAhuihui/agent/main/Agent%E5%B7%A5%E7%A8%8B%E5%B8%88%E5%AD%A6%E4%B9%A0%E8%B7%AF%E7%BA%BF%E5%9B%BE.md"
+  - ref: hunt-compare
+    kind: research
+    question: "AI Agent 工程师与传统后端/算法岗的能力差异对比：哪些能力可迁移、哪些必须补"
+    seeds:
+      - "https://raw.githubusercontent.com/harrisliangsu/ai-agent-engineer-handbook/main/README.md"
+  - ref: hunt-tooling
+    kind: research
+    question: "AI Agent 工程岗要求掌握的工具与框架：LangChain/LangGraph/MCP/RAG/向量库等各自要求到什么程度"
+    seeds:
+      - "https://raw.githubusercontent.com/harrisliangsu/ai-agent-engineer-handbook/main/README.md"
 
 constraints:
   hard:

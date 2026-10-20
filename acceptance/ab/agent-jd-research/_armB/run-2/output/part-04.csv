@@ -1,0 +1,141 @@
+ref,line,text
+hunt-interview:3,326,但别滥用。
+hunt-interview:3,327,每加一层模型调用，成本和延迟都会上升。
+hunt-interview:3,328,简单 FAQ 没必要这么重，高风险动作才值得上。
+hunt-interview:3,329,# 七、约束之后还幻觉，怎么办？
+hunt-interview:3,330,这是面试官最喜欢追问的地方。
+hunt-interview:3,331,因为现实里没有 100% 不幻觉的 Agent。
+hunt-interview:3,332,你不能说："我约束完就不会幻觉了。"
+hunt-interview:3,333,这句话太假了。
+hunt-interview:3,334,更好的回答是： 我承认幻觉无法完全消灭，所以系统要有拦截、降级、记录和复盘机制。
+hunt-interview:3,335,# 1. 先拦截
+hunt-interview:3,336,出现这些情况，不能直接返回给用户：
+hunt-interview:3,337,没有证据来源
+hunt-interview:3,338,置信度低
+hunt-interview:3,339,输出校验失败
+hunt-interview:3,340,工具参数不合法
+hunt-interview:3,341,高风险动作没有确认ref,line,text
+hunt-interview:3,326,但别滥用。
+hunt-interview:3,327,每加一层模型调用，成本和延迟都会上升。
+hunt-interview:3,328,简单 FAQ 没必要这么重，高风险动作才值得上。
+hunt-interview:3,329,# 七、约束之后还幻觉，怎么办？
+hunt-interview:3,330,这是面试官最喜欢追问的地方。
+hunt-interview:3,331,因为现实里没有 100% 不幻觉的 Agent。
+hunt-interview:3,332,你不能说："我约束完就不会幻觉了。"
+hunt-interview:3,333,这句话太假了。
+hunt-interview:3,334,更好的回答是： 我承认幻觉无法完全消灭，所以系统要有拦截、降级、记录和复盘机制。
+hunt-interview:3,335,# 1. 先拦截
+hunt-interview:3,336,出现这些情况，不能直接返回给用户：
+hunt-interview:3,337,没有证据来源
+hunt-interview:3,338,置信度低
+hunt-interview:3,339,输出校验失败
+hunt-interview:3,340,工具参数不合法
+hunt-interview:3,341,高风险动作没有确认ref,line,text
+hunt-interview:3,342,拦截机制需要在模型响应前进行检查，确保输出符合预期。
+hunt-interview:3,343,拦截包括检查是否有证据来源、置信度、输出校验、工具参数合法性以及高风险动作是否确认。
+hunt-interview:3,344,对于无法拦截的情况，系统应具备降级处理能力。
+hunt-interview:3,345,降级是指在出现异常时，按优先级选择替代方案，比如返回空响应或默认值。
+hunt-interview:3,346,记录和复盘机制需要将拦截和降级的日志持久化，便于后续分析和优化。
+hunt-interview:3,347,日志应包括时间戳、操作详情、错误原因和处理方式。
+hunt-interview:3,348,面试官会通过这些问题评估你对系统鲁棒性的理解。
+hunt-interview:3,349,在回答时要体现出你对复杂场景的处理能力和问题分析能力。
+hunt-interview:3,350,总结来说，幻觉管理需要系统级的设计和实现。
+hunt-interview:3,351,没有绝对正确的答案，但需要展示出你的系统性思考能力。ref,line,text
+hunt-interview:3,352,此外，还需考虑如何设计多 Agent 协作流程，确保信息传递的准确性和一致性。
+hunt-interview:3,353,在面试中，考官会关注你对多 Agent 架构的理解，如主从结构、workflows 等。
+hunt-interview:3,354,同时，也会询问你如何设计工具调用的权限与安全边界。
+hunt-interview:3,355,考核点包括工具接口定义、权限控制、安全机制等。
+hunt-interview:3,356,对于 RAG 相关的内容，可能会问到检索、改写、混合检索、RRF、rerank 和评测的具体方法。
+hunt-interview:3,357,例如，如何选择合适的检索策略，如何评估检索效果。
+hunt-interview:3,358,此外，可能还会涉及如何处理上下文污染问题，保证对话连贯性。
+hunt-interview:3,359,在面试中，这些内容常用来考察你对上下文管理的理解。
+hunt-interview:3,360,模型层的考察点主要集中在微调、推理优化和幻觉治理上。
+hunt-interview:3,361,例如，如何选择微调方法，如何实现推理优化，以及如何评估幻觉问题。
+hunt-interview:3,362,对于工程与 AI Coding 的问题，可能会关注你对不同框架的了解和使用经验。
+hunt-interview:3,363,比如，熟悉哪些框架，如何通过 harness 实现模型调用，如何进行测试与覆盖率分析。
+hunt-interview:3,364,最后，关于项目建议，可能会要求你设计一个能展示记忆机制、工具调用和上下文管理的项目。
+hunt-interview:3,365,例如，实现一个基于记忆的问答系统，支持多工具调用和上下文追踪。ref,line,text
+hunt-interview:3,366,建议的项目可以是一个能够展示 Agent 记忆机制、工具调用和上下文管理能力的应用。
+hunt-interview:3,367,例如，开发一个智能客服系统，能够使用记忆保持对话上下文，并通过 Function Calling 调用外部工具获取信息。
+hunt-interview:3,368,项目中还需考虑如何实现长期记忆，以及如何处理上下文污染的问题。
+hunt-interview:3,369,此外，可以设计一个基于 RAG 的搜索功能，展示如何进行混合检索和 rerank 操作。
+hunt-interview:3,370,在面试中，这些项目能有效展示你对实际应用的深入理解与实现能力。
+hunt-interview:3,371,记住，项目要体现你对技术细节的掌握，尤其是在 Agent 架构和安全机制方面的考虑。
+hunt-interview:3,372,最后，确保你的项目能够清晰解释你对 Agent 技术的理解，以及你如何设计和实现相关功能。ref,line,text
+hunt-interview:4,1,Agent混合路由优化大厂面试题：规则路由、模型路由、混合路由、级联降级与面试回答思路 | 卡码笔记｜程序员面试题库，Java、C++、Go、Agent、大模型八股文
+hunt-interview:4,2,卡码笔记-最强八股文
+hunt-interview:4,3,首页
+hunt-interview:4,4,计算机基础
+hunt-interview:4,5,Python
+hunt-interview:4,6,C++
+hunt-interview:4,7,Java
+hunt-interview:4,8,Go
+hunt-interview:4,9,🔥大模型🔥
+hunt-interview:4,10,大厂面经 大厂面经
+hunt-interview:4,11,大模型面经
+hunt-interview:4,12,Java面经
+hunt-interview:4,13,C++面经
+hunt-interview:4,14,大模型Github
+hunt-interview:4,15,(opens new window)
+hunt-interview:4,16,代码随想录
+hunt-interview:4,17,(opens new window)
+hunt-interview:4,18,卡码投递表🔥
+hunt-interview:4,19,2026群
+hunt-interview:4,20,添加客服微信
+hunt-interview:4,21,PS：通过微信后，请发送 姓名-学校-年级-2026实习/校招
+hunt-interview:4,22,支持卡码笔记
+hunt-interview:4,23,鼓励/支持/赞赏Carl
+hunt-interview:4,24,1.
+hunt-interview:4,25,如果感觉本站对你很有帮助，也可以请Carl喝杯奶茶，金额大小不重要，心意已经收下
+hunt-interview:4,26,2. 希望大家都能梦想成真，有好的前程，加油💪ref,line,text
+hunt-interview:5,1,2026年Agent/大模型大厂面试题汇总：ReAct、Function Calling、MCP、RAG高频问题与回答思路 | 卡码笔记｜程序员面试题库，Java、C++、Go、Agent、大模型八股文
+hunt-interview:5,2,卡码笔记-最强八股文
+hunt-interview:5,3,首页
+hunt-interview:5,4,计算机基础
+hunt-interview:5,5,Python
+hunt-interview:5,6,C++
+hunt-interview:5,7,Java
+hunt-interview:5,8,Go
+hunt-interview:5,9,🔥大模型🔥
+hunt-interview:5,10,大厂面经 大厂面经
+hunt-interview:5,11,大模型面经
+hunt-interview:5,12,Java面经
+hunt-interview:5,13,C++面经
+hunt-interview:5,14,大模型Github
+hunt-interview:5,15,(opens new window)
+hunt-interview:5,16,代码随想录
+hunt-interview:5,17,(opens new window)
+hunt-interview:5,18,卡码投递表🔥
+hunt-interview:5,19,2026群
+hunt-interview:5,20,添加客服微信
+hunt-interview:5,21,PS：通过微信后，请发送 姓名-学校-年级-2026实习/校招
+hunt-interview:5,22,支持卡码笔记
+hunt-interview:5,23,鼓励/支持/赞赏Carl
+hunt-interview:5,24,1.
+hunt-interview:5,25,如果感觉本站对你很有帮助，也可以请Carl喝杯奶茶，金额大小不重要，心意已经收下
+hunt-interview:5,26,2. 希望大家都能梦想成真，有好的前程，加油💪ref,line,text
+hunt-interview:5,27,资源：
+hunt-interview:5,28,类型 说明
+Tools 可执行的操作（如：发消息、查数据、写文件）
+Resources 可读的数据源（如：文档、代码库、数据库）
+Prompts 预设提示词模板（如：代码审查模板）
+ref,line,text
+hunt-interview:5,30,# MCP 的工具发现机制
+hunt-interview:5,31,这是 MCP 最强大的特性之一：Agent 启动时，扫描配置的 MCP Server 列表，向每个 Server 发送 tools/list 请求，接收工具列表和描述，将所有工具注入 LLM 的上下文。运行时，用户说"帮我在 GitHub 创建一个 Issue"，LLM 发现有 github_create_issue 工具，通过 MCP Client 发送调用请求到 GitHub MCP Server，Server 调用 GitHub API 返回结果。
+hunt-interview:5,32,这意味着 Agent 可以在运行时动态发现新能力，不需要重新部署代码。 今天加一个 Slack MCP Server，明天 Agent 就能用 Slack 的能力了。
+hunt-interview:5,33,# MCP 安全性设计
+hunt-interview:5,34,三层安全机制：
+hunt-interview:5,35,第一层——能力声明 ：Server 明确声明自己提供哪些工具，Agent 只能调用声明的工具，无法越权。
+ref,line,text
+hunt-interview:5,30,# MCP 的工具发现机制
+hunt-interview:5,31,这是 MCP 最强大的特性之一：Agent 启动时，扫描配置的 MCP Server 列表，向每个 Server 发送 tools/list 请求，接收工具列表和描述，将所有工具注入 LLM 的上下文。运行时，用户说"帮我在 GitHub 创建一个 Issue"，LLM 发现有 github_create_issue 工具，通过 MCP Client 发送调用请求到 GitHub MCP Server，Server 调用 GitHub API 返回结果。
+hunt-interview:5,32,这意味着 Agent 可以在运行时动态发现新能力，不需要重新部署代码。 今天加一个 Slack MCP Server，明天 Agent 就能用 Slack 的能力了。
+hunt-interview:5,33,# MCP 安全性设计
+hunt-interview:5,34,三层安全机制：
+hunt-interview:5,35,第一层——能力声明 ：Server 明确声明自己提供哪些工具，Agent 只能调用声明的工具，无法越权。ref,line,text
+hunt-interview:5,30,# MCP 的工具发现机制
+hunt-interview:5,31,这是 MCP 最强大的特性之一：Agent 启动时，扫描配置的 MCP Server 列表，向每个 Server 发送 tools/list 请求，接收工具列表和描述，将所有工具注入 LLM 的上下文。运行时，用户说"帮我在 GitHub 创建一个 Issue"，LLM 发现有 github_create_issue 工具，通过 MCP Client 发送调用请求到 GitHub MCP Server，Server 调用 GitHub API 返回结果。
+hunt-interview:5,32,这意味着 Agent 可以在运行时动态发现新能力，不需要重新部署代码。 今天加一个 Slack MCP Server，明天 Agent 就能用 Slack 的能力了。
+hunt-interview:5,33,# MCP 安全性设计
+hunt-interview:5,34,三层安全机制：
+hunt-interview:5,35,第一层——能力声明 ：Server 明确声明自己提供哪些工具，Agent 只能调用声明的工具，无法越权。
