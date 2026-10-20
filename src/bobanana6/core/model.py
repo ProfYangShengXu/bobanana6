@@ -542,7 +542,7 @@ class SourceRef:
     #: ★★ 这份来源是**已知位置**还是**一个还没定位的问题**。
     #:
     #:     "" / "file"     → 现状：`locator` 是确定的位置，`SourcePort.fetch` 取回来
-    #:     "research"      → `locator` 换成**问题本身**，由 `ResearchPort` 先找再冻
+    #:     "research"      → `locator` 留空，`question` 是**要找什么**，由 `ResearchPort` 先找再冻
     #:
     #: ★ 缺省是空串（= 现状），这是 **fail-closed** 的默认值：
     #:   既有契约一个字不改，行为逐字不变。
@@ -850,7 +850,7 @@ class Snapshot:
     ref: str  # core:checkers —— freshness/provenance 按 ref 查表
     body_path: Path  # external:sources —— 固化载体的位置，core 不打开
     captured_at: str  # core:checkers —— freshness 的时间戳比较读它
-    source_kind: str = ""  # external:report (SOURCES.md) —— 溯源按来源分层；报告模块未落地，当前无实现读者
+    source_kind: str = ""  # external:report (SOURCES.md) —— 溯源按来源分层：文件/网络是载体类，研究来源落 T1–T4 信任层
     #: ★ 这条来源是**走哪条路**取回来的（`web-use` 纪律①：降级必须可见）。
     #: 例：`jina` / `direct` / `github` / `rss`。空的 = 没走取网那条路（本地文件）。
     #: 读者：`report/builders.py` 的 snapshots 段（报告要能看出"这条是备选后端给的"）。

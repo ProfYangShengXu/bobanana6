@@ -1,6 +1,6 @@
 """研究类取数：种子是【起点】不是【范围】—— 从抓回来的正文里自己往外挖。
 
-零模型、确定性。被测的是 `services/research.py::LinkExpandingResearch`。
+零模型、确定性。被测的是 `sources/research.py::LinkExpandingResearch`。
 
 ★ 这条测试盯的是那句话：用户口径「给了他 URL 没说限定，他也应该自己多抓几个」。
   所以断言的重点不是"种子抓到了"，是**种子之外还抓到了别的**。
@@ -16,7 +16,7 @@ from typing import ClassVar
 import pytest
 
 from bobanana6.core.model import ResearchBudget, ResearchQuestion
-from bobanana6.services import research as R
+from bobanana6.sources import research as R
 from bobanana6.sources.store import SnapshotStore, SourceLedger
 
 
@@ -200,17 +200,24 @@ def test_an_unreachable_seed_does_not_sink_the_whole_hunt(site: ThreadingHTTPSer
         assert SnapshotStore(root=tmp_path).read(snap).strip(), "空内容不许冻成快照"
 
 
-def test_no_network_is_reachable_without_a_seed_or_channel(tmp_path: Path) -> None:
-    """没有种子、也没开渠道 ⇒ 老实返回空清单，不假装抓到东西。"""
+def test_no_evidence_is_a_named_abstention_not_an_empty_manifest(tmp_path: Path) -> None:
+    """★★ 红线：没有种子、也没开渠道 ⇒ **具名弃权**，不返回"共找到 0 份"的清单。
+
+    一份空清单会让块在零依据下照写 —— 那是幻觉的温床。错答会得分、异常不会，
+    所以"拿不到依据"必须是这条取数层自己的名字（`ResearchUnavailable`），
+    由 runner 变成具名的 `RunRefused`。
+    """
     quiet = R.LinkExpandingResearch(
         store=SnapshotStore(root=tmp_path),
         ledger=None,
         captured_at="2026-10-14T12:00:00",
         channels=(),
     )
-    found = quiet.research(ResearchQuestion(ref="q", question="啥也不给"), ResearchBudget())
-    assert len(found) == 1, "只该有那份清单"
-    assert "共找到 0 份材料" in SnapshotStore(root=tmp_path).read(found[0]).decode("utf-8")
+    with pytest.raises(R.ResearchUnavailable) as excinfo:
+        quiet.research(ResearchQuestion(ref="q", question="啥也不给"), ResearchBudget())
+    assert "produced no evidence" in str(excinfo.value)
+    # ★ 没有制造一份空快照
+    assert not list(tmp_path.glob("*.md")) and not list(tmp_path.glob("*.txt"))
 
 
 # --------------------------------------------------------------------------- #

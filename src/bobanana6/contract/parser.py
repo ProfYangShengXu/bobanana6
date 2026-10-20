@@ -370,6 +370,24 @@ def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:
             seeds_raw = ()
         if not isinstance(seeds_raw, Sequence) or isinstance(seeds_raw, (str, bytes)):
             _fail(source, f"{path}.seeds", "seeds must be a list", "type")
+        # ★ 重复 ref 是静默覆盖的入口（`_fetch_sources` 用 dict 收，后来者覆盖前者）。
+        #   "同一个名字指两样东西"必须当场说，不能等到取数才发现少了那份。
+        if any(existing.ref == raw["ref"] for existing in sources):
+            _fail(source, f"{path}.ref", f"duplicate source ref {raw['ref']!r}", "unique")
+        if kind == SOURCE_KIND_RESEARCH and str(raw.get("locator", "") or "").strip():  # blame: fail-closed — 缺 locator 正是研究来源的正常形态
+            # ★ 研究来源的"位置"就是要找的东西；再写一个 locator 只会是被静默忽略的一行
+            _fail(
+                source,
+                f"{path}.locator",
+                "a research source declares what to look for; a locator would be ignored",
+                "additionalProperties",
+            )
+        validated_seeds: list[str] = []
+        for seed in seeds_raw:
+            if not isinstance(seed, str) or not seed.strip():
+                # ★ 以前 `str(one)` 会把 123 / {...} 静默变成字符串，最后变成一条永远抓不到的地址
+                _fail(source, f"{path}.seeds", f"seed {seed!r} must be a non-empty string", "type")
+            validated_seeds.append(seed.strip())
         try:
             sources.append(
                 SourceRef(
@@ -380,7 +398,7 @@ def _sources(data: Mapping[str, Any], source: str) -> tuple[SourceRef, ...]:
                     module=str(raw.get("module", "") or ""),  # blame: fail-closed — 不属于任何模块 ⇒ 不参与写区，方向保守
                     kind=kind,
                     question=str(raw.get("question", "") or ""),  # blame: fail-closed — 拿不到就是空串；空串的研究来源在上面的 question 检查里已经被拒了
-                    seeds=tuple(str(one) for one in seeds_raw),
+                    seeds=tuple(validated_seeds),
                 )
             )
         except ValueError as exc:

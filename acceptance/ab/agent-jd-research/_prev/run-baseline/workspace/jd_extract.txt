@@ -1,0 +1,36 @@
+# AI Agent 岗位 JD 矩阵
+
+## 数据来源
+hunt:1 (lines 362-423)
+
+| 公司 | 岗位方向 | 学历/经验门槛 | 硬性技术栈 | 加分项 | 薪资量级 |
+|------|----------|--------------|------------|--------|----------|
+| 字节跳动 | 豆包大语言模型 Agent 应用架构工程师 | 博士/硕士 | Python/LangChain/LangGraph/A2A | 模型微调 | 未注明 |
+| 字节跳动 | Agent 软件架构师 - 移动 OS | 3-5 年 | Python | 70-100K·15 薪 (3-5Y) | 移动 OS 经验 |
+| 腾讯 | 腾讯混元大模型 Agent 开发工程师 | - | 腾讯混元/Agent 工程 | 混元大模型经验 | - |
+| 腾讯混元 (深圳) | 大模型 Agent 开发工程师 | - | - | - | - |
+| 月之暗面 | Kimi Agent Team 实习 | - | - | - | 6-7K/月 |
+| 智谱 AI | Agent 算法工程师/实习生 | - | ChatGLM/Llama | - | - |
+| Anthropic | Forward Deployed Engineer | - | Python/TypeScript/LangGraph | - | - |
+| Vercel | AI Engineer | 5+ 年 | Python/JS/TS/fine-tuned LLMs | - | $192K-288K 年薪 |
+
+## 技术指标
+
+| 领域 | 关键技术点 |
+|------|------------|
+| 模型层 | SFT/RLHF/LoRA、vLLM、TensorRT-LLM |
+| Agent 架构 | LangGraph(状态机/CrewAI)、A2A 协议 |
+| 工具调用 | Function Calling/Tool Calling/MCP |
+| RAG | 混合检索/rerank/RRF/检索优化 |
+| 上下文 | 长上下文压缩/记忆管理 |
+| 工程 | Docker/K8s/Prometheus/pytest |
+
+## 面试准备
+1. STAR 法项目描述
+2. 技术深入（LangGraph/Tool Calling/RAG）
+3. 评估与调试经验
+
+## 薪资概况
+- 国内：50-80 万/年
+- 北美：$180K-320K 底薪
+- 实习：6-7K/月

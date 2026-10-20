@@ -52,7 +52,7 @@ from .core.model import DEFAULT_LIMITS, Budget
 from .core.ports import LLMClient, OntologyPort, SourcePort
 from .decompose import BlockBudget, Decomposer, RoundBudget
 from .ontology import load_ontology_file
-from .services.research import LinkExpandingResearch
+from .sources.research import LinkExpandingResearch
 from .sources import LocatorFetcher, SnapshotFileReader, SnapshotStore, SourceLedger
 from .sources.form import forms_for
 

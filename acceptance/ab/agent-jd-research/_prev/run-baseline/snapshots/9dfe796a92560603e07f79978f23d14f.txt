@@ -1,0 +1,458 @@
+北京内推 | 智谱AI招聘Agent算法工程师/实习生-CSDN博客
+首页
+博客
+下载
+学习
+社区
+模型市场
+AI搜索
+AtomGit
+InsCode
+技术会议
+墨衍
+MoGrow
+收藏
+历史
+会员中心
+创作中心
+北京内推 | 智谱AI招聘Agent算法工程师/实习生
+PaperWeekly
+墨衍会员
+·
+AI 创作全网分发
+墨衍智能分发
+本文由作者通过墨衍一键同步至各平台
+1 分发平台
+1.1k 累计阅读
+1.1k 平均单平台
+已同步平台
+CSDN
+微信公众号
+微博
+知乎
+掘金
+百家号
+博客园
+抖音
+小红书
+你的文章也可以这样分发
+墨衍会员 ¥399 起/年，写一次发全网
+我也要 →
+码龄9年
+关注
+转载
+最新推荐文章于 2026-09-04 14:11:37 发布
+1.1k 阅读
+AI 写同款 ·
+GEO 优化
+›
+智谱 AI - 算法 实习生 （知识图谱方向）实习面试记录
+没错和我的经历可以说是match得不能再match了，但是还是挂了hh。
+阅读详情
+合适的工作难找？最新的招聘信息也不知道？
+AI 求职为大家 精选人工智能领域最新鲜的招聘信息 ，助你先人一步投递，快人一步入职！
+智谱AI
+北京智谱华章科技有限公司 （简称“智谱AI”）致力于打造新一代认知智能大模型，专注于做大模型的中国创新。公司合作研发了中英双语千亿级超大规模预训练模型GLM-130B，并基于此推出对话模型ChatGLM，开源单卡版模型ChatGLM-6B。同时，团队还打造了AIGC模型及产品矩阵，包括AI提效助手智谱清言（chatglm.cn）、高效率代码模型CodeGeeX、多模态理解模型CogVLM和文生图模型CogView等。
+公司践行Model as a Service（MaaS）的市场理念，推出大模型MaaS开放平台（https://open.bigmodel.cn/），打造高效率、通用化的“模型即服务”AI开发新范式。通过认知大模型链接物理世界的亿级用户，智谱AI基于完整的模型生态和全流程技术支持，为千行百业带来持续创新与变革，加速迈向通用人工智能的时代。
+Agent算法工程师/实习生
+坐标：北京
+岗位职责
+1. 评测和优化大模型智能体前沿技术在实际业务场景的效果；
+2. 根据业务场景智能体相关需求设计微调方案、适配算法和调优工程方案；
+3. 参与大模型智能体产品相关的功能设计、算法开发和迭代优化；
+4. 调研大模型智能体前沿技术趋势并保持跟踪，深入理解和实验后将技术应用到实际业务场景。
+岗位要求
+1. 计算机或相关专业本科以上学历，硕士博士优先；
+2. 对大模型新技术感兴趣，具有良好的英文阅读能力，可以快速理解前沿论文和技术文档并评测效果；
+3. 熟悉Python等编程语言，具备扎实的编程功底；
+4. 具备NLP大模型算法知识，有ChatGLM或Llama等模型的使用或训练经验者优先；
+5. 出色的问题解决能力和创新能力，能够解决复杂的技术挑战。
+发展前景
+1. 大模型行业持续高速发展，市场空间巨大；
+2. 工作氛围：积极向上，结果导向，重视效率。
+投递方式
+📪 junbo.yu@aminer.cn
+邮件标题和简历标明： 姓名-岗位名称-AI求职
+实习内推
+阿里达摩院多模态团队 ｜ 美团NLP中心 ｜ 上海算法创新研究院 ｜ 蔚来汽车 ｜ 上海市数字医学创新中心 ｜ 联想研究院 ｜ 阿里通义XR实验室 ｜ 阿里淘天集团 ｜ 蚂蚁集团机器智能团队 ｜ 华为诺亚推荐搜索实验室 ｜ 微软亚洲研究院DKI组 ｜ 微软亚洲研究院机器学习组 ｜ AMD北京AI算法团队 ｜ 腾讯QQ影像中心 ｜ 度小满科技创新业务部 ｜ 零一万物 ｜ 京东智能客服团队 ｜ 北京通用人工智能研究院 ｜ 百度文心一言团队 ｜ 微软亚洲互联网工程院 ｜ 华为诺亚方舟实验室 ｜ 阿里通义实验室 ｜ 度小满金融数字人团队 ｜ 腾讯基础微信＆视频号团队 ｜ 微软WWE大模型团队 ｜ 中电信AI公司 ｜ VIVO影像算法研究部 ｜ 北京智源人工智能研究院 ｜ 字节跳动国际化短视频团队 ｜ 小红书智能创作团队 ｜ 微软亚洲研究院
+校招岗位
+华为云算法创新Lab ｜ 智源人工智能研究院 ｜ 阿里云PAI深度学习算法团队 ｜ 秘塔科技 ｜ 美柚研究院 ｜ 百度搜索策略部 ｜ 华为云算法创新Lab ｜ 淘宝搜索算法团队 ｜ 百川智能 ｜ IDEA数字经济研究院 ｜ 百度搜索策略部 ｜ 阿里达摩院视觉技术实验室 ｜ 地平线 ｜ 阿里巴巴淘天集团 ｜ 阿里达摩院对话智能团队 ｜ 百度文心一言团队 ｜ 京东零售内容算法部 ｜ 蚂蚁网商银行智能引擎团队 ｜ 腾讯AI Lab决策智能中心 ｜ 理想汽车智能座舱团队 ｜ 阿里通义实验室对话智能团队 ｜ 元象XVERSE ｜ 蚂蚁集团算法数据技术团队 ｜ 腾讯游戏AI大语言模型团队 ｜ 秘塔科技 ｜ 上海算法创新研究院 ｜ VIVO影像算法研究部
+社招岗位
+阿里通义实验室对话智能团队 ｜ 百度AIGC团队 ｜ 光明实验室媒体内容生成团队 ｜ 奇虎360 ｜ 美团平台 ｜ 元象XVERSE ｜ Shopee内容搜索团队 ｜ VIVO影像算法研究部 ｜ 蚂蚁集团机器智能团队 ｜ 腾讯游戏AI大语言模型团队 ｜ 京东广告研发部 ｜ 阿里通义实验室对话智能团队 ｜ NVIDIA中国 ｜ 腾讯混元大模型团队 ｜ 秘塔科技 ｜ 途深智合 ｜ 蚂蚁集团风险智能团队 ｜ 昆仑万维AI游戏团队 ｜ 小红书社区搜索组 ｜ 阿里达摩院多模态团队 ｜ 上海算法创新研究院 ｜ 新东方教育科技集团 ｜ 快手大模型训练引擎团队 ｜ 小红书 ｜ 快手大模型中心 ｜ VIVO影像算法研究部 ｜ 小红书智能创作团队 ｜ 京东零售九数算法中台
+高校招生
+香港理工大学MIND实验室 ｜ 香港理工大学李青教授 ｜ 大湾区大学杨斯崑老师 ｜ 墨尔本大学Ting Dang老师 ｜ 南方科技大学荆炳义教授 ｜ 香港科技大学（广州）白云老师 ｜ 佐治亚大学卢国玉老师 ｜ 北京大学孔桂兰老师 ｜ 北京大学张辉帅老师 ｜ 香港科技大学（广州）王泽宇老师 ｜ 约翰霍普金斯大学Alan Yuille教授 ｜ 香港科技大学（广州）胡旭明老师 ｜ 清华大学孙茂松教授 ｜ 浙江大学黄正行老师 ｜ 香港中文大学（深圳）官永涛教授 ｜ 澳洲国立大学张梦璇老师 ｜ 阿联酋MBZUAI ｜ 南方科技大学大数据创新中心 ｜ 新加坡管理大学周攀老师 ｜ 奥本⼤学Yang Zhou老师 ｜ 东方理工大学张伟课题组 ｜ 香港大学陈怡老师 ｜ 香港理工大学姚岱教授 ｜ 哈尔滨工业大学（深圳）万佳教授 ｜ 香港科技大学（广州）骆昱宇教授 ｜ 澳门大学郑哲东教授 ｜ 大湾区大学乔子越老师 ｜ 西湖大学蓝振忠老师
+加入社群 🌟
+为了更好地了解和满足大家的需求，我们建立了 「求职者社群」 。
+加入 AI 求职社群，你可以享有 招聘需求曝光 、 获取最新面试经验 、 校招准备攻略 、 硕博招生 和 独家内推渠道 等服务。
+扫描下方小助手的微信，pick 你心仪的岗位~
+如何发布招聘
+AI 求职是「PaperWeekly」旗下聚焦人工智能领域的招聘平台，涵盖高校硕博招生、博士后招募、企业校招、社招、实习和内推等。
+目前已有百度、阿里、腾讯、字节跳动等企业发布内推岗位，欢迎大家订阅关注、发布岗位， 如果你也想对公司和在招职位进行更多曝光 ，请联系我们的栏目负责人（微信：pwbot02）。
+·
+·
+关注博主即可阅读全文
+·
+收录于
+当前文章被以下社区和专栏收录：
+标签
+#人工智能
+原文链接： https://mp.weixin.qq.com/s?__biz=MzIwMTc4ODE0Mw==&mid=2247660509&idx=4&sn=28f44e65417d9c3dcc17359ac5b0d1e5&chksm=97b795c67ea185b98a110cbbc635e9a4d6aa840858e9249315c2a4f13e9b83c0fb443965858f&scene=126&sessionid=0 >
+Agent 工程师 不是调Prompt的：本质是 AI 应用交付 工程师
+随着大模型技术的普及， AI Agent 正从概念走向产业落地，企业不再满足于“能聊天”的模型，而是需要能稳定处理业务问题的智能体系统。 Agent 工程的核心并非 算法 探索，而是将模型能力转化为可交付的软件产品，这要求 工程师 具备完整的工程化思维：从任务拆解、工具调用到大模型RAG知识库搭建，再到可观测性与效果评估，每一步都需要软件交付的方法论做支撑。提示词工程也并非简单写写指令，而是充当业务逻辑的约束层。结合MCP与Function Calling的选型实践， Agent 工程师 的本质是解决真实场景中的不确定性，让大模
+阅读详情
+相关推荐
+换一换
+AI Agent 开发实战：基于LangCh ai n与RAG构建智能问答助手
+在 人工智能 应用开发领域，大语言模型（LLM）已成为核心技术。其工作原理是通过海量数据训练，学习语言规律与知识表示，从而具备强大的文本生成与理解能力。然而，LLM存在知识更新滞后与“幻觉”问题，这限制了其在专业领域的直接应用。检索增强生成（RAG）技术通过引入外部知识库，有效解决了这一痛点，它让模型在回答前先检索相关文档，从而生成更准确、可靠的答案。这项技术的核心价值在于将通用大模型与特定领域知识结合，极大地拓展了 AI 在知识密集型任务中的应用场景。LangCh ai n作为流行的开发框架，通过提供标准化的组件（如
+weixin_34258838的博客
+315
+Agent 工程师 ：下一个十年的黄金职业
+摘要： 2025年将迎来 Agent 工程师 的崛起，其核心是构建具备目标、记忆、工具调用和自主决策的大模型系统（如LangCh ai n、AutoGPT）。与传统Prompt工程不同， Agent 工程师 需解决模型稳定性、工具系统设计（API/数据库调用）、记忆系统（向量库）及多 Agent 协作等复杂问题，驱动企业级应用（如智能客服、自动代码生成）。核心技术栈涵盖编程（Python/Java）、大模型控制、RAG优化及分布式架构能力。未来趋势显示， Agent 系统将成为企业标配， 推 动 工程师 从单轮问答向 AI 工作流架构师转型。
+buhuibianchengaa的博客
+1407
+AI 全栈开发实战：LangCh ai n.js与Nuxt.js构建智能应用
+随着 人工智能 技术的普及， AI 能力正从 算法 领域下沉为全栈开发者的必备技能。其核心原理在于将大语言模型（LLM）通过工程化框架进行编排和集成，从而赋予应用智能化能力。这一转变的技术价值在于，开发者无需深入底层模型训练，即可高效构建具备对话、 推 理和工具调用功能的智能应用。在应用场景上， AI 全栈开发广泛适用于智能客服、内容生成、数据分析助手和自动化工作流等领域。本文以**LangCh ai n.js**和**Nuxt.js**这一黄金组合为例，深入探讨如何通过模块化框架实现 AI 智能体（ Agent ）的编排，并利用全栈元框
+weixin_30788619的博客
+394
+AI 应用开发 工程师 （ Agent 方向）：打造未来的智能体架构！
+在 AI 领域， AI Agent （智能体） 正在成为最热门的方向之一。从 智能客服 到 自动化办公助手，再到 企业知识管理， AI Agent 正在改变人与机器的交互方式。那么， AI 应用开发 工程师 （ Agent 方向） 是做什么的？需要掌握哪些技能？如何通过实战项目提升能力？今天，我们就来深度解析这个高薪热门岗位！🔥 AI Agent ，简单来说，就是一个具备 自主决策、任务执行、知识检索、 推 理优化 的智能体。它可以帮助企业 自动化日常任务、优化决策、提升办公效率，甚至成为企业的“ AI 大脑”。
+AI手套的博客
+1万+
+从林俊旸跨城任职看大模型人才流动与 AI 开发者机遇
+在大模型产业从技术验证走向应用落地的关键阶段，顶尖 AI 人才的跨区域流动往往折射出更深层的产业生态变迁。当算力、数据、 算法 与场景成为城市竞争的核心要素，人才不再单纯属于某一家公司，而是成为产业链配置的关键节点。理解这一趋势，对 AI 开发者而言，意味着需要重新审视自身的技术栈选择与职业发展路径。从 招聘 JD的关键词提取，到政策文本的结构化对比，再到基于向量检索的本地知识库构建，数据工具能帮助我们以更理性的方式追踪产业动向。本文从产业观察切入，结合工程实践案例，探讨开发者应如何在大模型时代提升工程化能力、行业认知与数
+344
+基于matlab的车牌识别(含子程序)
+基于matlab的车牌识别系统一、对车辆图像进行预处理1.载入车牌图像：function [d]=m ai n(jpg)
+[filename, pathname] = uigetfile({'*.jpg', 'JPEG 文件(*.jpg)'});
+if(filename == 0), return, end
+global FILENAME %定义全局变量
+FILENAME = [pathname f...
+TuTu998的博客
+4万+
+如何成为 Agent 工程师 ：学习路径、核心技能与职业规划
+与传统LLM开发不同， Agent 工程师 需融合模型 推 理、工具调用、流程编排等技术，赋予 AI 更接近人类的多步决策能力。：LangCh ai n（流程编排）、Llam aI ndex（数据检索）、AutoGen（多 Agent 协作）。：深入掌握BERT、GPT系列模型，理解RAG（检索增强生成）、ReAct（ 推 理-行动循环）等机制。：Dify（低代码 Agent 平台）、Milvus（向量数据库）、FastAPI（服务部署）。：掌握 Agent 的规划（Planning）、记忆（Memory）、知识库集成等模块设计。
+qq_63961628的博客
+3122
+模板匹配加速之金字塔分层搜索
+图像金字塔是一种多分辨率图像表示方法，它通过一系列逐渐缩小或放大的图像来表示原始图像的不同尺度。高斯金字塔（Gaussian Pyramid）：通过不断下采样（降采样）生成更小的图像。拉普拉斯金字塔（Laplacian Pyramid）：通过高斯金字塔和差分操作生成一组残差图像。在模板匹配中，我们主要使用高斯金字塔来实现多尺度匹配。金字塔灰度模板匹配通过多尺度搜索策略，在保持较高准确率的同时显著提升匹配速度，尤其适用于：高分辨率图像处理实时检测系统移动端设备等资源受限场景。
+weixin_44969144的博客
+1705
+中国六家领先 AI 巨头 招聘 信息汇总：年薪18-60w，福利待遇与投递链接全览！
+本文汇总了中国六家领先 AI 和科技公司（月之暗面、阿里云、深度求索、 智谱 华章、寒武纪和滴滴自动驾驶）的 招聘 信息，涵盖大模型研发、 算法 工程等热门岗位。各公司提供优厚福利待遇，包括股票期权、住房补贴、免费餐食等。文章详细列出各公司的在招岗位及投递链接，为 AI 从业者和大模型爱好者提供求职参考，助力把握行业人才需求动态。
+Android23333的博客
+1574
+避开这些坑！baostock获取股票数据时最容易犯的5个错误（Python实战）
+本文针对使用Python和baostock库获取股票历史数据时常见的五大陷阱，提供了实战解决方案。重点剖析了登录状态验证、参数配置、数据解析、批量操作效率及数据一致性校验等关键环节，帮助开发者构建稳健高效的数据获取流程，避免因细节疏忽导致的数据错误或性能瓶颈。
+websocket5live的博客
+1389
+芒果YOLOv8改进16：检测头Head篇：即插即用｜新颖轻量化非对称多级压缩LADH检测头，原创改进适配YOLOv8高效检测头，检测头新颖性改进，全网首发独一份
+YOLOv8代码改进教程：即插即用｜新颖轻量化非对称多级压缩LADH检测头🎈
+包括YOLOv5、YOLOv7、YOLOv8等模型改进
+5583
+年薪18-60w！大模型开发者必看！中国 AI 巨头 招聘 全解析，附福利待遇与投递链接，建议收藏备用！
+本文汇总了中国六家领先 AI 和科技公司（月之暗面、阿里云、深度求索、 智谱 华章、寒武纪和滴滴自动驾驶）的 招聘 信息，涵盖大模型研发、 算法 工程等热门岗位。各公司提供优厚福利待遇，包括股票期权、住房补贴、免费餐食等。文章详细列出各公司的在招岗位及投递链接，为 AI 从业者和大模型爱好者提供求职参考，助力把握行业人才需求动态。
+2401_85343303的博客
+1628
+大数据领域数据产品的团队激励与绩效管理
+在大数据领域，数据产品的成功离不开高效协作的团队。团队激励与绩效管理的目的在于激发团队成员的工作热情和创造力，提高工作效率和质量，确保数据产品能够按时、高质量地交付。本文章的范围涵盖了大数据领域数据产品团队激励与绩效管理的各个方面，包括激励机制的设计、绩效评估的方法、团队沟通与协作等。本文将按照以下结构进行阐述：首先介绍核心概念与联系，明确相关概念的定义和相互关系；接着讲解核心 算法 原理和具体操作步骤，为团队激励与绩效管理提供理论支持和实践指导；然后分析数学模型和公式，帮助读者深入理解绩效评估的原理；
+Java大师兄的博客
+1007
+Java 工程师 如何转型 AI Agent 开发？从原理到Spring Boot实战全解析
+在 人工智能 技术快速迭代的今天，大语言模型（LLM）与智能体（ Agent ）正成为企业级应用的核心方向。 Agent 的本质并非单一 算法 ，而是一种融合感知、规划与工具调用的系统架构，其工程落地高度依赖后端技术栈。对于长期深耕Java生态的开发者而言，Spring Boot、微服务与高并发经验在 Agent 的工程化过程中具备天然优势，而Function Calling机制则为模型与业务系统之间搭建了标准化的交互桥梁。本文从Prompt设计、工具调用原理出发，结合基于Spring Boot的三方API调用实战案例，系统拆
+weixin_33782386的博客
+460
+21、深入了解SELinux安全系统与/proc文件系统
+本文深入探讨了SELinux安全系统与/proc文件系统的原理及实际应用。详细介绍了SELinux的安全上下文、域转换、运行模式、角色管理以及策略查看工具seinfo的使用；同时解析了/proc文件系统的结构与功能，涵盖进程信息查看、系统资源监控及性能优化方法。结合SELinux与/proc的协同应用，提供了系统问题排查流程与安全管理最佳实践，帮助用户提升Linux系统的安全性与稳定性。
+ik678901234的博客
+56
+YOLOv8 交通管理三大核心功能 —— 二、违章检测系统 详细解释及代码完整示例
+YOLOv8交通违章检测系统
+u010117029的博客
+485
+被裁的前端在学 LangCh ai n，后端在补 Prompt： Agent 时代到底需要什么人？
+方向薪资门槛稀缺度转型难度 Agent 应用开发20-40K中低★★☆RAG 工程师 25-40K低低★☆☆ Agent 架构师40-70K+高极高★★★★Prompt 工程师 20-35K低中★★☆工具链/平台35-60K高高★★★垂直行业 Agent 25-50K中中★★★选方向的核心原则：不要只看薪资，看你现在的经验能往哪个方向"迁移"。后端开发选应用开发或架构师，前端选应用开发或 Prompt 工程，有行业经验的选垂直方向。
+qq_34219119的博客
+255
+深度学习工具包 DeepLearningToolbox
+深度学习工具包Deprecation notice.-----This toolbox is outdated and no longer m ai nt ai ned.There are much better tools av ai lable for deep learning than this toolbox, e.g. [Theano](http://deeplearning.net/software/theano/), [torch](http://torch.ch/) or [tensorflow](http://www.tensorflow.org/)I would suggest you use one of the tools mentioned above rather than use this toolbox.Best, Rasmus.DeepLearnToolbox================A Matlab toolbox for Deep Learning.Deep Learning is a new subfield of machine learning that focuses on learning deep hierarchical models of data.It is inspired by the human br ai n's apparent deep (layered, hierarchical) architecture.A good overview of the theory of Deep Learning theory is[Learning Deep Architectures for AI ](http://www.iro.umontreal.ca/~bengioy/papers/ftml_book.pdf)For a more informal introduction, see the following videos by Geoffrey Hinton and Andrew Ng.* [The Next Generation of Neural Networks](http://www.youtube.com/watch?v=AyzOUbkUf3M) (Hinton, 2007)* [Recent Developments in Deep Learning](http://www.youtube.com/watch?v=VdIURAu1-aU) (Hinton, 2010)* [Unsupervised Feature Learning and Deep Learning](http://www.youtube.com/watch?v=ZmNOAtZIgIk) (Ng, 2011)If you use this toolbox in your research please cite [Prediction as a candidate for learning deep hierarchical models of data](http://www2.imm.dtu.dk/pubdb/views/publication_det ai ls.php?id=6284)```@MASTERSTHESIS\{IMM2012-06284, author = "R. B. Palm", title = "Prediction as a candidate for learning deep hierarchical models of data", year = "2012",}```Contact: rasmusbergpalm at gm ai l dot comDirectories included in the toolbox-----------------------------------`NN/` - A library for Feedforward Backpropagation Neural Networks`CNN/` - A library for Convolutional Neural Networks`DBN/` - A library for Deep Belief Networks`SAE/` - A library for Stacked Auto-Encoders`CAE/` - A library for Convolutional Auto-Encoders`util/` - Utility functions used by the libraries`data/` - Data used by the examples`tests/` - unit tests to verify toolbox is workingFor references on each library check REFS.mdSetup-----1. Download.2. addpath(genpath('DeepLearnToolbox'));Example: Deep Belief Network---------------------```matlabfunction test_example_DBNload mnist_uint8;tr ai n_x = double(tr ai n_x) / 255;test_x = double(test_x) / 255;tr ai n_y = double(tr ai n_y);test_y = double(test_y);%% ex1 tr ai n a 100 hidden unit RBM and visualize its weightsrand('state',0)dbn.sizes = [100];opts.numepochs = 1;opts.batchsize = 100;opts.momentum = 0;opts.alpha = 1;dbn = dbnsetup(dbn, tr ai n_x, opts);dbn = dbntr ai n(dbn, tr ai n_x, opts);figure; visualize(dbn.rbm{1}.W'); % Visualize the RBM weights%% ex2 tr ai n a 100-100 hidden unit DBN and use its weights to initialize a NNrand('state',0)%tr ai n dbndbn.sizes = [100 100];opts.numepochs = 1;opts.batchsize = 100;opts.momentum = 0;opts.alpha = 1;dbn = dbnsetup(dbn, tr ai n_x, opts);dbn = dbntr ai n(dbn, tr ai n_x, opts);%unfold dbn to nnnn = dbnunfoldtonn(dbn, 10);nn.activation_function = 'sigm';%tr ai n nnopts.numepochs = 1;opts.batchsize = 100;nn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.10, 'Too big error');```Example: Stacked Auto-Encoders---------------------```matlabfunction test_example_SAEload mnist_uint8;tr ai n_x = double(tr ai n_x)/255;test_x = double(test_x)/255;tr ai n_y = double(tr ai n_y);test_y = double(test_y);%% ex1 tr ai n a 100 hidden unit SDAE and use it to initialize a FFNN% Setup and tr ai n a stacked denoising autoencoder (SDAE)rand('state',0)sae = saesetup([784 100]);sae.ae{1}.activation_function = 'sigm';sae.ae{1}.learningRate = 1;sae.ae{1}.inputZeroMaskedFraction = 0.5;opts.numepochs = 1;opts.batchsize = 100;sae = saetr ai n(sae, tr ai n_x, opts);visualize(sae.ae{1}.W{1}(:,2:end)')% Use the SDAE to initialize a FFNNnn = nnsetup([784 100 10]);nn.activation_function = 'sigm';nn.learningRate = 1;nn.W{1} = sae.ae{1}.W{1};% Tr ai n the FFNNopts.numepochs = 1;opts.batchsize = 100;nn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.16, 'Too big error');```Example: Convolutional Neural Nets---------------------```matlabfunction test_example_CNNload mnist_uint8;tr ai n_x = double(reshape(tr ai n_x',28,28,60000))/255;test_x = double(reshape(test_x',28,28,10000))/255;tr ai n_y = double(tr ai n_y');test_y = double(test_y');%% ex1 Tr ai n a 6c-2s-12c-2s Convolutional neural network %will run 1 epoch in about 200 second and get around 11% error. %With 100 epochs you'll get around 1.2% errorrand('state',0)cnn.layers = { struct('type', 'i') %input layer struct('type', 'c', 'outputmaps', 6, 'kernelsize', 5) %convolution layer struct('type', 's', 'scale', 2) %sub sampling layer struct('type', 'c', 'outputmaps', 12, 'kernelsize', 5) %convolution layer struct('type', 's', 'scale', 2) %subsampling layer};cnn = cnnsetup(cnn, tr ai n_x, tr ai n_y);opts.alpha = 1;opts.batchsize = 50;opts.numepochs = 1;cnn = cnntr ai n(cnn, tr ai n_x, tr ai n_y, opts);[er, bad] = cnntest(cnn, test_x, test_y);%plot mean squared errorfigure; plot(cnn.rL);assert(er<0.12, 'Too big error');```Example: Neural Networks---------------------```matlabfunction test_example_NNload mnist_uint8;tr ai n_x = double(tr ai n_x) / 255;test_x = double(test_x) / 255;tr ai n_y = double(tr ai n_y);test_y = double(test_y);% normalize[tr ai n_x, mu, sigma] = zscore(tr ai n_x);test_x = normalize(test_x, mu, sigma);%% ex1 vanilla neural netrand('state',0)nn = nnsetup([784 100 10]);opts.numepochs = 1; % Number of full sweeps through dataopts.batchsize = 100; % Take a mean gradient step over this many samples[nn, L] = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.08, 'Too big error');%% ex2 neural net with L2 weight decayrand('state',0)nn = nnsetup([784 100 10]);nn.weightPenaltyL2 = 1e-4; % L2 weight decayopts.numepochs = 1; % Number of full sweeps through dataopts.batchsize = 100; % Take a mean gradient step over this many samplesnn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');%% ex3 neural net with dropoutrand('state',0)nn = nnsetup([784 100 10]);nn.dropoutFraction = 0.5; % Dropout fraction opts.numepochs = 1; % Number of full sweeps through dataopts.batchsize = 100; % Take a mean gradient step over this many samplesnn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');%% ex4 neural net with sigmoid activation functionrand('state',0)nn = nnsetup([784 100 10]);nn.activation_function = 'sigm'; % Sigmoid activation functionnn.learningRate = 1; % Sigm require a lower learning rateopts.numepochs = 1; % Number of full sweeps through dataopts.batchsize = 100; % Take a mean gradient step over this many samplesnn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');%% ex5 plotting functionalityrand('state',0)nn = nnsetup([784 20 10]);opts.numepochs = 5; % Number of full sweeps through datann.output = 'softmax'; % use softmax outputopts.batchsize = 1000; % Take a mean gradient step over this many samplesopts.plot = 1; % enable plottingnn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');%% ex6 neural net with sigmoid activation and plotting of validation and tr ai ning error% split tr ai ning data into tr ai ning and validation datavx = tr ai n_x(1:10000,:);tx = tr ai n_x(10001:end,:);vy = tr ai n_y(1:10000,:);ty = tr ai n_y(10001:end,:);rand('state',0)nn = nnsetup([784 20 10]); nn.output = 'softmax'; % use softmax outputopts.numepochs = 5; % Number of full sweeps through dataopts.batchsize = 1000; % Take a mean gradient step over this many samplesopts.plot = 1; % enable plottingnn = nntr ai n(nn, tx, ty, opts, vx, vy); % nntr ai n takes validation set as last two arguments (optionally)[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');```[![Bitdeli Badge](https://d2weczhvl823v0.cloudfront.net/rasmusbergpalm/deeplearntoolbox/trend.png)](https://bitdeli.com/free "Bitdeli Badge")
+2025大模型人才缺口500万，这三类人最吃香！ AI 程序员薪资翻倍指南
+2025年 AI 人才市场呈现高需求与高缺口并存态势，相关岗位同比增长10倍，但人才缺口仍达500万。最抢手岗位包括大模型 算法 工程师 、生成式 AI 工程师 和搜索 算法 工程师 。企业最欢迎三类人才：具备全流程落地能力的技术人、 AI +行业的复合型人才以及技能匹配度高的新人。求职者应关注细分TOP公司和 AI 独角兽企业，利用专业 招聘 渠道提高成功率。
+libaiup的博客
+702
+win10 跳过U8环境检测的IE WebControls.rar
+win10 安装u8的时候 提示IE WebControls 不通过，这个工具可以欺骗u8的检查。 跳过U8环境检测的IE WebControls。提示导入失败后，重新检测通过。
+霍尼韦尔SoftMaster使用说明
+霍尼韦尔SoftMaster使用说明
+Agent 时代： AI 从智力竞赛转向生产力流水线
+Agent 不是新模型类型，而是 AI 落地的工程范式升级——它将大模型能力封装为可调度、可计量、可运维的智能单元。其核心原理在于任务编排、工具调用与状态管理的闭环控制，技术价值体现在端到端可靠性、毫秒级响应与成本可控性。典型应用场景包括智能巡店、订单履约、客服工单处理等需7×24小时稳定交付的业务流。随着MiniMax M2.7自我进化、Open AI GPT-5.4 nano小模型量产化、OpenClaw框架生态成型， AI 正从‘能答对多少题’转向‘一小时跑完多少订单’。本文聚焦 Agent 在真实产线中的工程实践逻
+weixin_30607659的博客
+1072
+复分析 阿尔福斯(Ahlfors) 第三版答案 英文
+答案分为十章，有部分习题没有答案，全英文复分析阿尔福斯(Ahlfors) 第三版答案
+2026年 AI 风口已至！收藏这份高薪赛道指南（小白程序员必看）
+如果你背景硬（名校+论文+代码强）：去大模型 算法 或 AI Infra，天花板最高。如果你在大厂做后端/产品：转 AI Agent ，门槛适中，机会多。如果你是机械/自动化背景：去具身智能/机器人，竞争小，缺口大。如果你是内容创作者：学会用 AI GC工具，做"懂 AI 的创意人"。如果你啥都不会：先别想着转 AI 了，从Python和机器学习基础开始学起。最后说个数据：2026年 AI 岗位的平均薪资是新经济行业平均的1.26倍，但人才供需比只有0.97——这意味着，只要你够格，工作会主动找你。
+大模型教程的博客
+939
+收藏这份大模型行业报告！700亿市场规模下的学习机会与高薪岗位
+中国大模型市场快速发展，2024年规模已达294亿元，预计2026年将突破700亿元。阿里、字节、科大讯飞等企业占据第一梯队，DeepSeek、 智谱 AI 等新锐企业构成第二梯队。行业人才需求旺盛，字节跳动等企业大模型 算法 岗年薪可达百万级别，为开发者提供了高薪就业机会。
+Trb701012的博客
+849
+2026年 AI 赛道风口已定！这5大细分领域值得收藏，带你找到高薪高薪岗位
+如果你背景硬（名校+论文+代码强）：去大模型 算法 或 AI Infra，天花板最高。如果你在大厂做后端/产品：转 AI Agent ，门槛适中，机会多。如果你是机械/自动化背景：去具身智能/机器人，竞争小，缺口大。如果你是内容创作者：学会用 AI GC工具，做"懂 AI 的创意人"。如果你啥都不会：先别想着转 AI 了，从Python和机器学习基础开始学起。最后说个数据：2026年 AI 岗位的平均薪资是新经济行业平均的1.26倍，但人才供需比只有0.97——这意味着，只要你够格，工作会主动找你。
+weixin_72959097的博客
+859
+应届生想做 AI 应用开发，这些互联网公司值得优先考虑
+对于想入局 AI 应用开发的应届生，选工作本质是选择技术栈、业务场景与个人成长路径。本文梳理平台大厂、大模型创业公司、成熟互联网 AI 转型企业三类机会，结合 2027 届秋招现状，拆解各自优势、岗位特点，给求职同学提供参考思路。
+dydm_13128的专栏
+204
+被裁边缘的35岁，我用2个月转行 AI 大模型：写给所有焦虑的中年人
+如果你是一个35岁的后端开发，看着部门群里“优化名单”四个字心跳加速，慌吗？
+如果你是一个38岁的产品经理，发现投出去的简历已读不回，而你连Transformer是什么都说不清，急吗？
+如果你是一个40岁的运维老手，公司开始用 AI 智能体自动处理告警，而你只能眼睁睁看着自己被边缘化，怎么办？
+m0_59162248的博客
+1099
+年薪百万、需求暴涨42倍：2026年中美大厂FDE人才薪资对比
+【摘要】前沿部署 工程师 （FDE）成为2026年 AI 领域热门岗位，负责将 AI 模型嵌入企业生产系统。美国Open AI 、Anthropic等巨头成立专门部署子公司，FDE岗位增长729%，资深年薪达$78.5万。中国字节、腾讯等大厂FDE年包70-109万成常态。行业瓶颈从模型性能转向落地应用，FDE需兼具技术、业务和沟通能力，适合资深开发者转型。尽管高薪诱人，但Gartner预测70%企业可能因成本放弃FDE方案。 AI 商业化正从"卖工具"转向"卖结果"，FDE的核心价值在
+2601_94865727的博客
+785
+上一篇：
+揭秘AI幻觉！GPT-4V存在视觉编码漏洞，清华联合NUS提出LLaVA-UHD
+下一篇：
+ICLR 2024 | 知易行难：探索大模型价值观的全新动态评测范式
+AI Agent 开发实战：基于LangCh ai n与RAG构建智能问答助手
+weixin_34258838的博客
+08-23
+315
+在 人工智能 应用开发领域，大语言模型（LLM）已成为核心技术。其工作原理是通过海量数据训练，学习语言规律与知识表示，从而具备强大的文本生成与理解能力。然而，LLM存在知识更新滞后与“幻觉”问题，这限制了其在专业领域的直接应用。检索增强生成（RAG）技术通过引入外部知识库，有效解决了这一痛点，它让模型在回答前先检索相关文档，从而生成更准确、可靠的答案。这项技术的核心价值在于将通用大模型与特定领域知识结合，极大地拓展了 AI 在知识密集型任务中的应用场景。LangCh ai n作为流行的开发框架，通过提供标准化的组件（如
+Agent 工程师 ：下一个十年的黄金职业
+buhuibianchengaa的博客
+03-04
+1407
+摘要： 2025年将迎来 Agent 工程师 的崛起，其核心是构建具备目标、记忆、工具调用和自主决策的大模型系统（如LangCh ai n、AutoGPT）。与传统Prompt工程不同， Agent 工程师 需解决模型稳定性、工具系统设计（API/数据库调用）、记忆系统（向量库）及多 Agent 协作等复杂问题，驱动企业级应用（如智能客服、自动代码生成）。核心技术栈涵盖编程（Python/Java）、大模型控制、RAG优化及分布式架构能力。未来趋势显示， Agent 系统将成为企业标配， 推 动 工程师 从单轮问答向 AI 工作流架构师转型。
+AI 全栈开发实战：LangCh ai n.js与Nuxt.js构建智能应用
+weixin_30788619的博客
+08-21
+394
+随着 人工智能 技术的普及， AI 能力正从 算法 领域下沉为全栈开发者的必备技能。其核心原理在于将大语言模型（LLM）通过工程化框架进行编排和集成，从而赋予应用智能化能力。这一转变的技术价值在于，开发者无需深入底层模型训练，即可高效构建具备对话、 推 理和工具调用功能的智能应用。在应用场景上， AI 全栈开发广泛适用于智能客服、内容生成、数据分析助手和自动化工作流等领域。本文以**LangCh ai n.js**和**Nuxt.js**这一黄金组合为例，深入探讨如何通过模块化框架实现 AI 智能体（ Agent ）的编排，并利用全栈元框
+AI 应用开发 工程师 （ Agent 方向）：打造未来的智能体架构！
+AI手套的博客
+03-13
+1万+
+在 AI 领域， AI Agent （智能体） 正在成为最热门的方向之一。从 智能客服 到 自动化办公助手，再到 企业知识管理， AI Agent 正在改变人与机器的交互方式。那么， AI 应用开发 工程师 （ Agent 方向） 是做什么的？需要掌握哪些技能？如何通过实战项目提升能力？今天，我们就来深度解析这个高薪热门岗位！🔥 AI Agent ，简单来说，就是一个具备 自主决策、任务执行、知识检索、 推 理优化 的智能体。它可以帮助企业 自动化日常任务、优化决策、提升办公效率，甚至成为企业的“ AI 大脑”。
+从林俊旸跨城任职看大模型人才流动与 AI 开发者机遇
+08-28
+344
+在大模型产业从技术验证走向应用落地的关键阶段，顶尖 AI 人才的跨区域流动往往折射出更深层的产业生态变迁。当算力、数据、 算法 与场景成为城市竞争的核心要素，人才不再单纯属于某一家公司，而是成为产业链配置的关键节点。理解这一趋势，对 AI 开发者而言，意味着需要重新审视自身的技术栈选择与职业发展路径。从 招聘 JD的关键词提取，到政策文本的结构化对比，再到基于向量检索的本地知识库构建，数据工具能帮助我们以更理性的方式追踪产业动向。本文从产业观察切入，结合工程实践案例，探讨开发者应如何在大模型时代提升工程化能力、行业认知与数
+基于matlab的车牌识别(含子程序)
+热门推荐
+TuTu998的博客
+09-01
+4万+
+基于matlab的车牌识别系统一、对车辆图像进行预处理1.载入车牌图像：function [d]=m ai n(jpg)
+[filename, pathname] = uigetfile({'*.jpg', 'JPEG 文件(*.jpg)'});
+if(filename == 0), return, end
+global FILENAME %定义全局变量
+FILENAME = [pathname f...
+如何成为 Agent 工程师 ：学习路径、核心技能与职业规划
+qq_63961628的博客
+04-20
+3122
+与传统LLM开发不同， Agent 工程师 需融合模型 推 理、工具调用、流程编排等技术，赋予 AI 更接近人类的多步决策能力。：LangCh ai n（流程编排）、Llam aI ndex（数据检索）、AutoGen（多 Agent 协作）。：深入掌握BERT、GPT系列模型，理解RAG（检索增强生成）、ReAct（ 推 理-行动循环）等机制。：Dify（低代码 Agent 平台）、Milvus（向量数据库）、FastAPI（服务部署）。：掌握 Agent 的规划（Planning）、记忆（Memory）、知识库集成等模块设计。
+模板匹配加速之金字塔分层搜索
+weixin_44969144的博客
+03-21
+1705
+图像金字塔是一种多分辨率图像表示方法，它通过一系列逐渐缩小或放大的图像来表示原始图像的不同尺度。高斯金字塔（Gaussian Pyramid）：通过不断下采样（降采样）生成更小的图像。拉普拉斯金字塔（Laplacian Pyramid）：通过高斯金字塔和差分操作生成一组残差图像。在模板匹配中，我们主要使用高斯金字塔来实现多尺度匹配。金字塔灰度模板匹配通过多尺度搜索策略，在保持较高准确率的同时显著提升匹配速度，尤其适用于：高分辨率图像处理实时检测系统移动端设备等资源受限场景。
+中国六家领先 AI 巨头 招聘 信息汇总：年薪18-60w，福利待遇与投递链接全览！
+Android23333的博客
+01-15
+1574
+本文汇总了中国六家领先 AI 和科技公司（月之暗面、阿里云、深度求索、 智谱 华章、寒武纪和滴滴自动驾驶）的 招聘 信息，涵盖大模型研发、 算法 工程等热门岗位。各公司提供优厚福利待遇，包括股票期权、住房补贴、免费餐食等。文章详细列出各公司的在招岗位及投递链接，为 AI 从业者和大模型爱好者提供求职参考，助力把握行业人才需求动态。
+避开这些坑！baostock获取股票数据时最容易犯的5个错误（Python实战）
+websocket5live的博客
+03-02
+1389
+本文针对使用Python和baostock库获取股票历史数据时常见的五大陷阱，提供了实战解决方案。重点剖析了登录状态验证、参数配置、数据解析、批量操作效率及数据一致性校验等关键环节，帮助开发者构建稳健高效的数据获取流程，避免因细节疏忽导致的数据错误或性能瓶颈。
+芒果YOLOv8改进16：检测头Head篇：即插即用｜新颖轻量化非对称多级压缩LADH检测头，原创改进适配YOLOv8高效检测头，检测头新颖性改进，全网首发独一份
+包括YOLOv5、YOLOv7、YOLOv8等模型改进
+06-04
+5583
+YOLOv8代码改进教程：即插即用｜新颖轻量化非对称多级压缩LADH检测头🎈
+年薪18-60w！大模型开发者必看！中国 AI 巨头 招聘 全解析，附福利待遇与投递链接，建议收藏备用！
+2401_85343303的博客
+12-26
+1628
+本文汇总了中国六家领先 AI 和科技公司（月之暗面、阿里云、深度求索、 智谱 华章、寒武纪和滴滴自动驾驶）的 招聘 信息，涵盖大模型研发、 算法 工程等热门岗位。各公司提供优厚福利待遇，包括股票期权、住房补贴、免费餐食等。文章详细列出各公司的在招岗位及投递链接，为 AI 从业者和大模型爱好者提供求职参考，助力把握行业人才需求动态。
+大数据领域数据产品的团队激励与绩效管理
+Java大师兄的博客
+08-14
+1007
+在大数据领域，数据产品的成功离不开高效协作的团队。团队激励与绩效管理的目的在于激发团队成员的工作热情和创造力，提高工作效率和质量，确保数据产品能够按时、高质量地交付。本文章的范围涵盖了大数据领域数据产品团队激励与绩效管理的各个方面，包括激励机制的设计、绩效评估的方法、团队沟通与协作等。本文将按照以下结构进行阐述：首先介绍核心概念与联系，明确相关概念的定义和相互关系；接着讲解核心 算法 原理和具体操作步骤，为团队激励与绩效管理提供理论支持和实践指导；然后分析数学模型和公式，帮助读者深入理解绩效评估的原理；
+Java 工程师 如何转型 AI Agent 开发？从原理到Spring Boot实战全解析
+最新发布
+weixin_33782386的博客
+09-04
+460
+在 人工智能 技术快速迭代的今天，大语言模型（LLM）与智能体（ Agent ）正成为企业级应用的核心方向。 Agent 的本质并非单一 算法 ，而是一种融合感知、规划与工具调用的系统架构，其工程落地高度依赖后端技术栈。对于长期深耕Java生态的开发者而言，Spring Boot、微服务与高并发经验在 Agent 的工程化过程中具备天然优势，而Function Calling机制则为模型与业务系统之间搭建了标准化的交互桥梁。本文从Prompt设计、工具调用原理出发，结合基于Spring Boot的三方API调用实战案例，系统拆
+21、深入了解SELinux安全系统与/proc文件系统
+ik678901234的博客
+11-06
+56
+本文深入探讨了SELinux安全系统与/proc文件系统的原理及实际应用。详细介绍了SELinux的安全上下文、域转换、运行模式、角色管理以及策略查看工具seinfo的使用；同时解析了/proc文件系统的结构与功能，涵盖进程信息查看、系统资源监控及性能优化方法。结合SELinux与/proc的协同应用，提供了系统问题排查流程与安全管理最佳实践，帮助用户提升Linux系统的安全性与稳定性。
+YOLOv8 交通管理三大核心功能 —— 二、违章检测系统 详细解释及代码完整示例
+u010117029的博客
+06-27
+485
+YOLOv8交通违章检测系统
+被裁的前端在学 LangCh ai n，后端在补 Prompt： Agent 时代到底需要什么人？
+qq_34219119的博客
+08-18
+255
+方向薪资门槛稀缺度转型难度 Agent 应用开发20-40K中低★★☆RAG 工程师 25-40K低低★☆☆ Agent 架构师40-70K+高极高★★★★Prompt 工程师 20-35K低中★★☆工具链/平台35-60K高高★★★垂直行业 Agent 25-50K中中★★★选方向的核心原则：不要只看薪资，看你现在的经验能往哪个方向"迁移"。后端开发选应用开发或架构师，前端选应用开发或 Prompt 工程，有行业经验的选垂直方向。
+深度学习工具包 DeepLearningToolbox
+深度学习工具包Deprecation notice.-----This toolbox is outdated and no longer m ai nt ai ned.There are much better tools av ai lable for deep learning than this toolbox, e.g. [Theano](http://deeplearning.net/software/theano/), [torch](http://torch.ch/) or [tensorflow](http://www.tensorflow.org/)I would suggest you use one of the tools mentioned above rather than use this toolbox.Best, Rasmus.DeepLearnToolbox================A Matlab toolbox for Deep Learning.Deep Learning is a new subfield of machine learning that focuses on learning deep hierarchical models of data.It is inspired by the human br ai n's apparent deep (layered, hierarchical) architecture.A good overview of the theory of Deep Learning theory is[Learning Deep Architectures for AI ](http://www.iro.umontreal.ca/~bengioy/papers/ftml_book.pdf)For a more informal introduction, see the following videos by Geoffrey Hinton and Andrew Ng.* [The Next Generation of Neural Networks](http://www.youtube.com/watch?v=AyzOUbkUf3M) (Hinton, 2007)* [Recent Developments in Deep Learning](http://www.youtube.com/watch?v=VdIURAu1-aU) (Hinton, 2010)* [Unsupervised Feature Learning and Deep Learning](http://www.youtube.com/watch?v=ZmNOAtZIgIk) (Ng, 2011)If you use this toolbox in your research please cite [Prediction as a candidate for learning deep hierarchical models of data](http://www2.imm.dtu.dk/pubdb/views/publication_det ai ls.php?id=6284)```@MASTERSTHESIS\{IMM2012-06284, author = "R. B. Palm", title = "Prediction as a candidate for learning deep hierarchical models of data", year = "2012",}```Contact: rasmusbergpalm at gm ai l dot comDirectories included in the toolbox-----------------------------------`NN/` - A library for Feedforward Backpropagation Neural Networks`CNN/` - A library for Convolutional Neural Networks`DBN/` - A library for Deep Belief Networks`SAE/` - A library for Stacked Auto-Encoders`CAE/` - A library for Convolutional Auto-Encoders`util/` - Utility functions used by the libraries`data/` - Data used by the examples`tests/` - unit tests to verify toolbox is workingFor references on each library check REFS.mdSetup-----1. Download.2. addpath(genpath('DeepLearnToolbox'));Example: Deep Belief Network---------------------```matlabfunction test_example_DBNload mnist_uint8;tr ai n_x = double(tr ai n_x) / 255;test_x = double(test_x) / 255;tr ai n_y = double(tr ai n_y);test_y = double(test_y);%% ex1 tr ai n a 100 hidden unit RBM and visualize its weightsrand('state',0)dbn.sizes = [100];opts.numepochs = 1;opts.batchsize = 100;opts.momentum = 0;opts.alpha = 1;dbn = dbnsetup(dbn, tr ai n_x, opts);dbn = dbntr ai n(dbn, tr ai n_x, opts);figure; visualize(dbn.rbm{1}.W'); % Visualize the RBM weights%% ex2 tr ai n a 100-100 hidden unit DBN and use its weights to initialize a NNrand('state',0)%tr ai n dbndbn.sizes = [100 100];opts.numepochs = 1;opts.batchsize = 100;opts.momentum = 0;opts.alpha = 1;dbn = dbnsetup(dbn, tr ai n_x, opts);dbn = dbntr ai n(dbn, tr ai n_x, opts);%unfold dbn to nnnn = dbnunfoldtonn(dbn, 10);nn.activation_function = 'sigm';%tr ai n nnopts.numepochs = 1;opts.batchsize = 100;nn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.10, 'Too big error');```Example: Stacked Auto-Encoders---------------------```matlabfunction test_example_SAEload mnist_uint8;tr ai n_x = double(tr ai n_x)/255;test_x = double(test_x)/255;tr ai n_y = double(tr ai n_y);test_y = double(test_y);%% ex1 tr ai n a 100 hidden unit SDAE and use it to initialize a FFNN% Setup and tr ai n a stacked denoising autoencoder (SDAE)rand('state',0)sae = saesetup([784 100]);sae.ae{1}.activation_function = 'sigm';sae.ae{1}.learningRate = 1;sae.ae{1}.inputZeroMaskedFraction = 0.5;opts.numepochs = 1;opts.batchsize = 100;sae = saetr ai n(sae, tr ai n_x, opts);visualize(sae.ae{1}.W{1}(:,2:end)')% Use the SDAE to initialize a FFNNnn = nnsetup([784 100 10]);nn.activation_function = 'sigm';nn.learningRate = 1;nn.W{1} = sae.ae{1}.W{1};% Tr ai n the FFNNopts.numepochs = 1;opts.batchsize = 100;nn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.16, 'Too big error');```Example: Convolutional Neural Nets---------------------```matlabfunction test_example_CNNload mnist_uint8;tr ai n_x = double(reshape(tr ai n_x',28,28,60000))/255;test_x = double(reshape(test_x',28,28,10000))/255;tr ai n_y = double(tr ai n_y');test_y = double(test_y');%% ex1 Tr ai n a 6c-2s-12c-2s Convolutional neural network %will run 1 epoch in about 200 second and get around 11% error. %With 100 epochs you'll get around 1.2% errorrand('state',0)cnn.layers = { struct('type', 'i') %input layer struct('type', 'c', 'outputmaps', 6, 'kernelsize', 5) %convolution layer struct('type', 's', 'scale', 2) %sub sampling layer struct('type', 'c', 'outputmaps', 12, 'kernelsize', 5) %convolution layer struct('type', 's', 'scale', 2) %subsampling layer};cnn = cnnsetup(cnn, tr ai n_x, tr ai n_y);opts.alpha = 1;opts.batchsize = 50;opts.numepochs = 1;cnn = cnntr ai n(cnn, tr ai n_x, tr ai n_y, opts);[er, bad] = cnntest(cnn, test_x, test_y);%plot mean squared errorfigure; plot(cnn.rL);assert(er<0.12, 'Too big error');```Example: Neural Networks---------------------```matlabfunction test_example_NNload mnist_uint8;tr ai n_x = double(tr ai n_x) / 255;test_x = double(test_x) / 255;tr ai n_y = double(tr ai n_y);test_y = double(test_y);% normalize[tr ai n_x, mu, sigma] = zscore(tr ai n_x);test_x = normalize(test_x, mu, sigma);%% ex1 vanilla neural netrand('state',0)nn = nnsetup([784 100 10]);opts.numepochs = 1; % Number of full sweeps through dataopts.batchsize = 100; % Take a mean gradient step over this many samples[nn, L] = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.08, 'Too big error');%% ex2 neural net with L2 weight decayrand('state',0)nn = nnsetup([784 100 10]);nn.weightPenaltyL2 = 1e-4; % L2 weight decayopts.numepochs = 1; % Number of full sweeps through dataopts.batchsize = 100; % Take a mean gradient step over this many samplesnn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');%% ex3 neural net with dropoutrand('state',0)nn = nnsetup([784 100 10]);nn.dropoutFraction = 0.5; % Dropout fraction opts.numepochs = 1; % Number of full sweeps through dataopts.batchsize = 100; % Take a mean gradient step over this many samplesnn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');%% ex4 neural net with sigmoid activation functionrand('state',0)nn = nnsetup([784 100 10]);nn.activation_function = 'sigm'; % Sigmoid activation functionnn.learningRate = 1; % Sigm require a lower learning rateopts.numepochs = 1; % Number of full sweeps through dataopts.batchsize = 100; % Take a mean gradient step over this many samplesnn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');%% ex5 plotting functionalityrand('state',0)nn = nnsetup([784 20 10]);opts.numepochs = 5; % Number of full sweeps through datann.output = 'softmax'; % use softmax outputopts.batchsize = 1000; % Take a mean gradient step over this many samplesopts.plot = 1; % enable plottingnn = nntr ai n(nn, tr ai n_x, tr ai n_y, opts);[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');%% ex6 neural net with sigmoid activation and plotting of validation and tr ai ning error% split tr ai ning data into tr ai ning and validation datavx = tr ai n_x(1:10000,:);tx = tr ai n_x(10001:end,:);vy = tr ai n_y(1:10000,:);ty = tr ai n_y(10001:end,:);rand('state',0)nn = nnsetup([784 20 10]); nn.output = 'softmax'; % use softmax outputopts.numepochs = 5; % Number of full sweeps through dataopts.batchsize = 1000; % Take a mean gradient step over this many samplesopts.plot = 1; % enable plottingnn = nntr ai n(nn, tx, ty, opts, vx, vy); % nntr ai n takes validation set as last two arguments (optionally)[er, bad] = nntest(nn, test_x, test_y);assert(er < 0.1, 'Too big error');```[![Bitdeli Badge](https://d2weczhvl823v0.cloudfront.net/rasmusbergpalm/deeplearntoolbox/trend.png)](https://bitdeli.com/free "Bitdeli Badge")
+2025大模型人才缺口500万，这三类人最吃香！ AI 程序员薪资翻倍指南
+libaiup的博客
+12-19
+702
+2025年 AI 人才市场呈现高需求与高缺口并存态势，相关岗位同比增长10倍，但人才缺口仍达500万。最抢手岗位包括大模型 算法 工程师 、生成式 AI 工程师 和搜索 算法 工程师 。企业最欢迎三类人才：具备全流程落地能力的技术人、 AI +行业的复合型人才以及技能匹配度高的新人。求职者应关注细分TOP公司和 AI 独角兽企业，利用专业 招聘 渠道提高成功率。
+win10 跳过U8环境检测的IE WebControls.rar
+win10 安装u8的时候 提示IE WebControls 不通过，这个工具可以欺骗u8的检查。 跳过U8环境检测的IE WebControls。提示导入失败后，重新检测通过。
+霍尼韦尔SoftMaster使用说明
+霍尼韦尔SoftMaster使用说明
+Agent 时代： AI 从智力竞赛转向生产力流水线
+weixin_30607659的博客
+06-18
+1072
+Agent 不是新模型类型，而是 AI 落地的工程范式升级——它将大模型能力封装为可调度、可计量、可运维的智能单元。其核心原理在于任务编排、工具调用与状态管理的闭环控制，技术价值体现在端到端可靠性、毫秒级响应与成本可控性。典型应用场景包括智能巡店、订单履约、客服工单处理等需7×24小时稳定交付的业务流。随着MiniMax M2.7自我进化、Open AI GPT-5.4 nano小模型量产化、OpenClaw框架生态成型， AI 正从‘能答对多少题’转向‘一小时跑完多少订单’。本文聚焦 Agent 在真实产线中的工程实践逻
+复分析 阿尔福斯(Ahlfors) 第三版答案 英文
+答案分为十章，有部分习题没有答案，全英文复分析阿尔福斯(Ahlfors) 第三版答案
+2026年 AI 风口已至！收藏这份高薪赛道指南（小白程序员必看）
+大模型教程的博客
+04-09
+939
+如果你背景硬（名校+论文+代码强）：去大模型 算法 或 AI Infra，天花板最高。如果你在大厂做后端/产品：转 AI Agent ，门槛适中，机会多。如果你是机械/自动化背景：去具身智能/机器人，竞争小，缺口大。如果你是内容创作者：学会用 AI GC工具，做"懂 AI 的创意人"。如果你啥都不会：先别想着转 AI 了，从Python和机器学习基础开始学起。最后说个数据：2026年 AI 岗位的平均薪资是新经济行业平均的1.26倍，但人才供需比只有0.97——这意味着，只要你够格，工作会主动找你。
+收藏这份大模型行业报告！700亿市场规模下的学习机会与高薪岗位
+Trb701012的博客
+12-24
+849
+中国大模型市场快速发展，2024年规模已达294亿元，预计2026年将突破700亿元。阿里、字节、科大讯飞等企业占据第一梯队，DeepSeek、 智谱 AI 等新锐企业构成第二梯队。行业人才需求旺盛，字节跳动等企业大模型 算法 岗年薪可达百万级别，为开发者提供了高薪就业机会。
+2026年 AI 赛道风口已定！这5大细分领域值得收藏，带你找到高薪高薪岗位
+weixin_72959097的博客
+04-13
+859
+如果你背景硬（名校+论文+代码强）：去大模型 算法 或 AI Infra，天花板最高。如果你在大厂做后端/产品：转 AI Agent ，门槛适中，机会多。如果你是机械/自动化背景：去具身智能/机器人，竞争小，缺口大。如果你是内容创作者：学会用 AI GC工具，做"懂 AI 的创意人"。如果你啥都不会：先别想着转 AI 了，从Python和机器学习基础开始学起。最后说个数据：2026年 AI 岗位的平均薪资是新经济行业平均的1.26倍，但人才供需比只有0.97——这意味着，只要你够格，工作会主动找你。
+应届生想做 AI 应用开发，这些互联网公司值得优先考虑
+dydm_13128的专栏
+08-24
+204
+对于想入局 AI 应用开发的应届生，选工作本质是选择技术栈、业务场景与个人成长路径。本文梳理平台大厂、大模型创业公司、成熟互联网 AI 转型企业三类机会，结合 2027 届秋招现状，拆解各自优势、岗位特点，给求职同学提供参考思路。
+被裁边缘的35岁，我用2个月转行 AI 大模型：写给所有焦虑的中年人
+m0_59162248的博客
+02-25
+1099
+如果你是一个35岁的后端开发，看着部门群里“优化名单”四个字心跳加速，慌吗？
+如果你是一个38岁的产品经理，发现投出去的简历已读不回，而你连Transformer是什么都说不清，急吗？
+如果你是一个40岁的运维老手，公司开始用 AI 智能体自动处理告警，而你只能眼睁睁看着自己被边缘化，怎么办？
+年薪百万、需求暴涨42倍：2026年中美大厂FDE人才薪资对比
+2601_94865727的博客
+07-25
+785
+【摘要】前沿部署 工程师 （FDE）成为2026年 AI 领域热门岗位，负责将 AI 模型嵌入企业生产系统。美国Open AI 、Anthropic等巨头成立专门部署子公司，FDE岗位增长729%，资深年薪达$78.5万。中国字节、腾讯等大厂FDE年包70-109万成常态。行业瓶颈从模型性能转向落地应用，FDE需兼具技术、业务和沟通能力，适合资深开发者转型。尽管高薪诱人，但Gartner预测70%企业可能因成本放弃FDE方案。 AI 商业化正从"卖工具"转向"卖结果"，FDE的核心价值在
+目录
+展开全部
+收起
+0
+0
+0
+复制链接
+分享到 QQ
+分享到新浪微博
+扫一扫
+举报
++ 关注
+✦ 1024 程序员节 ✦
+盲盒赢 定制羽绒服
+开启惊喜盲盒，抽取你的专属好礼
+✦
+立即开盒 ›
+中奖列表 ›
+— 惊喜奖品抢先看 —
+超级年卡50元券
+周边70元券
+手机支架
+一拖三数据线
+雨伞
+运动毛巾
+电动牙刷
+VIP月卡
+机械键盘
+定制羽绒服
+超级年卡50元券
+周边70元券
+手机支架
+一拖三数据线
+雨伞
+运动毛巾
+电动牙刷
+VIP月卡
+机械键盘
+定制羽绒服
+PaperWeekly
+码龄9年
+1万+粉丝
+2055原创
++ 关注
+评论
+成就一亿技术人!
+拼手气红包 6.0元
+还能输入 1000 个字符
+插入表情
+代码片
+HTML/XML
+objective-c
+Ruby
+PHP
+C
+C++
+JavaScript
+Python
+Java
+CSS
+SQL
+其它
+条评论被折叠 查看
+被折叠的 条评论
+为什么被折叠?
+到【灌水乐园】发言
+查看更多评论
+添加红包
+祝福语
+请填写红包祝福语或标题
+红包数量
+个
+红包个数最小为10个
+红包总金额
+元
+红包金额最低5元
+余额支付
+当前余额 3.43 元
+前往充值 >
+需支付： 10.00 元
+取消
+确定
+成就一亿技术人!
+领取后你会自动成为博主和红包主的粉丝
+规则
+hope_wisdom
+发出的红包
+实付 元
+使用余额支付
+点击重新获取
+扫码支付
+钱包余额
+0
+抵扣说明：
+1.余额是钱包充值的虚拟货币，按照1:1的比例进行支付金额的抵扣。
+2.余额无法直接购买下载，可以购买VIP、付费专栏及课程。
+余额充值

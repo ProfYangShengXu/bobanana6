@@ -84,13 +84,21 @@ def render_sources(
         by_kind.setdefault(snapshot.source_kind or "<unspecified>", []).append(snapshot)
 
     lines = ["# SOURCES.md", "", "溯源链按来源分层。每一层是同一类载体（文件 / 网络 / 其它）。", ""]
+    if any(str(kind).startswith("T") for kind in by_kind):
+        lines.append("信任层：T1 官方文档/API · T2 论文/官方博客 · T3 社区 · T4 不知名博客/聚合站（只当线索）。")
+        lines.append("")
     for kind in sorted(by_kind):
         lines.append(f"## {kind}")
         lines.append("")
-        lines.append("| ref | captured_at | body |")
-        lines.append("|---|---|---|")
+        # ★ reader for Snapshot.backend / Snapshot.degraded —— `web-use` 纪律②：
+        #   报告必须能看出"这条走的是哪条路、是不是降级拿到的"。
+        lines.append("| ref | captured_at | 走的后端 | 降级 | body |")
+        lines.append("|---|---|---|---|---|")
         for snapshot in by_kind[kind]:
-            lines.append(f"| `{snapshot.ref}` | {snapshot.captured_at} | `{snapshot.body_path}` |")
+            lines.append(
+                f"| `{snapshot.ref}` | {snapshot.captured_at} | `{snapshot.backend or '-'}` | "
+                f"{'是' if snapshot.degraded else '否'} | `{snapshot.body_path}` |"
+            )
         lines.append("")
 
     locators = sorted({p.locator for p in provenances if p.locator})

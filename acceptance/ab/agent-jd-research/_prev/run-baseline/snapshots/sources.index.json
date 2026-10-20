@@ -1,0 +1,47 @@
+{
+  "hunt": {
+    "body": "1b188bfba089a1a6c3cd6730a4953d19.txt",
+    "captured_at": "2026-10-20T12:19:17.936990+08:00",
+    "source_kind": "research"
+  },
+  "hunt:1": {
+    "body": "69e7a72f23206dc91ec3570b77f76beb.md",
+    "captured_at": "2026-10-20T12:19:17.936990+08:00",
+    "source_kind": "research"
+  },
+  "hunt:2": {
+    "body": "0dbe1e2c88592261afe6b52dadb898a7.md",
+    "captured_at": "2026-10-20T12:19:17.936990+08:00",
+    "source_kind": "research"
+  },
+  "hunt:3": {
+    "body": "e756ac1d69817dbcadf1221664eba284.md",
+    "captured_at": "2026-10-20T12:19:17.936990+08:00",
+    "source_kind": "research"
+  },
+  "hunt:4": {
+    "body": "ca102bd918d0f2c7a07616bae2c2c392.txt",
+    "captured_at": "2026-10-20T12:19:17.936990+08:00",
+    "source_kind": "research"
+  },
+  "hunt:5": {
+    "body": "311702c4ab5d3a3a503bee724ed22b7a.txt",
+    "captured_at": "2026-10-20T12:19:17.936990+08:00",
+    "source_kind": "research"
+  },
+  "hunt:6": {
+    "body": "8080741c5df70c18dde90e4ed5f8c9f2.txt",
+    "captured_at": "2026-10-20T12:19:17.936990+08:00",
+    "source_kind": "research"
+  },
+  "hunt:7": {
+    "body": "9dfe796a92560603e07f79978f23d14f.txt",
+    "captured_at": "2026-10-20T12:19:17.936990+08:00",
+    "source_kind": "research"
+  },
+  "instruction": {
+    "body": "685b57fcedea6bb36bac80c7bc0fcc4c.md",
+    "captured_at": "2026-10-20T12:19:17.936990+08:00",
+    "source_kind": "file"
+  }
+}

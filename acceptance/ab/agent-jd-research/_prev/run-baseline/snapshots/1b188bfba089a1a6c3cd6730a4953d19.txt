@@ -1,0 +1,17 @@
+# 检索清单：2026 年大厂 AI Agent 岗与 LLM 应用岗的招聘要求、真实面试考点、以及转型准备路径
+
+问题：2026 年大厂 AI Agent 岗与 LLM 应用岗的招聘要求、真实面试考点、以及转型准备路径
+种子（起点，不构成范围）：https://raw.githubusercontent.com/harrisliangsu/ai-agent-engineer-handbook/main/interview-prep/jd-requirements.md, https://raw.githubusercontent.com/AAAAhuihui/agent/main/%E5%AD%97%E8%8A%82%E8%B7%B3%E5%8A%A8/%E7%9C%9F%E5%AE%9E%E9%9D%A2%E7%BB%8F-%E7%89%9B%E5%AE%A2%E5%AE%9E%E5%BD%95.md, https://raw.githubusercontent.com/AAAAhuihui/agent/main/Agent%E5%B7%A5%E7%A8%8B%E5%B8%88%E5%AD%A6%E4%B9%A0%E8%B7%AF%E7%BA%BF%E5%9B%BE.md, https://notes.kamacoder.com/interview/llm/20260506bytedance.html
+
+共找到 7 份材料：
+
+| ref | 走的后端 | 降级 | 地址 |
+| --- | --- | --- | --- |
+| hunt:1 | direct | 否 | https://raw.githubusercontent.com/harrisliangsu/ai-agent-engineer-handbook/main/interview-prep/jd-requirements.md |
+| hunt:2 | direct | 否 | https://raw.githubusercontent.com/AAAAhuihui/agent/main/%E5%AD%97%E8%8A%82%E8%B7%B3%E5%8A%A8/%E7%9C%9F%E5%AE%9E%E9%9D%A2%E7%BB%8F-%E7%89%9B%E5%AE%A2%E5%AE%9E%E5%BD%95.md |
+| hunt:3 | direct | 否 | https://raw.githubusercontent.com/AAAAhuihui/agent/main/Agent%E5%B7%A5%E7%A8%8B%E5%B8%88%E5%AD%A6%E4%B9%A0%E8%B7%AF%E7%BA%BF%E5%9B%BE.md |
+| hunt:4 | direct+html2text | 否 | https://notes.kamacoder.com/interview/llm/20260506bytedance.html |
+| hunt:5 | direct+html2text | 否 | https://agentic-engineering-jobs.com/langchain-job-market-2026 |
+| hunt:6 | direct+html2text | 否 | https://blog.csdn.net/c9Yv2cf9I06K2A9E/article/details/135053896 |
+| hunt:7 | direct+html2text | 否 | https://blog.csdn.net/c9yv2cf9i06k2a9e/article/details/137574967 |
+

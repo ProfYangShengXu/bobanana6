@@ -1,0 +1,200 @@
+# AI Agent 岗位面试 JD 要求研究报告
+
+**调研日期**：2026-05-02
+**覆盖范围**：中国大陆 + 北美 / 欧洲市场，BOSS 直聘 / 拉勾 / 51job / 智联 / V2EX / 猎聘 / Hacker News / LinkedIn / Greenhouse / Ashby / Glassdoor / Levels.fyi
+**目标读者**：求职者、招聘方、转型 AI Agent 方向的工程师
+
+---
+
+## Executive Summary
+
+2026 年 5 月，"AI Agent 工程师"已经从 2023 年的"概念词"转化为有清晰边界的工程岗位。中国大陆和北美/欧洲市场呈现**两极化与岗位收敛**的特征：
+
+- **中国市场**：大厂算法岗（字节豆包 / 阿里通义 / 腾讯混元 / 百度文心 / 月之暗面 Kimi / 智谱 GLM / DeepSeek / MiniMax / 阶跃星辰 / 百川 / 零一万物）继续抢博士与顶会一作；中型厂和传统 IT/SaaS 把"AI Agent 工程师 / LLM 应用开发工程师"当成新工种放出，硬性要求高度趋同——**Python + LangChain/LangGraph + RAG + Tool Calling + 向量库 + Docker/K8s**。3-5 年经验普遍开 25-60K·14/15 薪。Prompt 工程师独立岗位明显萎缩（2025 年比 2023 年减少约 70%），正被"Agent 应用工程师"和"上下文工程"吸收。
+- **北美/欧洲市场**：6 类岗位已收敛——**Forward Deployed Engineer (FDE)**、**Applied AI Engineer**、**Agent Engineer / Software Engineer Agent**、**Research Engineer**、**Deployed/Field Engineer**、**AI Platform/Infra Engineer**。Anthropic、Glean、Vercel、Replit、Sierra、Cognition (Devin)、Cursor、Harvey、Perplexity 是 mid-stage 主力雇主。Senior IC 在 SF / NYC / Seattle 集中在 base $200K-$320K（含 equity 通常 2-4 倍），London 折合 £225K-£240K，欧洲 €80K-€160K。
+
+跨地区共同信号：**生产 LLM 经验、Python（含 TypeScript 作为常见 #2）、agent 框架（LangGraph 领先，Claude Agent SDK / OpenAI Agents SDK 上升）、评估基础设施、MCP（2026 年增速最快的单一技能）、Prompt/Context Engineering**。
+
+---
+
+## 1. 中国市场：完整 JD 摘录与硬指标
+
+### 1.1 编程语言 / 框架 / 工具栈高频要求
+
+下面均带原文 + URL，非二手转述：
+
+1. **「精通 LangChain、LlamaIndex、AutoGen、Dify、CrewAI 等至少一种主流 Agent 开发框架」「能驾驭 ClaudeCode、Cursor 进行意图级编程」**
+   — 浙江义乌 AI Agent 工程师（V2EX 招聘帖，25-35K/月）— <https://www.v2ex.com/t/1200716>
+
+2. **「熟悉 Langchain、LangGraph、AutoGen 等 Agent 相关框架」「熟悉 LLM、LVM、推理等相关大模型知识」**
+   — 腾讯混元大模型 Agent 开发工程师（深圳，3 年+，2025-11-28）— <https://jobs.niuqizp.com/job-vm85LaLa5.html>
+
+3. **「精通 Python，熟悉 Java/Go/C++ 之一」「掌握 Prompt 设计、多轮对话管理、Tool/Function Calling」「熟悉 RAG 技术与向量数据库」**
+   — 湖南林泽科技 LLM 应用工程师（长沙，1.5-2.5 万，3-5 年）— <https://www.zhaopin.com/jobdetail/CC455023520J40918852615.htm>
+
+4. **「熟练掌握 C/C++、Python」「熟悉 GPU/AI 芯片编程（CUDA、OpenCL、Ascend C 等）」「熟悉主流大模型推理框架（vllm、sglang、tensorrt-llm、FasterTransformer）」**
+   — 高级推理工程师通用 JD（牛客网集合）
+
+5. **「掌握 Python、Java 和 TensorFlow、PyTorch 框架」**
+   — 蚂蚁集团 AI Force AI-Agent 算法工程师（金融场景，社招 13-15 级）— <https://blog.csdn.net/m0_59162248/article/details/149967708>
+
+6. **「熟悉 Coze、Spring AI Alibaba 等 AI Agent 开发工具」「熟悉 OpenAI、阿里通义、豆包、DeepSeek 等 API」**
+   — 字节跳动 Agent 软件架构师-移动 OS（北京海淀，70-100K·15 薪，3-5 年）— <https://www.liepin.com/job/1978252587.shtml>
+
+7. **「熟练使用 vibe coding，能独立完成实验与结果分析」**
+   — 月之暗面 Kimi Agent Team 实习（北京，6-7K/月）— <https://www.superlinear.academy/c/collaborate/kimi-agent-team>
+
+8. **「熟悉 ChatGLM 或 Llama 等模型的使用或训练经验者优先」**
+   — 智谱 AI Agent 算法工程师 / 实习生（北京）— <https://blog.csdn.net/c9yv2cf9i06k2a9e/article/details/137574967>
+
+### 1.2 领域知识要求
+
+9. **「精通 SFT、RLHF、RAG 等技术，有 1 年以上落地经验」** — 蚂蚁 AI Force 社招
+10. **「研究 Prompt 工程、指令微调、RAG、Agent 系统等技术」** — 一线大厂大模型算法岗（V2EX 高薪贴 6-15 万+/月）— <https://www.v2ex.com/t/1186466>
+11. **「AI Agent 架构设计、多代理系统、RAG、长期记忆等技术研究」** — 同上
+12. **「整合 ASR、NLP、TTS 技术实现多轮对话和风险感知」** — 蚂蚁金融场景 AI-Agent 算法岗
+13. **「探索大模型在 Ranking 技术中的应用范式，包括 LLM-based 向量召回、相关性模型、Ranking 模型等」** — 字节豆包大模型搜索增强算法工程师 — <https://blog.csdn.net/c9yv2cf9i06k2a9e/article/details/145331986>
+14. **「构建覆盖文生文、多模态理解与生成的全模态评测基准，设计多维度指标并开发自动化评测工具链」** — 腾讯混元大模型评测算法研究员 — <https://www.monimianshi.com/job/51362>
+15. **「设计和开发多 Agent 协同交互框架，支持使用一套标准协议接入内外部开发的 Agent」** — 字节 Agent 软件架构师-移动 OS
+16. **「跟踪并复现前沿 RL & Agent 论文，快速验证创新 idea」** — 月之暗面 Kimi Agent Team
+
+### 1.3 工程能力 / 系统能力
+
+17. **「具有复杂系统开发经验」「会微信小程序或 app 开发」** — 湖南林泽 LLM 应用工程师
+18. **「系统设计、云原生、容器化（Docker/K8s）、API 开发」** — 浙江义乌 AI Agent 工程师 JD
+19. **「主导客户端整体架构设计与重构，包括模块拆分、跨端协同、数据流管理、多模态融合等核心层面」** — 字节 Agent 软件架构师-移动 OS
+20. **「评测/标注平台、AI 辅标、自动化质检及评测能力，持续提升各场景的准确性和效率」** — 腾讯混元 Agent 开发工程师
+21. **「PaaS 智能体平台研发：多 Agent 编排、智能体设计、多智能体协作、任务规划、工具调用」** — 蚂蚁 PaaS 智能体平台研发专家
+
+### 1.4 学历 / 经验门槛
+
+| 公司类型 | 学历要求 | 经验要求 | 备注 |
+|---|---|---|---|
+| 头部大模型算法岗（DeepSeek / Kimi / 智谱 / 阶跃 / 百川 / MiniMax） | 硕博为主 | 顶会论文 / Kaggle / ACM 金牌优先 | DeepSeek 官方说"不设学历门槛"，实操高度筛选发文与竞赛 |
+| 大厂 Agent 应用 / 落地工程岗 | 本科即可 | 3-5 年是主流 | 腾讯混元 Agent：本科+3 年；字节 Agent 软件架构师：本科+3-5 年 |
+| 大模型推理 / Infra 工程师 | 硕士优先 | 3-7 年 | C++/CUDA 强背景；vLLM/SGLang 实操经验 |
+| 实习生 | 在读 | 6 个月连续可投入 | 强调 vibe coding 能力和复现论文 |
+
+### 1.5 加分项 / Nice-to-have（按出现频率降序）
+
+1. **顶会一作**（NeurIPS / ICML / ACL / CVPR / ICLR / KDD）— 几乎所有大模型公司算法岗
+2. **ACM / ICPC、NOI / IOI、Top Coder、Kaggle 获奖** — 字节豆包、阶跃星辰、DeepSeek、华为天才少年通道
+3. **开源贡献**（vLLM、SGLang、LangChain、HuggingFace 模型仓库）— 腾讯混元、阿里通义、推理工程师 JD
+4. **行业垂域经验**：金融（蚂蚁、智谱）、医疗（百川）、法律 NLP、电商搜索（字节、阿里）、智能客服 / 外呼（蚂蚁）
+5. **顶尖高校博士 + "天才少年"通道**：字节年薪近亿挖入"天才少年"陈冠英（21 经济网，2026-04-17）；华为盘古多模态算法组保留组内"天才少年名额"
+
+### 1.6 薪资水平（2026-05 抓取数据）
+
+| 层级 | 岗位 / 公司 | 月薪 / 总包 | 地点 | 来源 |
+|---|---|---|---|---|
+| 应届 SSP | 字节 AIGC 算法（卓越） | 33-36K×15 + 5W 签字 + 10W 股票 ≈ 55W+ | 北京 / 上海 | CSDN 156735755 |
+| 应届 SSP | 百度 大模型算法（卓越） | 40K+×16 + 10W 股票 ≈ 70W+ | 北京 | 同上 |
+| 应届 SSP | 拼多多 搜推广算法（卓越） | 40K+×16 + 5W 签字 + 15W 股票 ≈ 80W+ | 上海 | 同上 |
+| 应届 SP | 腾讯 算法（优先） | 30-32K×15 + 3W 签字 ≈ 48-52W | 深圳 | 同上 |
+| 顶尖博士 | 大厂 AI 架构师 | 200 万+/年，传闻"近亿元"挖人个例 | 北京 | 21 经济网 |
+| 资深 Agent 架构师 | 字节 Agent 软件架构师-移动 OS | 70-100K·15 薪 | 北京海淀 | 猎聘 1978252587 |
+| 一线大厂 Agent | 预训练 / Agent / 多模态 / RL | 6-15W+/月 | 北京 / 上海 | V2EX 1186466 |
+| 高级 Agent | AI Agent 专家 / 架构师 | 50-80K·18 薪 | 北京 / 上海 | 火山引擎 ADG |
+| 中级 Agent | LLM 应用开发工程师（AI Agent 方向） | 40-70K·18 薪 | 上海 | 猎聘 |
+| 中级 Agent | AI Agent 开发工程师 | 18-28K·14 薪 | — | 火山引擎 ADG |
+| 中型厂 | 浙江义乌 AI Agent 工程师 | 25-35K | 浙江义乌 | V2EX 1200716 |
+| 中型厂 | 湖南林泽 LLM 应用工程师 | 15-25K | 长沙 | 智联 |
+| Prompt 工程师 | 北京 1959085873 | 15-30K·13 薪，1-3 年 | 北京 | 猎聘（已下线）|
+| 实习 | 月之暗面 Kimi Agent | 6-7K/月，要求连续 6 月 | 北京 | Superlinear |
+| 资深博士 | DeepSeek 深度学习研究员-AGI | 8-11W/月，14 薪，年包 154W | 北京 | 财新基金 |
+
+行业宏观数据：AI 岗月薪下限均值 4.7 万、上限均值 7.8 万（时代周报 2025-09，仍是 2026 年招聘市场基准引用源）；大模型算法岗月薪应届中位 24.8K，90 分位 5.2 万。
+
+### 1.7 不同级别岗位差异
+
+- **应届**：算法岗看顶会 / 竞赛 / 实习；应用岗看 GitHub Agent 项目（LangChain / LlamaIndex demo + Cursor 重构经历）
+- **1-3 年**：腾讯混元 Agent、湖南林泽这类岗位定位为"主力执行"，要 RAG、向量库、Tool Calling、Prompt 设计落地经验
+- **3-5 年**：开始要"主导客户端架构设计与重构"、"设计多 Agent 协同框架"（字节 Agent 软件架构师），薪资跳到 70K+
+- **5-10 年**：架构师 / 专家，要求"已在生产带过 Agent 系统上线" + "客户 / 业务层咨询能力"
+- **资深博士 / 科研**：DeepSeek 给"深度学习研究员-AGI" 8-11 万月薪、14 薪，年包 154 万
+
+---
+
+## 2. 北美 / 欧洲市场：完整 JD 摘录与硬指标
+
+### 2.1 8 条真实完整 JD 摘录（原文 + URL，2026-05-02 抓取）
+
+#### JD-EN-1：Anthropic — Forward Deployed Engineer, Applied AI
+
+URL：<https://job-boards.greenhouse.io/anthropic/jobs/4985877008>
+地点：Boston / Chicago / NYC / Seattle / SF / Washington DC
+薪资：**$200,000 – $300,000**
+
+> "Embed directly with our most strategic customers to drive transformational AI adoption."
+> "Work within customer systems to build production applications with Claude models."
+> "Deliver technical artifacts for customers like MCP servers, sub-agents, and agent skills."
+> "Provide white glove deployment support for Anthropic products in enterprise environments."
+> "3+ years of experience in a technical, customer facing role."
+> "Production experience with LLMs including advanced prompt engineering, agent development, evaluation frameworks."
+> "Strong programming skills with proficiency in Python (and ideally in one or more additional languages)."
+
+差旅 ~25%；25% in-office minimum；提供签证支持。
+
+#### JD-EN-2：Anthropic — Applied AI Engineer, Enterprise Tech
+
+URL：<https://job-boards.greenhouse.io/anthropic/jobs/5057647008>
+地点：SF / NYC / Seattle，每周 3 天 in office
+薪资：**$200,000 – $320,000**
+
+> "Serve as a specialist technical advisor to Anthropic customers as they deploy new products & workflows."
+> "Influence technical architecture decisions and customer product strategy by developing customized pilots, prototypes, and evaluation suites."
+> "Lead hands-on technical workshops and code reviews with customer engineering teams."
+> "Create scalable public and internal assets, documenting the latest LLM prompting, evaling, agentic, and architecture techniques."
+
+要求：**"Production experience with LLMs including advanced prompt engineering, agent development and frameworks, evaluation frameworks, transcript analysis, MCP, and deployment at scale."** "Strong programming skills with proficiency in Python or TypeScript." 4+ YOE。
+
+#### JD-EN-3：Anthropic — Applied AI Engineer (London)
+
+URL：<https://job-boards.greenhouse.io/anthropic/jobs/5116274008>
+薪资：**£225,000 – £240,000 GBP**
+
+> "Production experience building LLM-powered applications, including prompting, context engineering, agent architectures."
+
+4+ YOE。
+
+#### JD-EN-4：Glean — Machine Learning Engineer, AI Assistant & Autonomous AI Agents
+
+URL：<https://job-boards.greenhouse.io/gleanwork/jobs/4605215005>
+地点：SF Bay Area，hybrid 3-4 天/周
+薪资：**$240,000 – $300,000 base**
+
+> "Build frameworks for LLM-powered agents to use tools and knowledge sources effectively."
+> "Invent new agentic architectures and signals to improve reasoning, planning, and personalization."
+> "Design and optimize reinforcement learning and fine-tuning approaches."
+> "Lead development of scalable evaluation, benchmarking, and optimization loops for agents."
+
+要求：2+ years as Staff/Principal + 5+ years AI/ML industry；Python / Go / Java / C++。
+
+#### JD-EN-5：Replit — Senior Software Engineer, Agent Platform
+
+URL：<https://jobs.reachcapital.com/companies/replit-2/jobs/65431609-agent-platform-engineer>
+地点：Foster City, CA hybrid (M/W/F in office)
+薪资：**$180K – $260K + equity + bonus**
+
+> "Bridging the gap between the AI team (working on the core Agent logic) and the UX team (crafting delightful Agent experiences)."
+> "Tackling complex challenges across the full stack, from browser-based interfaces to high-performance backends to Linux systems engineering."
+
+要求：5+ YOE backend services；"experience building AI-powered tooling or products"；"experience with collaborative editing technologies such as OT, CRDTs, or Git"；"experience with event sourcing systems"。
+
+#### JD-EN-6：Cognition — Deployed Engineer (Devin)
+
+URL：<https://www.glassdoor.com/job-listing/deployed-engineer-cognition-JV_KO0,17_KE18,27.htm>
+地点 / 薪资：SF $98K-$165K / Emeryville $120K-$180K / Austin $82K-$137K / Federal SF $152K-$241K
+
+> "Deployed Engineers (DEs) are customer-facing technical experts who help customers maximize the value they get out of Devin/Windsurf."
+> "Work directly with engineers to understand their workflows, identify high-impact use cases, and deploy Devin/Windsurf into real production environments, leading demos and pilots, supporting integrations, and driving adoption of the Cognition platform."
+
+#### JD-EN-7：Vercel — AI Engineer
+
+URL：<https://vercel.com/careers/ai-engineer-5517523004>
+SF base：**$192,000 – $288,000**
+
+> "Sit at the intersection of machine learning, product development, and frontend engineering, working closely with product designers, ML scientists, and full-stack engineers to prototype and deploy innovative systems."
+
+要求：5+ YOE；strong programming in Python and JavaScript/TypeScript；experience working with or fine-tuning LLMs (OpenAI, Hugging Face)；solid understanding of modern frontend (React, Tailwind)。
+

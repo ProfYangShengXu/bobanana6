@@ -1,0 +1,723 @@
+
+**（2）其他框架了解**
+
+**CrewAI**
+- 基于角色的多 Agent 框架
+- 定义 Agent（角色、目标、工具）和 Task
+- 适合快速搭建多角色协作系统
+- 学习成本低，适合demo
+
+**AutoGen（微软）**
+- 对话驱动的多 Agent 框架
+- 支持人类参与对话
+- 适合研究和实验
+
+**Dify**
+- 低代码 AI 应用开发平台
+- 可视化编排工作流
+- 内置 RAG、Agent、工具集成
+- 适合快速搭建和部署 AI 应用
+- 面试时可以作为"快速验证"能力展示
+
+**MCP（Model Context Protocol）**
+- Anthropic 发起的工具集成协议
+- 标准化 LLM 与外部工具的通信
+- 2025年快速普及，多家厂商支持
+- 了解协议设计和使用方式
+
+**A2A（Agent-to-Agent Protocol）**
+- Google 发起的 Agent 间通信协议
+- Agent 发现、能力声明、任务委托
+- 还在早期，但值得关注
+
+**框架选型建议：**
+| 场景 | 推荐框架 |
+|------|---------|
+| 生产级 Agent 系统 | LangGraph |
+| 快速原型验证 | Dify / CrewAI |
+| 研究/实验 | AutoGen / 纯代码 |
+| 多角色协作演示 | CrewAI |
+| 工具集成 | MCP + LangChain |
+
+**学习产出：**
+- [ ] 用 LangGraph 实现一个完整的多 Agent 系统
+- [ ] 用 Dify 搭建一个 RAG 应用并部署
+- [ ] 对比 LangGraph 和 CrewAI 的代码实现差异
+
+---
+
+### 阶段三：进阶深入（4-6周）
+
+> **目标：** 掌握模型微调、对齐技术、推理优化等进阶技能，建立技术深度。
+
+#### 3.1 模型微调（第9-10周）
+
+**（1）SFT（Supervised Fine-Tuning）**
+
+**基本概念：**
+- 在预训练模型基础上，用标注数据进行有监督微调
+- 目标：让模型学会特定任务或遵循特定格式
+- 数据格式：指令-输入-输出 三元组
+
+**全参数微调 vs 参数高效微调（PEFT）：**
+- 全参数微调：更新所有参数，效果最好但资源消耗大
+- PEFT：只更新少量参数，资源消耗小
+
+**（2）LoRA（Low-Rank Adaptation）—— 面试必考**
+
+**原理：**
+- 冻结原始权重 W₀
+- 添加低秩分解矩阵 ΔW = BA（B ∈ R^{d×r}, A ∈ R^{r×k}，r << min(d,k)）
+- 前向传播：h = W₀x + BAx
+- 参数量从 d×k 降到 (d+k)×r
+
+**关键超参数：**
+- `r`（秩）：通常 8-64，越大表达能力越强
+- `alpha`：缩放系数，通常设为 r 的1-2倍
+- `target_modules`：选择哪些层加 LoRA（通常 q_proj, v_proj, k_proj, o_proj）
+- `dropout`：防过拟合
+
+**QLoRA（Quantized LoRA）：**
+- 基模型用 4-bit 量化，LoRA 参数用全精度
+- 显存大幅降低（70B 模型可在单卡 A100 上微调）
+- 使用 NF4（NormalFloat4）量化 + 双重量化
+- 实现：bitsandbytes + PEFT
+
+**其他 PEFT 方法：**
+- Prefix Tuning：在每层注意力前添加可训练的前缀向量
+- Adapter：在 FFN 后添加小型网络
+- IA3：学习缩放向量（参数量更少）
+- DoRA：分解权重为方向和大小
+
+**（3）训练数据构建**
+
+**数据来源：**
+- 人工标注（质量最高，成本高）
+- LLM 生成（Self-Instruct、Evol-Instruct）
+- 开源数据集改造
+
+**数据质量 >> 数据数量：**
+- LIMA 论文：1000条高质量数据效果超过大量低质量数据
+- 数据清洗：去重、过滤低质量、去除有害内容
+- 数据多样性：覆盖不同任务类型和难度
+
+**数据格式（以 Alpaca 格式为例）：**
+```json
+{
+  "instruction": "将以下英文翻译为中文",
+  "input": "Hello, how are you?",
+  "output": "你好，你怎么样？"
+}
+```
+
+**实操工具：**
+- HuggingFace TRL（Transformer Reinforcement Learning）
+- Axolotl：简化微调流程
+- LLaMA-Factory：一站式微调平台（国产，推荐）
+- Unsloth：加速微调
+
+**学习产出：**
+- [ ] 用 LoRA 微调 Qwen2.5-7B 做一个垂域问答模型
+- [ ] 构建一份高质量的微调数据集（至少500条）
+- [ ] 对比全参数微调和 LoRA 的效果差异
+
+---
+
+#### 3.2 RLHF / 对齐技术（第10-11周）
+
+**（1）RLHF（Reinforcement Learning from Human Feedback）**
+
+**完整流程：**
+```
+SFT模型 → 收集人类偏好数据 → 训练奖励模型(RM) → PPO优化策略模型
+```
+
+**奖励模型（Reward Model）：**
+- 输入：(prompt, response)对
+- 输出：标量分数
+- 训练数据：人类对多个回复的排序
+- 损失函数：Bradley-Terry 模型，最大化偏好回复和非偏好回复的分数差
+
+**PPO（Proximal Policy Optimization）：**
+- 核心思想：限制策略更新的幅度（clip ratio）
+- 目标：最大化奖励，同时不偏离 SFT 模型太远（KL 散度约束）
+- 实现复杂度高，训练不稳定
+- 需要 4 个模型：策略模型、参考模型、奖励模型、价值模型
+
+**（2）DPO（Direct Preference Optimization）—— 面试常考**
+
+**核心思想：**
+- 跳过显式的奖励模型训练
+- 直接用偏好数据优化策略模型
+- 将 RLHF 问题转化为分类问题
+
+**损失函数：**
+```
+L_DPO = -E[log σ(β · (log π(y_w|x)/π_ref(y_w|x) - log π(y_l|x)/π_ref(y_l|x)))]
+```
+- y_w：偏好回复（winner）
+- y_l：非偏好回复（loser）
+- β：温度参数
+
+**优势：**
+- 实现简单，不需要训练奖励模型
+- 训练稳定，不需要 PPO 的复杂调参
+- 计算资源需求低
+
+**（3）GRPO（Group Relative Policy Optimization）**
+
+- DeepSeek 提出的对齐方法
+- 核心思想：在一组采样中使用相对排名作为奖励
+- 不需要显式的奖励模型
+- 适合推理任务的优化
+- DeepSeek-R1 的核心训练方法之一
+
+**（4）其他对齐技术**
+- RLAIF：用 AI 反馈替代人类反馈
+- KTO（Kahneman-Tversky Optimization）：基于前景理论
+- IPO（Identity Preference Optimization）
+- ORPO：不需要参考模型的对齐方法
+- Constitutional AI：基于原则的自我改进
+
+**面试高频问题：**
+- DPO 和 RLHF 的区别和优缺点？
+- GRPO 的创新点是什么？
+- 奖励模型的过度优化（Reward Hacking）怎么解决？
+- 对齐税（Alignment Tax）是什么？如何减少？
+
+**学习产出：**
+- [ ] 用 DPO 对一个 SFT 模型进行对齐训练
+- [ ] 整理 RLHF → DPO → GRPO 的技术演进脉络
+- [ ] 写一篇笔记对比各种对齐方法的原理和适用场景
+
+---
+
+#### 3.3 推理优化（第11-12周）
+
+**（1）推理加速**
+
+**KV Cache**
+- 原理：缓存之前 token 的 Key、Value，避免重复计算
+- 显存占用：随序列长度线性增长
+- 优化：MQA/GQA（减少 KV 头数）、PagedAttention
+
+**vLLM —— 面试必知**
+- PagedAttention：借鉴 OS 的虚拟内存管理
+  - 将 KV Cache 分成固定大小的 block
+  - 按需分配，减少显存碎片和浪费
+  - 共享前缀的 KV Cache（Prefix Caching）
+- Continuous Batching：动态 batch，提高 GPU 利用率
+- 吞吐量比 HuggingFace 高 2-24 倍
+- 使用：`python -m vllm.entrypoints.openai.api_server --model xxx`
+
+**其他推理框架：**
+- TensorRT-LLM（NVIDIA）：深度优化，性能最好
+- SGLang：Structured Generation，约束解码加速
+- llama.cpp：CPU/Apple Silicon 推理
+- Ollama：本地部署利器
+
+**（2）模型量化**
+
+**量化基础：**
+- 将高精度浮点数（FP16/BF16）转换为低精度（INT8/INT4）
+- 目标：减少显存占用，加速推理，轻微牺牲精度
+
+**量化方法：**
+- **PTQ（Post-Training Quantization）**：训练后直接量化
+  - GPTQ：基于 Hessian 信息的逐层量化
+  - AWQ：基于激活感知的量化（保护重要权重）
+  - GGUF：llama.cpp 的量化格式
+- **QAT（Quantization-Aware Training）**：训练时模拟量化
+- 精度级别：INT8 → INT4 → INT3 → INT2
+
+**（3）部署架构**
+
+**单机部署：**
+- vLLM / Ollama / TGI（Text Generation Inference）
+- GPU 选型：A100（80GB）、H100、A10G、RTX 4090
+- 显存估算：模型参数量 × 2字节（FP16）或 × 1字节（INT8）
+
+**分布式部署：**
+- 张量并行（TP）：将模型分到多卡
+- 流水线并行（PP）：将不同层分到不同卡
+- 数据并行（DP）：多实例处理不同请求
+
+**服务化：**
+- OpenAI 兼容 API 接口
+- 负载均衡、限流、熔断
+- 监控：延迟、吞吐、显存使用率
+- 成本优化：Spot 实例、自动扩缩容
+
+**学习产出：**
+- [ ] 用 vLLM 部署一个开源模型并压测
+- [ ] 对比 INT8 和 INT4 量化模型的效果和速度
+- [ ] 画出一个生产级 LLM 服务的部署架构图
+
+---
+
+#### 3.4 高级 RAG（第12-13周）
+
+**（1）GraphRAG（知识图谱 + RAG）**
+
+**微软 GraphRAG：**
+- 原理：从文档中提取实体和关系，构建知识图谱
+- 索引阶段：
+  1. 文档分块
+  2. LLM 提取实体和关系
+  3. 构建知识图谱
+  4. 社区检测（Leiden 算法）
+  5. 为每个社区生成摘要
+- 查询阶段：
+  - Local Search：基于实体的局部搜索
+  - Global Search：基于社区摘要的全局搜索
+- 优势：擅长回答需要全局理解的问题（如"数据集的主要主题是什么？"）
+- 劣势：索引成本高（大量 LLM 调用）
+
+**LightRAG / nano-GraphRAG：**
+- 轻量级 GraphRAG 替代方案
+- 降低索引成本，保留核心效果
+
+**（2）Agentic RAG**
+- RAG 流程由 Agent 驱动
+- Agent 决定是否检索、检索什么、如何处理结果
+- 自适应检索：根据查询难度选择策略
+  - 简单问题 → 直接回答
+  - 中等问题 → 单次检索
+  - 复杂问题 → 多步检索 + 推理
+- 查询路由：将查询分发到不同的数据源
+- 工具化检索：将检索作为 Agent 的工具
+
+**（3）多模态 RAG**
+- 图文混合检索
+- 图像 Embedding：CLIP、SigLIP
+- 文档中的图表理解
+- 视频检索
+
+**学习产出：**
+- [ ] 用微软 GraphRAG 在一个中文语料上构建知识图谱
+- [ ] 实现一个 Agentic RAG，对比与普通 RAG 的效果
+- [ ] 写一篇 GraphRAG vs Vector RAG 的对比分析
+
+---
+
+#### 3.5 安全与评估（第13-14周）
+
+**（1）Guardrails 设计**
+
+**Prompt Injection 防护：**
+- 直接注入：用户在输入中嵌入恶意指令
+- 间接注入：通过检索内容注入
+- 防护策略：
+  - 输入检测和过滤
+  - 指令层级隔离
+  - 输出验证
+  - 使用专门的安全分类模型
+
+**内容安全：**
+- 有害内容过滤
+- PII（个人身份信息）检测和脱敏
+- 版权内容检测
+- 幻觉检测和缓解
+
+**框架和工具：**
+- Guardrails AI：规则定义和验证
+- NeMo Guardrails（NVIDIA）：可编程的安全防护
+- LLM Guard：输入输出过滤
+- Lakera Guard：Prompt injection 检测
+
+**（2）Agent 评估框架**
+
+**评估维度：**
+- 任务完成率（Task Success Rate）
+- 步骤效率（Step Efficiency）
+- 工具调用准确率（Tool Call Accuracy）
+- 安全性（Safety Score）
+- 用户满意度
+
+**评估工具：**
+- LangSmith：LangChain 的可观测性平台
+- AgentBench：多维度 Agent 评估基准
+- GAIA：通用 AI 助手评估
+- SWE-bench：代码Agent评估
+
+**学习产出：**
+- [ ] 为自己的 Agent 项目设计评估方案
+- [ ] 实现基本的 Guardrails（输入检测、输出验证）
+- [ ] 用 LangSmith 监控和调试一个 Agent 应用
+
+---
+
+### 阶段四：项目实战（4-8周）
+
+> **目标：** 完成 3 个高质量项目，作为面试的核心武器。每个项目都要能在 GitHub 上展示。
+
+#### 项目一：RAG 知识问答系统（2-3周）
+
+**项目描述：**
+基于企业文档构建一个智能知识问答系统，支持多格式文档解析、混合检索、多轮对话。
+
+**技术栈：**
+- 框架：LangChain + LangGraph
+- 向量数据库：Milvus（体现生产级考量）
+- Embedding：BGE-M3 或 GTE
+- Re-ranker：BGE-Reranker-v2
+- LLM：Qwen2.5-72B（API）或 DeepSeek-V3
+- 前端：Streamlit / Gradio
+- 后端：FastAPI
+
+**核心架构：**
+```
+用户查询 → 查询理解（改写/分类）
+         → 混合检索（向量+BM25+RRF融合）
+         → Re-ranking（交叉编码器重排序）
+         → 上下文组装（压缩+排序）
+         → LLM 生成（带引用标注）
+         → 后处理（幻觉检测+格式化）
+```
+
+**实现步骤：**
+
+1. **文档处理流水线**
+   - 支持 PDF、Word、Markdown、HTML 格式
+   - 智能分割：先按结构分割（标题/段落），再按语义分割
+   - 元数据提取：标题、来源、时间等
+   - 构建索引：向量索引 + BM25 倒排索引
+
+2. **检索系统**
+   - 稠密检索：Embedding + Milvus
+   - 稀疏检索：BM25
+   - 混合检索：RRF 融合
+   - Re-ranking：BGE-Reranker 精排
+   - 查询改写：Multi-Query + HyDE
+
+3. **生成系统**
+   - System Prompt 设计：角色、规则、格式
+   - 上下文管理：Lost-in-the-Middle 优化
+   - 引用溯源：标注信息来源
+   - 幻觉检测：NLI 模型验证
+
+4. **多轮对话**
+   - 对话历史管理
+   - 指代消解（"这个"指代什么）
+   - 查询带上上下文
+
+5. **评估和优化**
+   - RAGAs 自动评估
+   - 构建测试集（至少 100 个 Q&A pair）
+   - 各模块 A/B 测试
+
+**项目亮点（面试时重点讲）：**
+- 混合检索 + Re-ranking 使检索 Recall@5 提升 15%
+- 使用 semantic chunking 替代固定分割，答案准确率提升 10%
+- 幻觉检测模块将无据回答率从 12% 降到 3%
+- 支持增量更新，新文档 5 分钟内可检索
+
+---
+
+#### 项目二：多 Agent 协作系统（2-3周）
+
+**项目描述：**
+用 LangGraph 实现一个 Supervisor 模式的多 Agent 研究助手，能够自动进行课题研究、信息收集、报告撰写。
+
+**系统架构：**
+```
+用户需求 → Supervisor Agent（规划/调度）
+           ├→ Researcher Agent（搜索/检索信息）
+           ├→ Analyst Agent（分析/推理）
+           ├→ Writer Agent（撰写报告）
+           └→ Reviewer Agent（审核/修改）
+```
+
+**技术栈：**
+- 核心框架：LangGraph
+- LLM：GPT-4o / Claude 3.5 / Qwen-Max
+- 工具：Tavily Search（联网搜索）、Python REPL（数据分析）、文件读写
+- 持久化：SQLite + LangGraph Checkpointing
+- 部署：FastAPI + Redis
+
+**实现步骤：**
+
+1. **定义 Agent 角色**
+   ```python
+   # Supervisor Agent
+   # - 接收用户需求
+   # - 制定研究计划（子任务列表）
+   # - 分配任务给 Worker Agent
+   # - 检查完成状态
+   # - 汇总最终结果
+   
+   # Researcher Agent
+   # - 使用搜索工具收集信息
+   # - 使用 RAG 检索内部知识
+   # - 返回结构化的信息摘要
+   
+   # Analyst Agent
+   # - 对收集的信息进行分析
+   # - 使用 Python REPL 进行数据计算
+   # - 生成分析结论
+   
+   # Writer Agent
+   # - 将分析结果组织成报告
+   # - 遵循指定的报告格式
+   
+   # Reviewer Agent
+   # - 审核报告质量
+   # - 提出修改建议
+   # - 验证事实准确性
+   ```
+
+2. **LangGraph 实现**
+   - 定义 State（包含任务列表、每个 Agent 的输出、当前阶段）
+   - 定义条件边（Supervisor 根据状态决定下一步）
+   - 实现 Human-in-the-loop（关键决策点需要人工确认）
+   - 错误处理和重试机制
+
+3. **工具集成**
+   - 搜索工具：Tavily / Bing Search
+   - 代码执行：安全沙箱中的 Python REPL
+   - 文件操作：读写 Markdown/PDF
+   - 内部知识库：RAG 检索
+
+4. **状态持久化**
+   - LangGraph Checkpointing
+   - 支持中断恢复
+   - 对话历史保存
+
+**项目亮点：**
+- Supervisor 模式的任务分解和动态调度
+- Human-in-the-loop 实现关键决策审核
+- 支持中断恢复（Checkpointing）
+- Agent 间通信通过共享状态实现，避免信息丢失
+- 完整的错误处理和重试机制
+
+---
+
+#### 项目三：生产级 Agent 应用（2-3周）
+
+**项目描述：**
+构建一个生产级的个人助理 Agent，支持工具调用、长期记忆、安全防护，可以处理日常任务（日程管理、邮件处理、信息查询等）。
+
+**技术栈：**
+- 框架：LangGraph + FastAPI
+- LLM：多模型路由（简单任务用小模型，复杂任务用大模型）
+- 工具：日历 API、邮件 API、搜索、代码执行
+- 记忆：Redis（短期）+ PostgreSQL + pgvector（长期）
+- 安全：NeMo Guardrails
+- 监控：LangSmith + Prometheus
+- 部署：Docker + Kubernetes
+
+**核心功能模块：**
+
+1. **智能路由**
+   - 意图识别：分类用户请求类型
+   - 模型选择：根据任务复杂度选择合适的模型
+   - 工具选择：从工具库中选择合适的工具
+
+2. **工具调用系统**
+   - MCP 协议集成
+   - 工具注册和发现
+   - 参数校验和错误处理
+   - 调用链追踪
+
+3. **记忆系统**
+   - 短期记忆：当前对话上下文（Redis）
+   - 长期记忆：历史交互摘要（PostgreSQL + pgvector）
+   - 实体记忆：用户偏好、常用信息
+   - 记忆检索和衰减策略
+
+4. **安全防护**
+   - 输入检测：Prompt Injection 防护
+   - 输出过滤：PII 脱敏、有害内容过滤
+   - 权限控制：工具调用权限
+   - 审计日志：所有操作记录
+
+5. **可观测性**
+   - 请求链路追踪
+   - 延迟和成本监控
+   - 错误告警
+   - A/B 测试支持
+
+**项目亮点：**
+- 多模型路由，简单任务成本降低 70%
+- 完整的安全防护体系（输入检测+输出过滤+权限控制）
+- 长期记忆实现个性化服务
+- 完善的可观测性和监控
+- Docker 化部署，一键启动
+
+---
+
+### 阶段五：面试冲刺（2-4周）
+
+> **目标：** 系统梳理知识体系，大量刷题和模拟面试，确保能拿到 Offer。
+
+#### 5.1 高频题清单
+
+**基础理论题（必背）：**
+1. Transformer 的自注意力机制是什么？计算复杂度是多少？
+2. RoPE 的原理是什么？相比绝对位置编码有什么优势？
+3. MHA、MQA、GQA 的区别？各自的优缺点？
+4. KV Cache 的原理？如何优化 KV Cache 的显存占用？
+5. BPE 的训练和推理过程？
+6. Scaling Laws 的核心结论是什么？
+7. Pre-Norm vs Post-Norm 的区别？
+8. SwiGLU 激活函数是什么？为什么比 ReLU 好？
+9. Flash Attention 的原理？为什么能加速？
+10. LLM 的涌现能力（Emergent Abilities）如何解释？
+
+**RAG 相关题：**
+1. RAG 系统的核心流程是什么？每个环节有哪些优化点？
+2. 混合检索（向量+BM25）为什么通常效果更好？
+3. Re-ranking 的原理？Bi-Encoder vs Cross-Encoder 的区别？
+4. 如何评估 RAG 系统的效果？有哪些指标？
+5. Chunk 策略如何选择？chunk size 对效果的影响？
+6. Lost in the Middle 问题是什么？如何解决？
+7. 如何处理 RAG 中的幻觉问题？
+8. GraphRAG 适合什么场景？与向量 RAG 的区别？
+9. Embedding 模型如何微调？在什么场景下需要微调？
+10. 向量数据库的索引类型有哪些？HNSW vs IVF 的区别？
+
+**Agent 相关题：**
+1. AI Agent 的核心组件有哪些？
+2. ReAct 模式的原理？优缺点？
+3. 多 Agent 协作有哪些模式？各自的适用场景？
+4. Agent 的记忆系统如何设计？
+5. 如何防止 Agent 陷入无限循环？
+6. Function Calling 的实现原理？
+7. 如何评估 Agent 的效果？
+8. Agent 的安全性如何保证？Prompt Injection 如何防护？
+9. LangGraph 的核心概念是什么？和 LangChain Chains 的区别？
+10. MCP 协议是什么？解决了什么问题？
+
+**微调与对齐题：**
+1. LoRA 的原理是什么？为什么有效？
+2. QLoRA 如何降低显存？NF4 量化是什么？
+3. SFT 的数据如何构建？质量和数量哪个更重要？
+4. RLHF 的完整流程是什么？有哪些挑战？
+5. DPO 相比 RLHF 的优势是什么？
+6. GRPO 的创新点？DeepSeek-R1 的训练方法？
+7. Reward Hacking 是什么？如何缓解？
+8. 对齐税（Alignment Tax）如何理解？
+9. 什么情况下需要微调？什么情况下 RAG/Prompt 就够了？
+10. 微调的过拟合如何判断和缓解？
+
+**推理优化题：**
+1. vLLM 的 PagedAttention 原理？
+2. Continuous Batching vs Static Batching 的区别？
+3. 模型量化有哪些方法？GPTQ vs AWQ 的区别？
+4. 如何估算一个模型的显存占用？
+5. 张量并行和流水线并行的区别？
+
+#### 5.2 项目深挖准备
+
+**每个项目准备以下问题的答案：**
+
+1. **Why** — 为什么做这个项目？解决什么问题？
+2. **What** — 整体架构是什么？核心模块有哪些？
+3. **How** — 关键技术点是怎么实现的？
+4. **Metrics** — 效果怎么衡量？具体数据是多少？
+5. **Challenge** — 遇到的最大挑战是什么？怎么解决的？
+6. **Trade-off** — 做了哪些技术选型？为什么？
+7. **Improvement** — 如果重新做，有什么改进空间？
+8. **Scale** — 如何应对流量增长？系统瓶颈在哪？
+
+**示例：RAG 项目深挖**
+```
+Q: 你的 RAG 系统检索效果如何优化的？
+A: 主要做了三方面优化：
+   1. 检索策略：从纯向量检索改为混合检索（向量+BM25+RRF融合），Recall@5 提升 15%
+   2. 分割策略：从固定 512 token 分割改为语义分割（Semantic Chunking），减少了信息截断
+   3. 重排序：加入 BGE-Reranker-v2 精排，Precision@3 提升 20%
+   效果：整体答案准确率从 72% 提升到 89%（基于 200 个标注测试集）
+
+Q: 遇到的最大挑战是什么？
+A: 长文档中的表格数据检索效果差。解决方案：
+   1. 对表格进行结构化解析，转换为自然语言描述
+   2. 为表格数据单独建立 metadata 索引
+   3. 查询路由：识别到数值类查询时优先走结构化检索
+```
+
+#### 5.3 系统设计题准备
+
+**常见系统设计题：**
+
+1. **设计一个企业级 RAG 系统**
+   - 考点：文档处理流水线、检索优化、高可用、增量更新
+
+2. **设计一个多 Agent 客服系统**
+   - 考点：Agent 路由、知识库集成、人工转接、对话管理
+
+3. **设计一个代码生成 Agent**
+   - 考点：代码理解、测试生成、安全沙箱、迭代改进
+
+4. **设计一个 LLM 推理服务**
+   - 考点：高可用、负载均衡、模型更新、成本优化
+
+**系统设计答题框架：**
+```
+1. 需求澄清（5分钟）
+   - 功能需求、非功能需求
+   - 规模、延迟、可用性要求
+
+2. 高层架构（10分钟）
+   - 画出核心组件和数据流
+   - 说明技术选型理由
+
+3. 核心模块深入（15分钟）
+   - 重点模块的详细设计
+   - 关键算法和数据结构
+
+4. 扩展性和优化（5-10分钟）
+   - 性能优化
+   - 扩展方案
+   - 容灾设计
+```
+
+#### 5.4 模拟面试策略
+
+**自我模拟：**
+- 设定计时器，每道题限时回答
+- 录音回放，检查表达清晰度
+- 写下答案大纲，确保逻辑清晰
+
+**找人模拟：**
+- 找同方向的朋友互相面试
+- 付费 mock interview 服务
+- 牛客网模拟面试
+
+**面试节奏：**
+- 开场：30秒自我介绍（突出 AI Agent 经验）
+- 项目介绍：STAR 法则（Situation-Task-Action-Result）
+- 技术问题：先说结论，再展开细节
+- 不会的题：说出思路方向，展示思考过程
+
+---
+
+## 二、推荐学习资源
+
+### 必读论文（10篇）
+
+| # | 论文名称 | 年份 | 一句话总结 | 为什么重要 |
+|---|---------|------|-----------|-----------|
+| 1 | **Attention Is All You Need** | 2017 | 提出 Transformer 架构，用自注意力替代 RNN | 一切的起点，必须精读 |
+| 2 | **BERT: Pre-training of Deep Bidirectional Transformers** | 2018 | 双向预训练+微调范式 | 理解 Encoder 架构和预训练 |
+| 3 | **Language Models are Few-Shot Learners (GPT-3)** | 2020 | 展示大模型的 in-context learning 能力 | 理解 LLM 的涌现能力 |
+| 4 | **Training language models to follow instructions (InstructGPT)** | 2022 | RLHF 对齐方法的首次大规模应用 | RLHF 的开山之作 |
+| 5 | **LoRA: Low-Rank Adaptation of Large Language Models** | 2021 | 低秩分解实现参数高效微调 | 微调领域最重要的论文 |
+| 6 | **Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks** | 2020 | 首次提出 RAG 范式 | RAG 的奠基论文 |
+| 7 | **ReAct: Synergizing Reasoning and Acting in Language Models** | 2022 | 将推理和行动交替进行 | Agent 设计的基础范式 |
+| 8 | **Direct Preference Optimization (DPO)** | 2023 | 无需奖励模型的偏好优化 | 简化 RLHF 的里程碑 |
+| 9 | **DeepSeek-V3 / DeepSeek-R1 技术报告** | 2024-2025 | MoE + MLA + GRPO | 国产顶尖模型的技术细节 |
+| 10 | **Graph RAG: Unlocking LLM discovery on narrative private data** | 2024 | 知识图谱增强的 RAG | RAG 的重要进化方向 |
+
+### 必看视频/课程（10个）
+
+| # | 资源 | 平台 | 说明 |
+|---|------|------|------|
+| 1 | **Andrej Karpathy - Let's build GPT** | YouTube | 从零实现 GPT，2小时深度理解 Transformer |
+| 2 | **Andrej Karpathy - Let's build the GPT Tokenizer** | YouTube | 理解 BPE Tokenizer 的实现 |
+| 3 | **Andrej Karpathy - Intro to Large Language Models** | YouTube | LLM 全景概述，最佳入门 |
+| 4 | **3Blue1Brown - Neural Networks / Transformer 系列** | YouTube | 数学直觉可视化，必看 |
+| 5 | **吴恩达 - AI Agents in LangGraph** | DeepLearning.ai | Agent 和 LangGraph 实战 |
+| 6 | **吴恩达 - Building RAG Agents with LLMs** | DeepLearning.ai | RAG 从入门到进阶 |
+| 7 | **吴恩达 - ChatGPT Prompt Engineering** | DeepLearning.ai | Prompt Engineering 经典入门 |
+| 8 | **李沐 - Transformer / GPT / BERT 论文精读** | B站 | 中文论文精读，逐段讲解 |

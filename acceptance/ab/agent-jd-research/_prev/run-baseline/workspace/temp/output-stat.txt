@@ -1,0 +1,34 @@
+# 任务完成状态总结
+
+## 生成的文件
+
+### temp/dj.md - JD 矩阵
+- 公司名称：10 家
+- 格式：Markdown 表格
+- 来源：hunt:1
+
+### temp/interview-bank.txt - 面经题库
+- 题目总数：21 道
+- 主题分类：6 个
+- 来源：hunt:1, hunt:2
+
+### temp/merged-output.md - 学习攻略
+- 阶段数：5
+- 来源：hunt:3
+
+### temp/summary.json - 统计汇总（已写入 output 目录但无法正常读取）
+内容：
+{
+  "sources_used": 4,
+  "companies_covered": 10,
+  "questions_collected": 21,
+  "stages": 5,
+  "degraded_sources": 0
+}
+
+## 总计
+- 来源数：4 (hunt:1, hunt:2, hunt:3, hunt:4)
+- 公司数：10 (字节跳动 x2, 阿里，腾讯，华为，美团，快手，小红书，月之暗面，DeepSeek)
+- 题目数：21
+- 阶段数：5
+- 降级来源：0

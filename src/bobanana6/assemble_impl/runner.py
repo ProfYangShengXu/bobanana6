@@ -100,6 +100,7 @@ from ..sources import (
     form_for,
     forms_for,
 )
+from ..sources.research import ResearchNeedsAuthorization, ResearchUnavailable
 from .produce import artifact_from_disk, constraint_applies_to
 from .runtime import (
     BlockDeclined,
@@ -259,6 +260,9 @@ class Runner:
         #   在这里重置，是为了"同一个 Runner 被复用两次"时不会把上一轮的过程带进来
         #   （那会让下游检索到别的 run 的现场 —— 比没有更糟）。
         self.runtime.traces = TraceStore()
+        # ★ 同一条纪律：上一轮的取回失败不许带进这一轮（否则 SOURCES.md/拒绝理由
+        #   会引用上一轮研究失败的现场）。`fetch_failures` 之前漏了这一步。
+        self.fetch_failures = {}
         survey_note = f"{len(contract.sources)} declared sources"
         from ..core.model import InputSurvey
 
@@ -969,6 +973,29 @@ class Runner:
                 snapshots[source.ref] = self.fetcher.fetch(SourceRef(ref=source.ref, locator=source.locator))
             except SourceError as exc:
                 self.fetch_failures[source.ref] = str(exc)
+        research_refs = [source.ref for source in contract.sources if source.kind == SOURCE_KIND_RESEARCH]
+
+        def _has_material(ref: str) -> bool:
+            # ★ 只认"材料"（`<ref>:i`），不认清单本身 —— 否则任何只回清单的实现都过关
+            return any(name.startswith(ref + ":") for name in snapshots)
+
+        if research_refs and not any(_has_material(ref) for ref in research_refs):
+            # ★★ 红线：声明了"去找依据"，却一份都没拿到 ⇒ 停止，**不许块在缺少依据下照写**。
+            #   不是静默跳过（那会把"没找到"读成"没有东西可找"），也不是一份"共找到 0 份"的清单。
+            detail = "; ".join(
+                f"{ref}: {self.fetch_failures.get(ref, '<no reason recorded>')[:200]}"  # blame: fail-closed — 缺理由写明，不假装成功
+                for ref in research_refs
+            )
+            needs_authorization = any(
+                self.fetch_failures.get(ref, "").startswith("needs authorization:")  # blame: fail-closed — 缺理由按"没证据"归
+                for ref in research_refs
+            )
+            raise RunRefused(
+                "sources",
+                f"a declared research source produced no evidence -- {detail}; "
+                "refusing to let blocks write without basis",
+                ("research_needs_authorization" if needs_authorization else "research_no_evidence",),
+            )
         if not snapshots:
             # ★ The *why* travels with the refusal: "src-1 failed" sends the operator
             #   to the logs, "src-1: cannot read .../missing.csv" sends them to the file.
@@ -1041,9 +1068,28 @@ class Runner:
         question = ResearchQuestion(ref=source.ref, question=source.question, seeds=source.seeds)
         try:
             found = self.researcher.research(question, self.research_budget)
-        except Exception as exc:  # noqa: BLE001 — 取数失败是一种**已归因**的结果，不是一个崩点
-            self.fetch_failures[source.ref] = f"{type(exc).__name__}: {exc}"
+        except ResearchNeedsAuthorization as exc:
+            # ★ 不是失败，也不是"不许"：这条交回给有授权的一方（run 级具名拒，
+            #   不静默跳过 —— 跳过会让"没拿到授权"读成"查过了但没有"）。
+            self.fetch_failures[source.ref] = f"needs authorization: {exc}"
             return {}
+        except ResearchUnavailable as exc:
+            # ★★ 红线：拿不到依据 ⇒ 具名弃权。`_fetch_sources` 会据此拒绝整跑，
+            #   绝不退回一份"共找到 0 份"的清单让块照写。
+            self.fetch_failures[source.ref] = f"no evidence: {exc}"
+            return {}
+        except Exception as exc:  # noqa: BLE001 — 取数失败是一种**已归因**的结果，不是一个崩点
+            self.fetch_failures[source.ref] = f"researcher error: {type(exc).__name__}: {exc}"
+            return {}
+        # ★★ "只回了清单"不算有依据：清单的 ref 就是 `question.ref`，它不能自己证明
+        #   自己找到了东西。至少要有 **一份材料**（`<ref>:i`）才算研究成立。
+        materials = {snapshot.ref: snapshot for snapshot in found if snapshot.ref != source.ref}
+        if not materials:
+            self.fetch_failures[source.ref] = "no evidence: the researcher returned no material beyond the manifest"
+            return {}
+        # ★ 单条材料失败也要进 SOURCES.md（"4 个种子死 3 个"不能只藏在清单正文里）
+        for locator, reason in getattr(self.researcher, "last_errors", {}).items():
+            self.fetch_failures[f"{source.ref}:{locator}"] = str(reason)[:200]
         return {snapshot.ref: snapshot for snapshot in found}
 
     def _authorized(

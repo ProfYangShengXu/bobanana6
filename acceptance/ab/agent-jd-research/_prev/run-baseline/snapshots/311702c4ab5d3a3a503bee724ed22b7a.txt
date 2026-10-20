@@ -1,0 +1,193 @@
+LangChain Job Market 2026: 34% Share, $80k Salary Gap
+agentic / engineering / jobs Browse Jobs Hiring Guide Salaries What is Agentic AI Engineering? Resources
+General
+What is Agentic AI Engineering? Definition
+The discipline, the tech stack, and the evidence this role is its own thing and not a rebrand.
+Agentic AI Engineer Salaries 2026 Live salary data
+Real pay from active listings, broken down by country, framework, and tech stack. Updates daily.
+Agentic AI Engineer Hiring Guide Hiring guide
+9 interview questions with green and red flags. Works even if you are not a technical interviewer.
+Framework deep-dives
+AI Agent Framework Jobs 2026 Data report
+LangChain, LangGraph, LlamaIndex, CrewAI and AutoGen ranked by hiring demand across 1,135 listings. The market hires stacks, not winners.
+LangChain Job Market 2026 Data report
+What 534 agentic AI listings reveal about LangChain and LangGraph hiring: who, where, and for how much.
+CrewAI Job Market 2026 Data report
+62% of CrewAI jobs are in Europe. Salaries, stacks, and who's hiring from 534 agentic AI listings.
+For developers and agents
+MCP server Developer tool
+Connect Claude Desktop, Claude Code, ChatGPT, Cursor, or Windsurf. Two-minute setup, three tools: search_jobs, get_salaries, get_job.
+Public REST API Developer tool
+OpenAPI 3.1, no API key, 30 requests per 60 seconds. Query the same jobs and salary data that powers this site.
+See all resources →
+About
+Employers Post a Job
+Browse Jobs Hiring Guide Salaries What is Agentic AI Engineering? Resources
+General
+What is Agentic AI Engineering? Agentic AI Engineer Salaries 2026 Agentic AI Engineer Hiring Guide
+Framework deep-dives
+AI Agent Framework Jobs 2026 LangChain Job Market 2026 CrewAI Job Market 2026
+For developers and agents
+MCP server Public REST API
+Employers About Post a Job
+Home
+›
+LangChain Job Market 2026
+We analyzed 534 agentic AI engineering job listings. Here's what the market looks like for LangChain engineers.
+Framework rankings, salaries, tech stacks, and hiring trends from the largest agentic AI engineering job dataset we could find: ours.
+Maxim Buz April 19, 2026
+LangChain ecosystem jobs
+213
+39.9% of all listings
+LangChain market share
+34.3%
+1.5x the next framework
+LC median max salary (USD)
+$210,000
+vs $290k for framework-agnostic roles
+We run agentic-engineering-jobs.com , a job board for engineers who build AI agents, RAG pipelines, and LLM-powered products. As of April 2026, we have 534 published listings. We queried every one to answer a simple question: what does the job market look like for LangChain engineers?
+Short version: LangChain is the clear #1 agentic framework by hiring volume. Framework-tagged roles pay less than framework-agnostic ones. And LangGraph keeps growing into its own category.
+LangChain jobs pay less. Here's why that's not a LangChain problem.
+Jobs that specifically list LangChain pay about $80k less at the top end than jobs that don't mention any framework.
+Category Jobs w/ Salary Median Min Median Max
+Framework-agnostic roles 124 $193,000 $290,000
+LangGraph only 10 $140,000 $255,000
+LangChain only 27 $160,000 $210,000
+Both LC + LG 19 $150,000 $220,900
+USD salary data only. Sample sizes are small for LangGraph-only roles. See full breakdowns on our LangChain salary page and LangGraph salary page .
+Looks bad for LangChain at first glance. It isn't. The $290k top-end agnostic roles don't list frameworks because they're hiring architects who pick tools, not specialists who implement with one. LC-tagged listings are implementation roles: build the agent, wire the RAG pipeline, ship it. Different tier of work, different compensation.
+The staff and principal tier backs this up. 13 senior-plus LC ecosystem roles with disclosed USD pay average $264k at the top end, with a $275k median max. Close to the agnostic ceiling but not equal to it. The gap is mostly a seniority-distribution artifact, not a framework penalty.
+There's also a developer narrative worth acknowledging. LLMs have improved faster than frameworks could adapt. Native function calling and expanded context windows reduced the value of abstractions. As Harrison Chase himself noted in October 2025: “The same high-level interfaces in LangChain that made it easy to get started were now getting in the way when people tried to customize them to go to production.” Experienced ML engineers are migrating to raw SDK calls, DSPy, or LlamaIndex. The highest-paid roles reflect this: they want people who can pick the right tool, not people locked into one.
+LangChain is still #1 by a wide margin
+Despite the framework-fatigue conversation, the hiring data is consistent. LangChain appears in more listings than any other agentic framework, and every other framework trails it.
+Framework Jobs % of All Listings
+LangChain 183 34.3%
+LangGraph 118 22.1%
+LlamaIndex 74 13.9%
+CrewAI 58 10.9%
+AutoGen 42 7.9%
+n8n 18 3.4%
+Semantic Kernel 13 2.4%
+Pydantic AI 13 2.4%
+The combined LangChain ecosystem (LangChain + LangGraph) covers 213 listings. That's 39.9% of all agentic AI engineering positions. More than 1 in 3.
+Developers keep asking whether they still need LangChain. Employers keep answering yes.
+The mid-level opportunity
+LangChain jobs skew mid-level slightly more than the broader agentic market. 37.6% of LC ecosystem roles are mid-level, vs 32.4% for everything else.
+Seniority LangChain % Other Jobs %
+Junior 1.9% 0.3%
+Mid 37.6% 32.4%
+Senior 45.1% 49.5%
+Lead 3.8% 8.4%
+Staff+ 11.7% 9.3%
+LangChain made agent-building accessible enough that companies are comfortable hiring mid-level engineers for it. If you're a mid-level developer trying to break into agentic work, LangChain roles are a reasonable entry point. The broader agentic market skews senior.
+Part of the salary gap falls out of this. More mid-level roles equals a lower median. Not a framework penalty.
+LangGraph is becoming its own category
+LangGraph appears in 22.1% of all agentic listings. Clear #2, ahead of LlamaIndex and CrewAI. 74.6% of LG jobs still mention LangChain too. About a quarter (25.4%) list LG without LangChain, meaning some companies now treat it as a standalone requirement.
+Combination Jobs % of LangGraph Jobs
+LangGraph + LangChain 88 74.6%
+LangGraph without LangChain 30 25.4%
+The co-occurrence data points the same way. CrewAI appears in 37.3% of LangGraph listings vs 25.7% of LangChain listings. AutoGen shows the same pattern: 30.5% of LG jobs, 17.5% of LC jobs. Multi-agent orchestration roles cluster around LangGraph, not the broader LangChain surface.
+This aligns with LangChain's own trajectory. Deep Agents, launched March 2026, is built on LangGraph. It hit 9.9k GitHub stars within 5 hours. The $1.25B Series B, the NVIDIA partnership, Jensen Huang keynoting their conference: the investment thesis is LangGraph as the production orchestration layer, not LangChain as a convenience wrapper.
+The companion stack
+93.4% of LangChain ecosystem jobs require Python. Here's the rest of the stack:
+Technology Jobs % of LC Ecosystem
+Python 199 93.4%
+AWS 74 34.7%
+Docker 69 32.4%
+GCP 62 29.1%
+Kubernetes 58 27.2%
+Azure 52 24.4%
+Pinecone 40 18.8%
+FastAPI 37 17.4%
+TypeScript 37 17.4%
+MCP 36 16.9%
+A few things stand out. Kubernetes in 27.2% of jobs means LangChain isn't a prototype toolkit anymore. These are production infrastructure roles. TypeScript in 17.4% shows real demand for the LangChain.js ecosystem. And MCP (Model Context Protocol) at 16.9% is the fastest riser on the stack since our last count, matching the broader industry trend: Salesforce puts enterprise MCP adoption at 39%.
+LangSmith, LangChain's own observability tool, appears in 8.5% of ecosystem jobs. Adoption is early even on home turf. Pinecone leads the vector-database layer at 18.8%, with Weaviate close behind at 16.0%. vLLM shows up in 6.1% of LC listings, roughly double its rate across the broader agentic market.
+Who's hiring
+Top LangChain ecosystem employers are a mix of enterprise SaaS, consultancies, fintech, and frontier-model labs:
+Company Jobs Seniority Uses LangGraph
+Celonis 13 Mid, Senior No
+PointClickCare 4 Principal Yes (3/4)
+Accenture 3 Mid, Senior Yes
+SAP 3 Mid, Senior Yes (1/3)
+Capgemini 3 Mid, Lead Yes
+Mistral AI 3 Mid, Lead No
+TRM Labs 3 Mid, Staff No
+Machine Learning Reply 3 Junior, Mid Yes (1/3)
+EY 2 Mid, Senior Yes (1/2)
+Citi 2 Senior, Lead Yes (1/2)
+Cohere 2 Mid Yes
+Datadog 2 Staff Yes
+Apple 2 Mid, Senior Yes
+Enterprise SaaS leads, with Celonis alone accounting for 13 of the 213 LC ecosystem roles. Big Four consultancies (Accenture, EY, Capgemini) are in, and so are fintechs (TRM Labs, Citi) and frontier-model labs (Mistral AI, Cohere). Gartner predicts 40% of enterprise apps will feature task-specific AI agents by end of 2026. Our hiring data is the leading edge of that.
+Geography: EU accounts for 52.6% of LC ecosystem jobs, US for 35.2%. Hybrid is the most common arrangement at 48.4%, remote at 35.2%, onsite at 16.4%. Contract rate 4.7%. Visa sponsorship sits at 3.3%, still rare.
+What to do with this data
+If you're a developer: LangChain is still the highest-signal framework to know. But the salary data says don't stop there. The best-paid roles are framework-agnostic. Learn LangChain for employability, add LlamaIndex as a complement (it co-occurs in 38% of LangChain listings), and pick up at least one orchestration framework ( LangGraph or CrewAI ). The combo makes you versatile, not replaceable.
+If you're hiring: You're competing with Celonis, Accenture, SAP, and Mistral for this talent pool. Only 56 of 213 LC ecosystem listings (about 1 in 4) disclose USD compensation. Posting a range helps. Candidates filter on it.
+If you're in the EU: Just over half of LC jobs are here. That's your market. Visa sponsorship stays at 3.3%, so most hiring happens locally.
+We'll keep updating this data as the board grows. If you found this useful, share it with someone navigating the agentic job market. If you're hiring or looking, the listings are below.
+All data from 534 published listings on agentic-engineering-jobs.com as of April 19, 2026. Salary figures are USD unless noted. External sources: LangChain blog , Gartner , Salesforce/MuleSoft .
+Browse open positions
+LangChain jobs → LangGraph jobs → Salary data →
+Get weekly agentic AI engineering job market updates
+Company (leave this field empty)
+Email address
+Get alerts
+Agentic AI Engineering Jobs
+The job board for the agentic AI engineering era
+For Employers Feature a Listing Post a Job
+Jobs by Framework LangChain Jobs
+LangGraph Jobs
+LlamaIndex Jobs
+CrewAI Jobs
+AutoGen Jobs
+Semantic Kernel Jobs
+n8n Jobs
+Jobs by City San Francisco Jobs
+New York Jobs
+London Jobs
+Berlin Jobs
+Munich Jobs
+Amsterdam Jobs
+Paris Jobs
+Barcelona Jobs
+Jobs by Seniority Senior Jobs
+Mid-Level Jobs
+Staff Jobs
+Lead Jobs
+Junior Jobs
+Senior Remote Jobs
+Senior LangChain Jobs
+Mid-Level Remote Jobs
+Jobs by Country United States Jobs
+Germany Jobs
+United Kingdom Jobs
+Spain Jobs
+Canada Jobs
+Poland Jobs
+France Jobs
+India Jobs
+Salaries by Country United States
+Salaries by Framework LangChain
+LangGraph
+LlamaIndex
+CrewAI
+Salaries by Tech Stack Python
+TypeScript
+AWS
+React
+Docker
+PostgreSQL
+Kubernetes
+Go
+Resources Resources Agentic AI Engineer Salaries
+AI Agent Frameworks 2026
+LangChain Job Market 2026
+CrewAI Job Market 2026
+What is Agentic AI Engineering?
+Agentic AI Engineer Hiring Guide
+What is AI-Native Engineering?
+AI-Native Hiring Guide
+AI-Native Resources & Research
+© 2026 Agentic AI Engineering Jobs.
+RSS Feed JSON Feed llms.txt MCP Server API Reference · Affiliate Disclosure Legal Notice DE Privacy DE

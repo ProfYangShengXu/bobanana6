@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -78,8 +79,21 @@ class SnapshotStore:
             raise SourceError(f"source {ref!r}: captured_at {captured_at!r} is not an ISO-8601 timestamp") from exc
         path = self.path_for(body, suffix=suffix)
         self.root.mkdir(parents=True, exist_ok=True)
-        if not path.exists():  # same bytes -> one file, however often it is fetched
-            path.write_bytes(body)
+        # ★ 已存在也要**复核**：上一次崩溃可能留下一个同名截断文件，
+        #   "存在即跳过"会让它被永久复用（recall 只 is_file 看不出来）。
+        intact = False
+        if path.is_file():
+            try:
+                intact = path.name.startswith(hashlib.sha256(path.read_bytes()).hexdigest()[:32]) and (
+                    path.stat().st_size == len(body)
+                )
+            except OSError:
+                intact = False
+        if not intact:  # same bytes -> one file, however often it is fetched
+            # ★ 原子写：先写唯一临时文件再 replace，崩溃不会留下半份载体
+            staging = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+            staging.write_bytes(body)
+            staging.replace(path)
         return Snapshot(ref=ref, body_path=path, captured_at=captured_at, source_kind=source_kind)
 
     def read(self, snapshot: Snapshot) -> bytes:
@@ -154,6 +168,8 @@ class SourceLedger:
             body_path=body,
             captured_at=entry.get("captured_at", ""),  # blame: fail-closed — 台账自己写的，缺了也只是没时间戳，不影响"抓过了"这个事实
             source_kind=entry.get("source_kind", ""),  # blame: fail-closed — 同上，分层信息缺失不改变复用决定
+            backend=entry.get("backend", ""),  # blame: fail-closed — 缺后端名 = 没记录"走哪条路"，不假装成直连
+            degraded=entry.get("degraded", "") == "True",  # blame: fail-closed — 缺省按"没降级"复用（不虚报）
         )
 
     def remember(self, snapshot: Snapshot) -> None:
@@ -163,9 +179,12 @@ class SourceLedger:
             "body": snapshot.body_path.name,
             "captured_at": snapshot.captured_at,
             "source_kind": snapshot.source_kind,
+            "backend": snapshot.backend,
+            "degraded": str(snapshot.degraded),
         }
         self.root.mkdir(parents=True, exist_ok=True)
-        staging = self.path.with_name(self.path.name + ".tmp")
+        # ★ 唯一临时名：两个进程同写一本台账时，固定 `.tmp` 会互相踩（一方 replace 后另一方 FileNotFoundError）
+        staging = self.path.with_name(f"{self.path.name}.tmp.{os.getpid()}")
         staging.write_text(
             json.dumps(entries, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
         )

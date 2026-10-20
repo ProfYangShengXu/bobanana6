@@ -1786,6 +1786,11 @@ class LoopIOImpl(LoopIO):
         source_paths = self._source_paths()
         if source_paths and "source_files" not in constant_entries:
             brief["source_files"] = source_paths
+        # ★★ 研究类来源的取数元数据（走的后端 / 降级 / 信任层）。载体来源三项全空
+        #   ⇒ 这个键不出现，既有契约的 brief 逐字不变。
+        source_trust = self._source_trust()
+        if source_trust:
+            brief["source_trust"] = source_trust
         # ★★ 每张来源表的**形状**（行/列/列名/按列分组的组大小）—— 与块无关 ⇒ 通常进
         #   恒定前缀；这里只是"拿不到全 DAG 时"的兜底位置（两边**只会有一处**）。
         profiles = self._source_profile_entries()
@@ -2545,6 +2550,37 @@ class LoopIOImpl(LoopIO):
         own = tuple(sources.refs()) if sources is not None and hasattr(sources, "refs") else ()
         inherited = tuple(getattr(self.toolset, "inherited_sources", ()) or ())
         return own + inherited
+
+    def _source_trust(self) -> dict[str, dict[str, Any]]:
+        """★ 每条研究来源的**取数元数据**（走的后端 / 是否降级 / 信任层）。
+
+        为什么进 brief：`degraded` 的语义是"实际用的 ≠ 想要的，完整度可能打折"。
+        只把材料正文给块、不说它打折，块就会把降级内容当一手事实引用 —— 这正是
+        `web-use` 纪律②要防的那件事。载体来源（本地文件）三项全空 ⇒ **一个键都不加**
+        （既有契约的 brief 逐字不变）。
+
+        读者：`Snapshot.backend` / `Snapshot.degraded` / `Snapshot.source_kind`（由 `sources.fetched` 提供）。
+        """
+        sources = getattr(self.toolset, "sources", None)
+        fetched = getattr(sources, "fetched", None)
+        if not isinstance(fetched, Mapping):
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for ref in self.authorized_sources():
+            snapshot = fetched.get(ref)
+            if snapshot is None:
+                continue
+            entry: dict[str, Any] = {}
+            if snapshot.backend:
+                entry["backend"] = snapshot.backend
+            if snapshot.degraded:
+                entry["degraded"] = True
+            tier = str(snapshot.source_kind or "")
+            if tier.startswith("T"):
+                entry["trust_tier"] = tier
+            if entry:
+                out[ref] = entry
+        return out
 
     def _source_paths(self) -> dict[str, str]:
         """★ 每个授权来源**指向哪个载体** —— 名字旁边的地址。
