@@ -37,13 +37,14 @@ from ..agentloop.gate import (
 from ..core.checkers.base import CheckContext, CheckOutcome, fail, ok
 from ..core.kernel import admit
 from ..core.model import Candidate, Constraint, ConstraintBundle, Subtask, Verdict
+from .proc_text import text_mode_kwargs
 from .workspace import _kill_tree, _reap
 
 __all__ = [
-    "BlockJudge",
     "DEFAULT_EXECUTION_TIMEOUT_S",
     "EXECUTION_CHECK",
     "MAX_EXECUTION_TIMEOUT_S",
+    "BlockJudge",
     "RecordedEvidence",
     "command_unrunnable",
     "execution_check",
@@ -211,7 +212,7 @@ def _command_environment_problems(command: str, *, cwd: Path, timeout_s: float) 
                 #   导入不取决于工作区，别为了一个还没创建的目录把这条预检丢掉。
                 cwd=str(effective_cwd if cwd_known else cwd),
                 capture_output=True,
-                text=True,
+                **text_mode_kwargs(),
                 timeout=timeout_s,
                 check=False,
             )
@@ -265,7 +266,7 @@ def shell_command_check(
                 command,
                 shell=True,
                 capture_output=True,
-                text=True,
+                **text_mode_kwargs(),
                 timeout=timeout_s,
                 check=False,
             )
@@ -296,7 +297,7 @@ def _execution_timeout(raw: Any, *, default: float) -> float:
     if raw is None:
         return default
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        raise ValueError(f"spec.timeout_s must be a positive number of seconds, got {raw!r}")
+        raise TypeError(f"spec.timeout_s must be a positive number of seconds, got {raw!r}")
     value = float(raw)
     if value <= 0:
         raise ValueError(f"spec.timeout_s must be > 0, got {raw!r}")
@@ -333,7 +334,7 @@ def execution_check(
         marker = str(constraint.spec.get("expect_stdout", ""))  # blame: fail-closed — core refuses an empty marker before the runner is called
         try:
             seconds = _execution_timeout(constraint.spec.get("timeout_s"), default=timeout_s)
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             return fail(constraint, str(exc))
         try:
             process = subprocess.Popen(
@@ -342,7 +343,7 @@ def execution_check(
                 cwd=str(cwd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                **text_mode_kwargs(),
                 # Own process group so a timeout can collect the whole tree.
                 start_new_session=True,
             )
@@ -354,7 +355,7 @@ def execution_check(
             _kill_tree(process)
             _reap(process)  # never block on a grandchild that escaped the group
             partial = exc.stdout or ""
-            if isinstance(partial, bytes):  # text=True should give str; stay defensive
+            if isinstance(partial, bytes):  # explicit encoding is text mode; stay defensive
                 partial = partial.decode("utf-8", "replace")
             tail = "\n".join(partial.splitlines()[-5:]).strip()
             return fail(
@@ -366,8 +367,8 @@ def execution_check(
         stdout = stdout or ""
         stderr = stderr or ""
         facts = [
-            f"{command!r} exited {process.returncode} "
-            "(the command's own exit code; it is not acceptance evidence)"
+            (f"{command!r} exited {process.returncode} "
+            "(the command's own exit code; it is not acceptance evidence)")
         ]
         if marker in stdout:
             return ok(constraint, *facts, f"stdout contains the required marker {marker!r}")

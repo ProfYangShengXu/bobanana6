@@ -31,10 +31,14 @@ sys.path.insert(0, str(REPO))
 
 from bobanana6.core.model import Budget, Snapshot, Subtask
 from bobanana6.core.ports import _BASE_TOOL_SPECS
-from bobanana6.services import BoundWorkspace, ReadOutsideRegion, WriteOutsideRegion, build_registry
+from bobanana6.services import (
+    BoundWorkspace,
+    ReadOutsideRegion,
+    WriteOutsideRegion,
+    build_registry,
+)
 from bobanana6.services.registry import TOOL_NAMES
 from tests.test_services import _full_toolset
-
 
 # --------------------------------------------------------------------------- #
 # 调用脚手架

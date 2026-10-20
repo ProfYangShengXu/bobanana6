@@ -34,6 +34,7 @@ from itertools import count, pairwise
 from pathlib import Path
 from typing import Any
 
+from .proc_text import decode_process_output
 from .textops import DEFAULT_LIMIT, line_window
 
 __all__ = [
@@ -654,18 +655,36 @@ class BoundWorkspace:
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            # ★★ 缺口③：**不传** `text=True`。文本模式会在 `subprocess` 的读取线程里
+            #   按 locale 编码 + strict 解码，子进程一吐 GBK 字节（中文 Windows 的
+            #   `0xd5` 首字节）就抛 `UnicodeDecodeError`：POSIX 上整份输出丢，
+            #   Windows 上线程静默死掉、`communicate()` 回空/残缺而工具仍报 exit 0。
+            #   这里拿**字节**，解码只在下面一处收口（`proc_text.decode_process_output`
+            #   ：平台编码 → utf-8 → gbk，全失败才 `errors="replace"` 并留痕）。
             # ★ 自成进程组（组长 = 这个 shell）：超时才好 `killpg` 收整棵树（审计 #32）。
             start_new_session=True,
         )
         try:
-            stdout, stderr = process.communicate(timeout=seconds)
+            stdout_bytes, stderr_bytes = process.communicate(timeout=seconds)
         except subprocess.TimeoutExpired:
             _kill_tree(process)
             _reap(process)  # 收尸：不留僵尸，也**绝不**等逃逸出进程组的后代
             raise
-        stdout = stdout or ""
-        stderr = stderr or ""
+        stdout_decoded = decode_process_output(stdout_bytes)
+        stderr_decoded = decode_process_output(stderr_bytes)
+        stdout, stderr = stdout_decoded.text, stderr_decoded.text
+        # ★ "编解码失败要能在 trace 里看到"：替换只在真发生时出现（默认路径一个键不加，
+        #   既有 ASCII 读数逐字不变）。两个流各自计，合并成一份。
+        decode_detail: dict[str, Any] = {}
+        replacements = stdout_decoded.replacements + stderr_decoded.replacements
+        if replacements:
+            decode_detail = {
+                "decode_replacements": replacements,
+                "decode_note": (
+                    "the child's output was not valid in any known encoding; "
+                    f"{replacements} byte(s) were replaced with U+FFFD (see proc_text.decode_process_output)"
+                ),
+            }
         command_exit = process.returncode
         # ★ 断言在**换页之前**、对**全量** stdout+stderr 做：marker 落在被省略的中间段
         #   也算数（只对补丁后返回的预览做 substring 会假红）。
@@ -686,6 +705,7 @@ class BoundWorkspace:
                 if not verified:
                     answer["exit_code"] = 1
                     answer["reason"] = _expectation_reason(expect, command_exit, stdout, stderr)
+            answer.update(decode_detail)
             answer["stdout"] = stdout
             answer["stderr"] = stderr
             answer["truncated"] = False
@@ -708,6 +728,7 @@ class BoundWorkspace:
                 if not verified:
                     answer["exit_code"] = 1
                     answer["reason"] = _expectation_reason(expect, command_exit, stdout, stderr)
+            answer.update(decode_detail)
             answer["stdout"] = stdout
             answer["stderr"] = stderr
             answer["truncated"] = False
@@ -726,6 +747,7 @@ class BoundWorkspace:
                 answer["exit_code"] = 1
                 answer["reason"] = _expectation_reason(expect, command_exit, stdout, stderr)
         answer["truncated"] = True
+        answer.update(decode_detail)
         answer["full_output_path"] = where
         answer["full_output_lines"] = len(full.splitlines())
         answer["full_output_bytes"] = len(full.encode("utf-8"))

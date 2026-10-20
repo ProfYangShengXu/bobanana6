@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import itertools
 import json
 import threading
 import time
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from test_runner import ONE_SOURCE, TWO_SOURCES, _ByBlock, _csv, _runner, _tool_call
 
 from bobanana6.adapters import EchoToolResultClient
 from bobanana6.agentloop.concurrency import GateConfig, RuntimeGate
@@ -29,9 +31,6 @@ from bobanana6.assemble_impl import RunRefused
 from bobanana6.assemble_impl.runner import Runner
 from bobanana6.core.model import Subtask
 from bobanana6.services.traces import TraceStore
-
-from test_runner import ONE_SOURCE, TWO_SOURCES, _ByBlock, _csv, _runner, _tool_call
-
 
 # --------------------------------------------------------------------------- #
 # helpers
@@ -181,7 +180,7 @@ def _run_stub_scheduler(
 
 
 def _block(**overrides: Any) -> Subtask:
-    base = dict(id="T", goal="g", inputs=(), output="o.csv", contract_ref="t", axis="product", mode="write")
+    base = {"id": "T", "goal": "g", "inputs": (), "output": "o.csv", "contract_ref": "t", "axis": "product", "mode": "write"}
     base.update(overrides)
     return Subtask(**base)
 
@@ -222,7 +221,7 @@ def test_the_serial_control_does_not_overlap(tmp_path: Path) -> None:
     result, spans = _capture_spans(runner)  # parallel == 1（默认）
     assert result.ok is True, result.verdicts
     ordered = sorted(spans.items(), key=lambda item: item[1][0])
-    for (_first, (_a0, a1)), (_second, (b0, _b1)) in zip(ordered, ordered[1:]):
+    for (_first, (_a0, a1)), (_second, (b0, _b1)) in itertools.pairwise(ordered):
         assert b0 >= a1 - 1e-6, spans  # 串行：严格先后，无重叠
 
 

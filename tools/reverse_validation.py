@@ -722,12 +722,12 @@ MUTATIONS: tuple[Mutation, ...] = (
         "a success no longer clears the failure streak",
     ),
     Mutation(
-        "BB25-restart-cap-ignored",
+        "BB25-compaction-failure-aborts-the-run",
         "agentloop/loop.py",
-        "        if turn.state.restarts >= self._config.max_restarts:",
-        "        if False:",
-        "tests/test_agentloop_loop.py::test_a_restart_is_capped",
-        "restarts refund the turn budget forever",
+        "        except Exception as exc:  # noqa: BLE001 - a failed compaction degrades, it must not end the run",
+        "        except ZeroDivisionError as exc:  # noqa: BLE001 - a failed compaction degrades, it must not end the run",
+        "tests/test_agentloop_loop.py::test_a_failed_compaction_degrades_and_the_run_continues",
+        "a compaction failure propagates again and aborts the whole run",
     ),
     Mutation(
         "BB26-transcript-tail-not-closed",

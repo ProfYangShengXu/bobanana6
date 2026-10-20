@@ -185,6 +185,24 @@ def _timeout_from_env(source: Mapping[str, str]) -> float:
         raise LLMConfigError(f"BOBANANA6_TIMEOUT_S must be a number of seconds, got {raw!r}") from exc
 
 
+def _call_timeout_s(raw: Any, default: float) -> float:
+    """One call's timeout. ``None``/absent = the settings default (unchanged behaviour).
+
+    ★ A value that is not a positive number is refused **by name** instead of
+    silently falling back: a caller that thought it set a compression timeout
+    must not accidentally keep the 240s global one (that was the gap).
+    """
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"timeout_s must be a number of seconds, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"timeout_s must be > 0, got {value}")
+    return value
+
+
 def _positive_int_from_env(
     source: Mapping[str, str], name: str, default: int, *, minimum: int = 1  # blame: fail-closed — 省略即最小 1；0/负数一律拒
 ) -> int:
@@ -305,6 +323,11 @@ class OpenAICompatibleClient:
         #   ``model`` / ``messages``, so this can only tune the request.
         payload.update(self.settings.extra_body)
 
+        # ★★ 缺口②：**每次调用可以有自己的超时**。压缩是"可选的后台调用"，
+        # 不该沿用块内主调用的全局 timeout（失败一次就是一次 240s 的整块停顿）。
+        # 只认显式 `timeout_s`；不给 = 沿用 `settings.timeout_s`（既有调用方逐字不变）。
+        # 以前这个键会被 `**kw` 静默吞掉 —— 那正是"压缩无独立超时"的一半。
+        call_timeout_s = _call_timeout_s(kw.get("timeout_s"), self.settings.timeout_s)
         body = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.settings.api_key:
@@ -313,7 +336,7 @@ class OpenAICompatibleClient:
         # ★ 发前限速：滑动 60s 的 token 预算。等多久由 limiter 记账（可见读数）。
         #   每次尝试（含重试）都在 `_post` 里过这道门。
         estimate = self.limiter.estimate_for(max_tokens) if self.limiter is not None else 0
-        raw = self._post(opener, body, headers, estimate)
+        raw = self._post(opener, body, headers, estimate, timeout_s=call_timeout_s)
         response = self._parse(raw, names)
         if self.limiter is not None:
             usage = dict(response.usage or {})
@@ -325,14 +348,26 @@ class OpenAICompatibleClient:
             self.limiter.record(total, prompt_tokens=prompt, max_tokens=max_tokens)
         return response
 
-    def _post(self, opener: Any, body: bytes, headers: Mapping[str, str], estimate: int) -> bytes:
+    def _post(
+        self,
+        opener: Any,
+        body: bytes,
+        headers: Mapping[str, str],
+        estimate: int,
+        *,
+        timeout_s: float | None = None,
+    ) -> bytes:
         """POST the body; on a 429 wait out the window and retry the **same bytes**.
 
         ★★ 重试**不重新组装请求体**：每次都从同一份 `body` 字节重建 `Request`。
           这就是"冻结上下文"的可执行含义 —— 重开一次 prompt 就多烧一次额度，等于
           往火上浇油。有界：`max_rate_limit_retries`（默认 3），超了照旧把 429 交给
           `errors.py` 的既有路径。
+
+        ★ `timeout_s` 是**本次调用**的超时（缺口②：压缩有独立超时）；`None` =
+        沿用 `settings.timeout_s`（既有调用方逐字不变）。429 重试沿用同一个值。
         """
+        call_timeout_s = self.settings.timeout_s if timeout_s is None else timeout_s
         attempts = 0
         while True:
             if self.limiter is not None:
@@ -343,7 +378,7 @@ class OpenAICompatibleClient:
                 self.settings.endpoint, data=body, headers=dict(headers), method="POST"
             )
             try:
-                response = opener.open(request, timeout=self.settings.timeout_s)
+                response = opener.open(request, timeout=call_timeout_s)
             except urllib.error.HTTPError as exc:
                 if (
                     exc.code == 429

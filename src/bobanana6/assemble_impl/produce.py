@@ -62,8 +62,10 @@ from ..core.model import (
 from ..core.ports import LLMClient, ToolSet
 from ..services.checks import SHELL_COMMAND_CHECK, BlockJudge
 from ..services.registry import ToolRegistry
+from ..services.textops import DEFAULT_LIMIT, MAX_LIMIT
 from ..services.traces import TraceStore
 from ..services.workspace import (
+    MAX_WRITE_BYTES,
     WorkspaceLedger,
     WriteBudget,
     WriteBudgetExceeded,
@@ -417,6 +419,46 @@ class CandidateFormatError(ValueError):
         return dict(self._feedback)
 
 
+def _actual_scope_note(toolset: ToolSet, name: str) -> str:
+    """★ 缺口①：把**本块真实的**边界写进工具描述，而不是等模型撞出错误再学。
+
+    三条边界过去只在违规时以异常形式出现（`TextArgumentError: limit must be
+    <= 2000`、`WriteOutsideRegion`、`ReadOutsideRegion`）。对不会「读错误再修正」
+    的弱模型，那等于每条边界都要用一次失败去发现。
+
+    只改**描述文本**：`textops._integer` / `workspace.may_write` 一行不动
+    （见本任务 `§2 硬约束` 与 `锁 2`）。数值上限的唯一权威仍然是
+    `services/textops.py::MAX_LIMIT`；这里只引用，不复制第二份判定。
+
+    实际值从当前 `ToolSet` 现算：`sources.*` 取本块授权 ref，`files.*` 取本块
+    `write_region` / `frozen_paths`（与 brief 的 `write_region` 同源）。拿不到就
+    只写数值上限，不编一个不存在的范围。
+    """
+    notes: list[str] = []
+    if name in ("sources.read", "sources.grep", "files.read"):
+        notes.append(f"limit 最多 {MAX_LIMIT} 行、默认 {DEFAULT_LIMIT} 行（超了会被具名拒）")
+    if name == "sources.grep":
+        notes.append(f"context 最多 {MAX_LIMIT} 行")
+    if name.startswith("sources."):
+        refs = getattr(getattr(toolset, "sources", None), "refs", None)
+        names = list(refs()) if callable(refs) else []
+        if names:
+            notes.append(f"ref 只能取本块授权的这几个：{names!r}")
+    if name in ("files.write", "files.patch"):
+        notes.append(f"单次写入最多 {MAX_WRITE_BYTES} 字节（更大的产物分段写）")
+    if name.startswith("files."):
+        workspace = getattr(toolset, "workspace", None)
+        region = [str(item) for item in (getattr(workspace, "write_region", ()) or ()) if str(item)]
+        frozen = [str(item) for item in (getattr(workspace, "frozen_paths", ()) or ()) if str(item)]
+        if region:
+            notes.append(f"path 的本块实际写区 you_may_write={region!r}")
+        else:
+            notes.append("本块没有文件写区（you_may_write 为空）")
+        if frozen:
+            notes.append(f"never_write={frozen!r}（一个字节都不许改）")
+    return ("★ 本块实际范围：" + "；".join(notes)) if notes else ""
+
+
 def tool_schemas(toolset: ToolSet) -> list[dict[str, Any]]:
     """The advertised tool surface, in the shape a model expects.
 
@@ -443,12 +485,17 @@ def tool_schemas(toolset: ToolSet) -> list[dict[str, Any]]:
         properties = {
             name: dict(overrides.get(name) or {"type": "string"}) for name in (*spec.params, *spec.optional)
         }
+        # ★ 缺口①：描述 = 决策信息 + **本块实际边界**。判定逻辑不在这里，也不新增。
+        description = spec.description or spec.returns or spec.name
+        scope = _actual_scope_note(toolset, spec.name)
+        if scope:
+            description = f"{description}\n{scope}"
         schemas.append(
             {
                 "type": "function",
                 "function": {
                     "name": spec.name,
-                    "description": spec.description or spec.returns or spec.name,
+                    "description": description,
                     "parameters": {
                         "type": "object",
                         "properties": properties,

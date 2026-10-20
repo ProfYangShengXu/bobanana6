@@ -233,6 +233,7 @@ def llm_summarizer(
     max_tokens: int = 400,
     gate: RuntimeGate | None = None,
     route: str = "default",
+    timeout_s: float | None = None,
 ) -> Callable[[tuple[Mapping[str, Any], ...]], str]:
     """Summarize dropped messages with one model call (the compress callback).
 
@@ -244,6 +245,10 @@ def llm_summarizer(
     ``RuntimeGate`` as the loop's call. Over budget it returns an empty summary
     rather than sending the request: dropping without summarizing is honest,
     "throttled but sent anyway" is not.
+
+    ★★ 缺口②：``timeout_s`` 是压缩**自己的**超时（缺省 ``None`` = 沿用 client 的
+    全局 timeout，既有调用方逐字不变）。压缩是可选调用，等它超时不该按主调用的
+    240s 计；装配点（``cli.py``）按 env 给一个更短、独立的值。
     """
 
     def summarize(dropped: tuple[Mapping[str, Any], ...]) -> str:
@@ -252,6 +257,9 @@ def llm_summarizer(
             return ""
         try:
             body = "\n".join(f"[{message.get('role')}] {str(message.get('content'))[:2000]}" for message in dropped)
+            # ★ 只在显式给了独立超时才把键传下去：不给 = `complete` 完全走旧路径
+            #   （不发这个键，宽/严端点的既有读数都不变）。
+            kwargs = {"timeout_s": timeout_s} if timeout_s is not None else {}
             response = client.complete(
                 [
                     {
@@ -262,6 +270,7 @@ def llm_summarizer(
                 ],
                 [],
                 max_tokens,
+                **kwargs,
             )
             return response.text.strip()
         finally:

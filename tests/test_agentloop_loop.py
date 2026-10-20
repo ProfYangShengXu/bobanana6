@@ -114,13 +114,86 @@ def test_budget_exhausted_without_a_withheld_candidate_reports_none() -> None:
     assert result.exit_reason in {"budget_exhausted", "text_finish"}
 
 
-def test_a_restart_is_capped() -> None:
+def test_compaction_does_not_consume_the_restart_budget() -> None:
+    """★ 缺口②：压缩不是 restart —— 第 3 次压缩不再把块判死（T-01 的 restart_cap 形状）。
+
+    旧行为：`restarts` 只有压缩在加，`max_restarts=2` ⇒ 第 3 次压缩 `restart_cap`，
+    且判据在 summarize **之后**（先付费再判死）。现在成功压缩只记 `compactions`，
+    `restart_cap` 不再由压缩触发。
+    """
     policy = CompressionPolicy(context_length=40, max_tokens=2, pct=0.5, keep_recent=0)
     messages = tuple({"role": "user", "content": f"m{i} " + "x" * 200} for i in range(20))
     io = FakeIO([TurnProposal(text="done")])
-    loop = WorkerLoop(io, config=LoopConfig(max_turns=5, max_restarts=1), compression=policy)
+    loop = WorkerLoop(io, config=LoopConfig(max_turns=5, max_restarts=0), compression=policy)
     result = loop.run(task_id="t", worker_id="w", messages=messages)
-    assert result.exit_reason == "restart_cap"
+    assert result.exit_reason != "restart_cap"
+    assert result.compactions >= 1
+    assert result.restarts == 0
+
+
+def test_a_failed_compaction_degrades_and_the_run_continues() -> None:
+    """★ 缺口②反证（确定性版）：summarize 抛超时 ⇒ 整跑继续 + 具名事件 + evidence。"""
+    from bobanana6.adapters import LLMConnectionError
+    from bobanana6.agentloop.events import EventLog
+
+    log = EventLog()
+    policy = CompressionPolicy(context_length=40, max_tokens=2, pct=0.5, keep_recent=0)
+    messages = tuple({"role": "user", "content": f"m{i} " + "x" * 200} for i in range(20))
+
+    def timed_out(_dropped: tuple[dict, ...]) -> str:
+        raise LLMConnectionError("model call did not reach the server: The read operation timed out")
+
+    io = FakeIO([TurnProposal(text="done")])
+    loop = WorkerLoop(
+        io,
+        config=LoopConfig(max_turns=3, max_compaction_failures=2),
+        compression=policy,
+        summarize=timed_out,
+        log=log,
+    )
+    # 不抛异常 = 压缩失败没有穿出 loop.run（改前这里会 raise LLMConnectionError）
+    result = loop.run(task_id="t", worker_id="w", messages=messages)
+
+    failures = log.of_kind("compaction_failed")
+    assert failures, "压缩失败没有落具名事件（不许静默）"
+    first = failures[0]
+    assert first.ok is False
+    assert first.detail["error"] == "LLMConnectionError"
+    assert first.detail["retried_immediately"] is False
+    assert first.detail["kept_messages"] == len(messages)
+    assert result.compaction_failures == len(failures)
+    assert any(item.startswith("compaction_failed: LLMConnectionError:") for item in result.errors)
+    # 上下文保持原样继续：失败后模型照常被调用
+    assert io.states, "压缩失败后整跑没有继续（produce 一次都没跑）"
+
+
+def test_compaction_stops_being_attempted_after_the_failure_cap() -> None:
+    """★ 不无限重试：付满 `max_compaction_failures` 次超时后，本块不再尝试压缩。"""
+    from bobanana6.adapters import LLMConnectionError
+    from bobanana6.agentloop.events import EventLog
+
+    log = EventLog()
+    policy = CompressionPolicy(context_length=40, max_tokens=2, pct=0.5, keep_recent=0)
+    messages = tuple({"role": "user", "content": f"m{i} " + "x" * 200} for i in range(20))
+    attempts: list[int] = []
+
+    def timed_out(_dropped: tuple[dict, ...]) -> str:
+        attempts.append(1)
+        raise LLMConnectionError("timed out")
+
+    # 用工具轮让循环跨 turn（text_finish 会直接 RETURN，只够 1 次 _prepare）
+    calls = tuple(ToolCall(call_id=f"c{index}", name="probe") for index in range(4))
+    loop = WorkerLoop(
+        FakeIO([TurnProposal(tool_calls=calls) for _ in range(4)]),
+        config=LoopConfig(max_turns=6, max_compaction_failures=2),
+        compression=policy,
+        summarize=timed_out,
+        log=log,
+    )
+    result = loop.run(task_id="t", worker_id="w", messages=messages)
+    assert len(attempts) == 2
+    assert result.compaction_failures == 2
+    assert log.of_kind("compaction_failed")[-1].detail["compaction_disabled"] is True
 
 
 def test_a_failed_turn_is_persisted_before_the_retry() -> None:

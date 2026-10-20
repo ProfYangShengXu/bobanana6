@@ -8,7 +8,7 @@ from bobanana6.agentloop.events import EVENT_KINDS, Event, EventLog, EventSink
 
 
 def test_the_event_kinds() -> None:
-    """★ `#65` 补了 `produce_failure`；本轮补 `text_tool_call`（工具调用写成了正文文本）。"""
+    """★ `#65` 补了 `produce_failure`；`#49` 补 `text_tool_call`；本块补 `compaction_failed`。"""
     assert EVENT_KINDS == (
         "call",
         "retry",
@@ -19,6 +19,7 @@ def test_the_event_kinds() -> None:
         "attribute",
         "produce_failure",
         "text_tool_call",
+        "compaction_failed",
     )
 
 

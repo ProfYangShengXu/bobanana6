@@ -344,6 +344,11 @@ class LoopConfig:
     #: 可注入的睡眠（与 `adapters/rate_limit.py` 同一写法）：测试用假 sleeper，不真睡。
     sleeper: Callable[[float], None] = field(default=time.sleep, compare=False, repr=False)  # blame: whitelist — 只为可测注入（假 sleeper），生产用默认
     taint_threshold: int = 3  # blame: fail-closed — 省略即 3 次就 taint
+    #: ★★ 缺口②：压缩失败**不是**整跑失败。压缩是一次可选模型调用，它失败后
+    #: 上下文保持原样继续（具名事件 `compaction_failed`）；这里只限制"同一个块
+    #: 最多为它付几次超时"——没有这个闸，每次失败都要按压缩超时白等一轮。
+    #: 2 = 允许隔轮再试一次（一次抖动可能过去），第 3 次起不再尝试。
+    max_compaction_failures: int = 2  # blame: fail-closed — 省略即只付 2 次超时，之后关闭压缩而不是无限重试
     #: False when the block cannot be independently verified (the split is wrong).
     block_verifiable: bool = True  # blame: fail-open — 省略即假定"这个块可判定"；真正的不可判定块会被当成"验证失败"而不是"没法验"
 
@@ -352,6 +357,8 @@ class LoopConfig:
             raise ValueError("LoopConfig.max_turns must be >= 1")
         if self.max_restarts < 0 or self.max_retries < 0 or self.max_reflections < 0:
             raise ValueError("loop caps must be >= 0")
+        if self.max_compaction_failures < 0:
+            raise ValueError("LoopConfig.max_compaction_failures must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -440,6 +447,12 @@ class LoopIO(Protocol):
 class LoopState:
     turn: int = 0
     restarts: int = 0
+    #: ★★ 缺口②：压缩**不是** restart。成功压缩只记这个计数（可观测），不再消耗
+    #: `restarts` 预算 —— 旧行为让"第 3 次压缩"直接 `restart_cap` 判死（T-01 的形状），
+    #: 而压缩本身只是把上下文变小。
+    compactions: int = 0  # blame: whitelist — 只是"上下文缩小过几次"的读数，不参与判定
+    #: 连续/累计的压缩失败次数。达到 `max_compaction_failures` 后本块不再尝试压缩。
+    compaction_failures: int = 0  # blame: fail-closed — 0 = 还没失败过，第一次失败正常记；上限在 LoopConfig 上
     attempts: int = 0
     reflections: int = 0
     calls: int = 0
@@ -467,6 +480,10 @@ class LoopResult:
     turns: int
     restarts: int
     errors: tuple[str, ...]
+    #: ★★ 缺口②：成功压缩次数与失败次数，分开报 —— 只看 `restarts` 会把
+    #: "上下文变小"与"恢复重启"混成一件事。
+    compactions: int = 0  # blame: whitelist — 结果里的读数，供报告说明"压过几次"
+    compaction_failures: int = 0  # blame: whitelist — 结果里的读数，供报告说明"失败过几次"
     declined: bool = False
     #: The transcript the run ended on, after the closing row was applied. Exposed
     #: so the loop's own sequence/tail invariants can be asserted from outside
@@ -602,6 +619,8 @@ class WorkerLoop:
                     turns=state.turn,
                     restarts=state.restarts,
                     errors=state.errors,
+                    compactions=state.compactions,
+                    compaction_failures=state.compaction_failures,
                     declined=turn.declined,
                     messages=state.messages,
                 )
@@ -615,6 +634,8 @@ class WorkerLoop:
                     turns=state.turn,
                     restarts=state.restarts,
                     errors=state.errors,
+                    compactions=state.compactions,
+                    compaction_failures=state.compaction_failures,
                     messages=state.messages,
                 )
             # CONTINUE -> another turn.
@@ -637,6 +658,8 @@ class WorkerLoop:
             turns=state.turn,
             restarts=state.restarts,
             errors=state.errors,
+            compactions=state.compactions,
+            compaction_failures=state.compaction_failures,
             messages=state.messages,
         )
 
@@ -647,13 +670,63 @@ class WorkerLoop:
         self._guardrails.reset_for_turn()
         if self._compression is None or not turn.state.messages:
             return PhaseResult.fallthrough()
-        result = compact(turn.state.messages, self._compression, summarize=self._summarize)
+        # ★★ 缺口②：压缩是**一次可选模型调用**，失败不许穿出整跑。
+        #
+        # 旧形态：`compact` 里的 `summarize` 超时 → `LLMConnectionError` 一路穿出
+        # `run_phase_chain`（`loop.py:149-158` 没有 try）→ `WorkerLoop.run` → CLI
+        # 只打一行 failed，剩下的块再也不跑。实测链：`loop.py:650` → `compress.py:381`
+        # → `runtime.py:255` → `openai_compat.py:365`。
+        #
+        # 现在的语义：**压缩失败 ⇒ 上下文保持原样继续**。这不是"吞异常"：每次失败都
+        # 落一条具名事件 `compaction_failed`（带异常类型/文本/已保留消息数/是否还会再试），
+        # 并把 `compaction_failed: ...` 追加进 `state.errors` —— 块失败时它会随
+        # `BlockRuntimeError.errors` 进 evidence，成功时也在 EventLog 里。
+        #
+        # **不立即重试**：同一个请求体 + 同一个独立超时，刚超时的调用大概率再超时一次，
+        # 只会把块唯一的前进机会再白等一个超时。允许**隔轮**再试一次
+        # （`max_compaction_failures=2`：一次抖动也许下一轮就好了），第 3 次起关掉压缩。
+        if turn.state.compaction_failures >= self._config.max_compaction_failures:
+            return PhaseResult.fallthrough()
+        try:
+            result = compact(turn.state.messages, self._compression, summarize=self._summarize)
+        except Exception as exc:  # noqa: BLE001 - a failed compaction degrades, it must not end the run
+            failures = turn.state.compaction_failures + 1
+            disabled = failures >= self._config.max_compaction_failures
+            turn.state = replace(
+                turn.state,
+                compaction_failures=failures,
+                errors=(*turn.state.errors, f"compaction_failed: {type(exc).__name__}: {exc}"),
+            )
+            if self._log is not None:
+                self._log.record(
+                    kind="compaction_failed",
+                    task_id=turn.task_id,
+                    worker_id=turn.worker_id,
+                    at=float(turn.state.turn),
+                    ok=False,
+                    detail={
+                        "error": type(exc).__name__,
+                        "message": str(exc)[:500],
+                        # "上下文保持原样继续"的证据：这条事件与下面这句一起回答
+                        # "失败后它在用哪份上下文"。
+                        "kept_messages": len(turn.state.messages),
+                        "retried_immediately": False,
+                        "attempt": failures,
+                        "compaction_disabled": disabled,
+                    },
+                )
+            return PhaseResult.fallthrough()
         if not (result.committed and result.dropped):
             return PhaseResult.fallthrough()
-        if turn.state.restarts >= self._config.max_restarts:
-            turn.exit_reason = "restart_cap"
-            return PhaseResult.stop("restart_cap")
-        turn.state = replace(turn.state, messages=result.messages, restarts=turn.state.restarts + 1)
+        # ★ 缺口②：成功压缩只记 `compactions`，**不再**消耗 `restarts`。
+        #   压缩把上下文变小，不是"恢复重启"；旧行为让第 3 次压缩直接
+        #   `restart_cap` 判死（T-01 的形状），与失败处理是同一类错误。
+        turn.state = replace(
+            turn.state,
+            messages=result.messages,
+            compactions=turn.state.compactions + 1,
+            compaction_failures=0,
+        )
         return PhaseResult.cont("compressed")
 
     def _assemble(self, turn: _Turn) -> PhaseResult:

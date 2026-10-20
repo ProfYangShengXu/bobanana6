@@ -90,6 +90,36 @@ def build_client(args: argparse.Namespace, env: Mapping[str, str]) -> LLMClient:
     return OpenAICompatibleClient(settings, limiter=limiter)
 
 
+#: 压缩（一次可选的摘要模型调用）的默认独立超时。
+#: ★★ 缺口②：它**不继承**块内主调用的全局 timeout（默认 60、实测跑批设到 240）。
+#: 压缩失败只降级、不该让整块停 240s；120s 足够一次 400-token 的摘要。
+DEFAULT_COMPRESS_TIMEOUT_S = 120.0
+
+
+def compression_timeout_s(env: Mapping[str, str], client: LLMClient) -> float:
+    """The compression call's own timeout (``BOBANANA6_COMPRESS_TIMEOUT_S`` overrides).
+
+    Default: ``min(block timeout, 120s)``. With the default 60s block timeout the
+    two coincide; the 20-block run set ``BOBANANA6_TIMEOUT_S=240`` and then the
+    compression call gets a genuinely independent, shorter budget. A malformed
+    override is refused by name, never silently ignored.
+    """
+    raw = env.get("BOBANANA6_COMPRESS_TIMEOUT_S")
+    if raw is not None and str(raw).strip() != "":
+        try:
+            value = float(str(raw).strip())
+        except ValueError as exc:
+            raise LLMConfigError(
+                f"BOBANANA6_COMPRESS_TIMEOUT_S must be a number of seconds, got {raw!r}"
+            ) from exc
+        if value <= 0:
+            raise LLMConfigError(f"BOBANANA6_COMPRESS_TIMEOUT_S must be > 0, got {value}")
+        return value
+    settings = getattr(client, "settings", None)
+    block_timeout = float(getattr(settings, "timeout_s", DEFAULT_COMPRESS_TIMEOUT_S))
+    return min(block_timeout, DEFAULT_COMPRESS_TIMEOUT_S)
+
+
 def build_ontology_port(args: argparse.Namespace, client: LLMClient) -> OntologyPort:
     if args.ontology:
         # Read it once here so a bad file fails before any worker exists.
@@ -190,7 +220,18 @@ def build_app(args: argparse.Namespace, *, env: Mapping[str, str] | None = None)
             compression=compression,
             # ★ The compression callback is a model call, and it is injected here --
             #   the loop never reaches a model on its own.
-            summarize=llm_summarizer(client, gate=own_gate),
+            summarize=llm_summarizer(
+                client,
+                gate=own_gate,
+                # ★ 缺口②：压缩是独立调用，超时也独立（不继承主调用的全局 timeout）。
+                #   只对真端点传这个键：离线替身 / 测试注入的假 client 的 `complete`
+                #   可能不接 `**kw`，传了会把"离线路径"变成 TypeError。
+                timeout_s=(
+                    compression_timeout_s(source_env, client)
+                    if isinstance(client, OpenAICompatibleClient)
+                    else None
+                ),
+            ),
             gate=own_gate,
         )
 

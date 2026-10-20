@@ -32,7 +32,12 @@ from bobanana6.core.model import DeliverableSpec
 from bobanana6.decompose import BlockBudget, Decomposer, split_by_source, strategies
 from bobanana6.services.workspace import BoundWorkspace
 from tests.fakes import toolset_for
-from tests.test_decompose import _band_lines, ontology, research_contract, research_recon
+from tests.test_decompose import (
+    _band_lines,
+    ontology,
+    research_contract,
+    research_recon,
+)
 
 #: 一道最小题：两个来源 ⇒ `split_by_source` 会切出读块 + 合并（写）块，
 #: 合并块正是 `_merge_blocks` 造出来的那一个。

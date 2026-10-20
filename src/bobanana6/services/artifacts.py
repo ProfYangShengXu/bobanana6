@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .proc_text import text_mode_kwargs
+
 __all__ = [
     "ARCHIVE_BUDGET_BYTES",
     "INLINE_MAX_BYTES",
@@ -133,7 +135,7 @@ class ArtifactStore:
             [self._git, "-c", "safe.directory=*", *args],
             cwd=str(self.tree),
             capture_output=True,
-            text=True,
+            **text_mode_kwargs(),
             check=check,
         )
 
